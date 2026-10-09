@@ -27,6 +27,9 @@ def explain_error(raw: str) -> str:
     low = raw.lower()
     if "403" in low or "4401" in low or "unauthorized" in low:
         return "сервер відхилив підключення — перевір токен (BONSAI_TOKEN)"
+    if "200 (ok)" in low or "status code: 200" in low:
+        return ("за цією адресою не агент, а звичайний веб-сервер (схоже, llama-server) — "
+                "вкажи порт агента: ws://ХОСТ:8765/ws і перевір, що запущено bonsai serve")
     if "404" in low:
         return "невірна адреса — має закінчуватися на /ws"
     if "refused" in low:
