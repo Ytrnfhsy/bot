@@ -1,0 +1,273 @@
+"""Командний рядок: bonsai serve | chat | ask | health."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+from typing import Any
+
+from .config import Config
+
+DIM, BOLD, CYAN, YELLOW, GREEN, RED, RESET = (
+    ("\033[2m", "\033[1m", "\033[36m", "\033[33m", "\033[32m", "\033[31m", "\033[0m")
+    if sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+    else ("",) * 7
+)
+
+_current: asyncio.Task | None = None  # задача, яку скасовує Ctrl+C
+
+HELP = f"""{DIM}Команди: /reset — очистити розмову, /exit — вийти, Ctrl+C — скасувати поточну задачу{RESET}"""
+
+
+class Printer:
+    """Друкує події агента в термінал."""
+
+    def __init__(self, show_thinking: bool) -> None:
+        self.show_thinking = show_thinking
+        self.streaming = False
+        self.in_thinking = False
+
+    def _end_stream(self) -> None:
+        if self.streaming or self.in_thinking:
+            print(RESET)
+            self.streaming = self.in_thinking = False
+
+    def __call__(self, ev: dict[str, Any]) -> None:
+        t = ev.get("type")
+        if t == "thinking" and self.show_thinking:
+            if not self.in_thinking:
+                print(f"{DIM}💭 ", end="")
+                self.in_thinking = True
+            print(ev["text"], end="", flush=True)
+        elif t == "token":
+            if self.in_thinking:
+                self._end_stream()
+            if not self.streaming:
+                print(f"{CYAN}", end="")
+                self.streaming = True
+            print(ev["text"], end="", flush=True)
+        elif t == "tool_call":
+            self._end_stream()
+            args = json.dumps(ev.get("args", {}), ensure_ascii=False)
+            print(f"{YELLOW}🔧 {ev['name']}{RESET} {DIM}{args[:200]}{RESET}")
+        elif t == "tool_result":
+            mark = f"{GREEN}✓" if ev.get("ok") else f"{RED}✗"
+            preview = " ".join(str(ev.get("preview", "")).split())[:160]
+            print(f"   {mark}{RESET} {DIM}{preview}{RESET}")
+        elif t == "final":
+            was_streaming = self.streaming
+            self._end_stream()
+            if not was_streaming:
+                print(f"\n{BOLD}🤖{RESET} {ev['text']}\n")
+            else:
+                print()
+        elif t == "error":
+            self._end_stream()
+            print(f"{RED}Помилка: {ev['message']}{RESET}")
+        elif t == "hello":
+            print(f"{DIM}Підключено. Модель: {ev.get('model')}{RESET}")
+
+
+def ask_yes_no(summary: str) -> bool:
+    print(f"\n{YELLOW}⚠ Агент хоче виконати дію:{RESET}\n{summary}\n")
+    try:
+        answer = input(f"{BOLD}Дозволити? [y/N]: {RESET}").strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes", "т", "так", "д"}
+
+
+# ---------------- локальний режим ----------------
+async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -> None:
+    from .agent import Agent
+
+    agent = Agent(cfg)
+    printer = Printer(args.thinking)
+
+    async def emit(ev: dict[str, Any]) -> None:
+        printer(ev)
+
+    async def confirm(tool: str, summary: str, _args: dict[str, Any]) -> bool:
+        printer._end_stream()
+        return await asyncio.to_thread(ask_yes_no, summary)
+
+    health = await agent.llm.health()
+    if not health.get("ok"):
+        print(f"{RED}LLM-сервер недоступний: {health.get('error')}{RESET}")
+    elif not health.get("model_present"):
+        print(f"{YELLOW}Модель {cfg.model} не знайдено. Виконай: ollama pull {cfg.model}{RESET}")
+
+    try:
+        if once:
+            await agent.run(args.session, once, emit, confirm)
+            return
+        print(f"{BOLD}Bonsai Agent{RESET} — модель {cfg.model}, workspace {cfg.workspace}\n{HELP}")
+        while True:
+            try:
+                text = (await asyncio.to_thread(input, f"{BOLD}ти › {RESET}")).strip()
+            except EOFError:
+                break
+            if not text:
+                continue
+            if text in {"/exit", "/quit"}:
+                break
+            if text == "/reset":
+                agent.reset_session(args.session)
+                print(f"{DIM}Розмову очищено{RESET}")
+                continue
+            global _current
+            _current = asyncio.create_task(agent.run(args.session, text, emit, confirm))
+            try:
+                await asyncio.wait({_current})
+                _current.result()
+            except asyncio.CancelledError:
+                print(f"\n{DIM}⏹ скасовано{RESET}")
+            except Exception as e:  # noqa: BLE001
+                print(f"{RED}Помилка: {e}{RESET}")
+    finally:
+        await agent.close()
+
+
+# ---------------- віддалений режим ----------------
+async def _remote_chat(url: str, token: str, args: argparse.Namespace, once: str | None) -> None:
+    import websockets
+
+    if token:
+        url += ("&" if "?" in url else "?") + f"token={token}"
+    printer = Printer(args.thinking)
+    async with websockets.connect(url, max_size=None, ping_interval=20) as ws:
+        done = asyncio.Event()
+
+        async def reader() -> None:
+            async for raw in ws:
+                ev = json.loads(raw)
+                if ev.get("type") == "confirm_request":
+                    printer._end_stream()
+                    ok = await asyncio.to_thread(ask_yes_no, ev["summary"])
+                    await ws.send(json.dumps({"type": "confirm_response", "id": ev["id"], "approved": ok}))
+                    continue
+                printer(ev)
+                if ev.get("type") == "status" and ev.get("state") == "idle":
+                    done.set()
+                elif ev.get("type") == "error":
+                    done.set()
+
+        reader_task = asyncio.create_task(reader())
+        try:
+            async def run_one(text: str) -> None:
+                global _current
+                done.clear()
+                await ws.send(json.dumps({"type": "task", "text": text, "session_id": args.session}))
+                _current = asyncio.create_task(done.wait())
+                await asyncio.wait({_current})
+                if _current.cancelled():
+                    await ws.send(json.dumps({"type": "cancel"}))
+                    raise asyncio.CancelledError
+
+            if once:
+                await run_one(once)
+                return
+            print(f"{BOLD}Bonsai Agent{RESET} (віддалено: {url.split('?')[0]})\n{HELP}")
+            while True:
+                try:
+                    text = (await asyncio.to_thread(input, f"{BOLD}ти › {RESET}")).strip()
+                except EOFError:
+                    break
+                if not text:
+                    continue
+                if text in {"/exit", "/quit"}:
+                    break
+                if text == "/reset":
+                    await ws.send(json.dumps({"type": "reset", "session_id": args.session}))
+                    continue
+                try:
+                    await run_one(text)
+                except asyncio.CancelledError:
+                    print(f"\n{DIM}⏹ скасовано{RESET}")
+        finally:
+            reader_task.cancel()
+
+
+def _run_interruptible(coro_factory) -> None:
+    """Запускає REPL так, щоб Ctrl+C скасовував поточну задачу, а не весь процес."""
+    loop = asyncio.new_event_loop()
+    main = loop.create_task(coro_factory())
+
+    import signal
+
+    def on_sigint() -> None:
+        if _current is not None and not _current.done():
+            _current.cancel()
+        else:
+            print()
+            main.cancel()
+
+    try:
+        loop.add_signal_handler(signal.SIGINT, on_sigint)
+    except (NotImplementedError, RuntimeError):
+        pass
+    try:
+        loop.run_until_complete(main)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        loop.close()
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="bonsai", description="Bonsai Agent — агент на базі Ollama")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_serve = sub.add_parser("serve", help="запустити сервер (WebSocket/HTTP)")
+    p_serve.add_argument("--host")
+    p_serve.add_argument("--port", type=int)
+
+    for name, help_ in (("chat", "інтерактивний чат (REPL)"), ("ask", "одноразова задача")):
+        p = sub.add_parser(name, help=help_)
+        if name == "ask":
+            p.add_argument("text", nargs="+", help="текст задачі")
+        p.add_argument("--server", help="ws://host:8765/ws — підключитися до віддаленого сервера")
+        p.add_argument("--token", default=os.environ.get("BONSAI_TOKEN", ""))
+        p.add_argument("--session", default="cli")
+        p.add_argument("--thinking", action="store_true", help="показувати міркування моделі")
+        p.add_argument("--yes", action="store_true", help="авто-підтвердження небезпечних дій (лише локально)")
+
+    sub.add_parser("health", help="перевірити Ollama і модель")
+
+    args = parser.parse_args(argv)
+    cfg = Config.from_env()
+
+    if args.cmd == "serve":
+        if args.host:
+            cfg.host = args.host
+        if args.port:
+            cfg.port = args.port
+        from .server import run_server
+
+        run_server(cfg)
+    elif args.cmd in {"chat", "ask"}:
+        once = " ".join(args.text) if args.cmd == "ask" else None
+        if args.yes:
+            cfg.auto_approve = True
+        if args.server:
+            _run_interruptible(lambda: _remote_chat(args.server, args.token, args, once))
+        else:
+            _run_interruptible(lambda: _local_chat(cfg, args, once))
+    elif args.cmd == "health":
+        from .llm import create_llm
+
+        async def check() -> None:
+            c = create_llm(cfg)
+            print(json.dumps(await c.health(), ensure_ascii=False, indent=2))
+            await c.close()
+
+        asyncio.run(check())
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

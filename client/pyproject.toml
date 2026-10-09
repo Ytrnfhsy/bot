@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bonsai-robot"
+version = "0.1.0"
+description = "Десктоп-оболонка Bonsai Agent: анімований робот поверх усіх вікон"
+requires-python = ">=3.10"
+dependencies = ["PySide6>=6.6"]
+
+[project.gui-scripts]
+bonsai-robot = "bonsai_robot.app:main"
+
+[tool.setuptools.packages.find]
+include = ["bonsai_robot*"]

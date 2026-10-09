@@ -1,0 +1,13 @@
+[Unit]
+Description=Bonsai Agent server (Ollama + tools)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=@ENV_FILE@
+ExecStart=@VENV@/bin/bonsai serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
