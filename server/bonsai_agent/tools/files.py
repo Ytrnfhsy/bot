@@ -55,8 +55,9 @@ async def read_file(ctx: ToolContext, path: str, start_line: int = 1, max_lines:
     else:
         data = p.read_bytes()
         if b"\x00" in data[:4096]:
-            kind = "зображення" if suffix in _IMAGE_EXT else "бінарний файл"
-            raise ToolError(f"Це {kind} — модель працює лише з текстом, прочитати його неможливо")
+            if suffix in _IMAGE_EXT:
+                raise ToolError("Це зображення — щоб його побачити, використай view_image")
+            raise ToolError("Це бінарний файл — прочитати його як текст неможливо")
         text = data.decode("utf-8", "replace")
     lines = text.splitlines()
     start = max(1, int(start_line))

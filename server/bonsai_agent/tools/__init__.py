@@ -19,6 +19,8 @@ class ToolError(Exception):
 class ToolContext:
     config: Config
     storage: Storage
+    vision_ok: bool = True  # чи може поточна модель бачити зображення
+    pending_images: list[str] = field(default_factory=list)  # картинки, які view_image просить показати моделі
 
     def resolve_path(self, path: str) -> Path:
         """Шлях відносно робочої директорії; заборона виходу за її межі (якщо не дозволено)."""
@@ -107,10 +109,10 @@ class ToolRegistry:
 
 
 def build_registry() -> ToolRegistry:
-    from . import files, memory, python_exec, shell, system, web
+    from . import files, memory, python_exec, shell, system, vision, web
 
     reg = ToolRegistry()
-    for module in (web, files, shell, python_exec, memory, system):
+    for module in (web, files, shell, python_exec, memory, system, vision):
         for tool in module.TOOLS:
             reg.register(tool)
     return reg

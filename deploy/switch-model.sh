@@ -14,6 +14,8 @@ QWEN_COMPOSE="${HERE}/qwen36/docker-compose.yml"
 BONSAI_COMPOSE="${BONSAI_COMPOSE:-${REPO}/docker-compose.yml}"
 QWEN_FILE="${MODEL_FILE:-Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}"
 QWEN_URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/${QWEN_FILE}"
+MMPROJ_FILE="${MMPROJ_FILE:-mmproj-Qwen3.6-35B-A3B-F16.gguf}"
+MMPROJ_URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf"
 ENV_FILE="${HOME}/.config/bonsai-agent.env"
 LLM_URL="http://127.0.0.1:8085"
 
@@ -60,6 +62,12 @@ case "${1:-}" in
       echo "  curl -L -C - -o '${model_path}' '${QWEN_URL}'"
       exit 1
     fi
+    if [[ -f "${MODEL_DIR:-${REPO}}/${MMPROJ_FILE}" ]]; then
+      echo "👁 Зір: увімкнено (${MMPROJ_FILE})"
+    else
+      echo "ℹ Зір вимкнено — для розуміння зображень завантаж (~0.9 ГБ) і перезапусти цей скрипт:"
+      echo "  curl -L -C - -o '${MODEL_DIR:-${REPO}}/${MMPROJ_FILE}' '${MMPROJ_URL}'"
+    fi
     mem_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
     if (( mem_gb < 30 )); then
       echo "⚠ У системі ${mem_gb} ГБ RAM — для Qwen3.6-35B-A3B бажано ≥32 ГБ (частина ваг живе в RAM)."
@@ -70,6 +78,7 @@ case "${1:-}" in
     MODEL_DIR="${MODEL_DIR:-${REPO}}" docker compose -f "${QWEN_COMPOSE}" up -d
     wait_ready "${QWEN_COMPOSE}"
     set_key BONSAI_MODEL qwen3.6-35b-a3b
+    set_key BONSAI_VISION auto
     set_key BONSAI_MAX_HISTORY_CHARS 120000
     set_key BONSAI_REQUEST_TIMEOUT 1200
     restart_agent
@@ -82,6 +91,7 @@ case "${1:-}" in
     docker compose -f "${BONSAI_COMPOSE}" up -d
     wait_ready "${BONSAI_COMPOSE}"
     set_key BONSAI_MODEL bonsai-2-27b
+    set_key BONSAI_VISION off
     set_key BONSAI_MAX_HISTORY_CHARS 150000
     set_key BONSAI_REQUEST_TIMEOUT 900
     restart_agent

@@ -65,11 +65,11 @@ def test_ws_upload(cfg):
         ws.receive_json()  # hello
         payload = base64.b64encode("привіт, файл".encode()).decode()
         for _ in range(2):  # двічі те саме ім'я — другий не перезаписує перший
-            ws.send_json({"type": "upload", "id": "u1", "name": "../../нотатки.txt", "data": payload})
+            ws.send_json({"type": "upload", "id": "u1", "name": "../../мої нотатки.txt", "data": payload})
         first, second = ws.receive_json(), ws.receive_json()
         ws.send_json({"type": "upload", "id": "u2", "name": "bad.bin", "data": "@@@не base64"})
         bad = ws.receive_json()
-    assert first["type"] == "uploaded" and first["path"] == "uploads/нотатки.txt"
-    assert second["path"] == "uploads/нотатки-2.txt"
-    assert (cfg.workspace / "uploads/нотатки.txt").read_text() == "привіт, файл"
+    assert first["type"] == "uploaded" and first["path"] == "uploads/мої_нотатки.txt"
+    assert second["path"] == "uploads/мої_нотатки-2.txt"
+    assert (cfg.workspace / "uploads/мої_нотатки.txt").read_text() == "привіт, файл"
     assert bad["type"] == "upload_error"

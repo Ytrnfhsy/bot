@@ -65,6 +65,9 @@ class Config:
     max_steps: int = 25
     max_history_chars: int = 48000
     max_tool_output_chars: int = 12000
+    # Зір (розуміння зображень): auto — пробувати, і вимкнути, якщо модель не вміє; on; off
+    vision: str = "auto"
+    max_images_in_context: int = 3  # скільки останніх повідомлень із картинками передавати моделі
     language: str = "українська"
     agent_name: str = "Kru"
     persona: str = ""  # характер/стиль, напр. "привітний, з легким гумором"
@@ -106,6 +109,8 @@ class Config:
             max_steps=int(_env("MAX_STEPS", str(d.max_steps))),
             max_history_chars=int(_env("MAX_HISTORY_CHARS", str(d.max_history_chars))),
             max_tool_output_chars=int(_env("MAX_TOOL_OUTPUT_CHARS", str(d.max_tool_output_chars))),
+            vision=_env("VISION", d.vision).lower(),
+            max_images_in_context=int(_env("MAX_IMAGES_IN_CONTEXT", str(d.max_images_in_context))),
             language=_env("LANGUAGE", d.language),
             agent_name=_env("AGENT_NAME", d.agent_name),
             persona=_env("PERSONA", d.persona),

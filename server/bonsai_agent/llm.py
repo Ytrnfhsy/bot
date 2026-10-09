@@ -19,6 +19,27 @@ class ToolsNotSupported(OllamaError):
     """Модель/шаблон не підтримує нативні tool calls."""
 
 
+class VisionNotSupported(OllamaError):
+    """Модель (або сервер без mmproj) не приймає зображення."""
+
+
+def _is_vision_error(text: str) -> bool:
+    t = text.lower()
+    return ("image" in t or "mmproj" in t or "multimodal" in t or "vision" in t) and (
+        "not support" in t or "unsupported" in t or "mmproj" in t or "does not" in t
+    )
+
+
+def _ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """images: [{"mime", "data"}] → формат Ollama (список base64-рядків)."""
+    out = []
+    for m in messages:
+        if m.get("images"):
+            m = {**m, "images": [img["data"] for img in m["images"]]}
+        out.append(m)
+    return out
+
+
 @dataclass
 class ChatResult:
     content: str = ""
@@ -78,7 +99,7 @@ class OllamaClient:
     ) -> ChatResult:
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": _ollama_messages(messages),
             "stream": True,
             "options": self.options,
             "keep_alive": self.keep_alive,
@@ -99,6 +120,8 @@ class OllamaClient:
                 return await self._stream(payload, on_token)
             if tools and "tools" in text and "support" in text:
                 raise ToolsNotSupported(str(e)) from e
+            if any(m.get("images") for m in messages) and _is_vision_error(text):
+                raise VisionNotSupported(str(e)) from e
             raise
 
     async def _stream(self, payload: dict[str, Any], on_token: TokenCallback | None) -> ChatResult:
@@ -203,6 +226,11 @@ class OpenAICompatClient:
             elif role == "tool":
                 cid = pending_ids.pop(0) if pending_ids else f"call_{counter}"
                 out.append({"role": "tool", "tool_call_id": cid, "content": m.get("content", "")})
+            elif m.get("images"):
+                parts: list[dict[str, Any]] = [{"type": "text", "text": m.get("content", "")}]
+                for img in m["images"]:
+                    parts.append({"type": "image_url", "image_url": {"url": f"data:{img['mime']};base64,{img['data']}"}})
+                out.append({"role": role, "content": parts})
             else:
                 out.append({"role": role, "content": m.get("content", "")})
         return out
@@ -228,6 +256,8 @@ class OpenAICompatClient:
             async with self._client.stream("POST", f"{self.base_url}/chat/completions", json=payload) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode("utf-8", "replace")
+                    if any(m.get("images") for m in messages) and _is_vision_error(body):
+                        raise VisionNotSupported(body)
                     if tools and "tool" in body.lower():
                         raise ToolsNotSupported(body)
                     raise OllamaError(f"LLM HTTP {resp.status_code}: {body[:500]}")

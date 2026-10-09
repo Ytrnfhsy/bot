@@ -30,6 +30,7 @@ import asyncio
 import base64
 import binascii
 import hmac
+import re
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -164,6 +165,7 @@ class Connection:
         """Файл, перетягнутий на робота: зберігаємо у workspace/uploads/ (без перезапису наявних)."""
         uid, raw_name = msg.get("id"), str(msg.get("name") or "file")
         name = Path(raw_name.replace("\\", "/")).name.lstrip(".")[:120] or "file"
+        name = re.sub(r"\s+", "_", name)  # без пробілів: шлях однозначно розпізнається в тексті задачі
         try:
             data = base64.b64decode(str(msg.get("data", "")), validate=True)
         except (binascii.Error, ValueError):

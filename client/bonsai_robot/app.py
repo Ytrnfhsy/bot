@@ -28,6 +28,9 @@ from .robot import RobotWidget
 from .settings import Settings
 
 
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+
+
 class SettingsDialog(QDialog):
     def __init__(self, s: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -86,6 +89,7 @@ class RobotWindow(QWidget):
         self.robot.drag_finished.connect(self.save_position)
         self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
         self.panel.task_submitted.connect(self.send_task)
+        self.panel.image_pasted.connect(lambda path: self.upload_files([path]))
         self.panel.cancel_requested.connect(self.cancel_task)
         self.panel.reset_requested.connect(self.reset_chat)
         self.panel.confirm_answered.connect(self.answer_confirm)
@@ -307,10 +311,14 @@ class RobotWindow(QWidget):
         self.panel.add_entry("tool", f"📎 {ev['path']} ({size_kb} КБ) — на сервері")
         if not self._pending_uploads:  # усе передано — підказуємо задачу
             files = ", ".join(self._uploaded)
-            noun = "файл" if len(self._uploaded) == 1 else "файли"
+            images = all(p.lower().endswith(IMAGE_EXT) for p in self._uploaded)
+            single = len(self._uploaded) == 1
             self._uploaded = []
             self.panel.set_activity("")
-            self.panel.prefill(f"Проаналізуй {noun} {files}: ")
+            if images:  # агент сам прикріпить картинки, згадані в задачі
+                self.panel.prefill(f"Що на зображенні {files}? " if single else f"Подивись на зображення {files}: ")
+            else:
+                self.panel.prefill(f"Проаналізуй {'файл' if single else 'файли'} {files}: ")
             if not self.busy:
                 self.robot.set_state("happy", 1.2)
 

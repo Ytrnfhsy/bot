@@ -42,6 +42,24 @@ QLabel#confirmText { color: #3A2A10; font-family: monospace; font-size: 11px; }
 
 class InputBox(QPlainTextEdit):
     submitted = Signal()
+    image_pasted = Signal(str)  # шлях до тимчасового PNG
+
+    def canInsertFromMimeData(self, source) -> bool:
+        return source.hasImage() or super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source) -> None:
+        """Ctrl+V зі скриншотом (або перетягнута в поле картинка) → тимчасовий PNG для завантаження."""
+        if source.hasImage() and not source.hasText():
+            import tempfile
+            import time
+
+            image = source.imageData()
+            if image is not None and not image.isNull():
+                path = f"{tempfile.gettempdir()}/скриншот-{time.strftime('%H%M%S')}.png"
+                if image.save(path, "PNG"):
+                    self.image_pasted.emit(path)
+                    return
+        super().insertFromMimeData(source)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
@@ -52,6 +70,7 @@ class InputBox(QPlainTextEdit):
 
 class ChatPanel(QWidget):
     task_submitted = Signal(str)
+    image_pasted = Signal(str)
     cancel_requested = Signal()
     reset_requested = Signal()
     confirm_answered = Signal(str, bool)
@@ -131,9 +150,10 @@ class ChatPanel(QWidget):
         # ввід
         row = QHBoxLayout()
         self.input = InputBox()
-        self.input.setPlaceholderText("Що зробити? (Enter — надіслати, Shift+Enter — новий рядок)")
+        self.input.setPlaceholderText("Що зробити? (Enter — надіслати, Shift+Enter — новий рядок, Ctrl+V — вставити скриншот)")
         self.input.setFixedHeight(64)
         self.input.submitted.connect(self._submit)
+        self.input.image_pasted.connect(self.image_pasted)
         row.addWidget(self.input, 1)
         btns = QVBoxLayout()
         self.btn_send = QPushButton("➤", objectName="send", toolTip="Надіслати")

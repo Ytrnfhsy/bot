@@ -11,7 +11,8 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from .config import Config
-from .llm import ChatResult, OllamaClient, OpenAICompatClient, ToolsNotSupported, create_llm
+from .images import find_image_refs, is_image, load_image
+from .llm import ChatResult, OllamaClient, OpenAICompatClient, ToolsNotSupported, VisionNotSupported, create_llm
 from .storage import Storage
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
@@ -39,7 +40,7 @@ How to work:
 - run_shell, run_python, write_file and edit_file require user approval; if the user declines, adapt or ask.
 - Save durable useful facts about the user or their projects with `remember`; use `recall` when past context may help.
 - When the task is done, reply with the final answer only (no tool call). Be concise but complete; use Markdown.
-{memories}"""
+{vision}{memories}"""
 
 JSON_PROTOCOL = """
 TOOLS — you call them by replying with ONLY a JSON object in a ```json code block, exactly one per message:
@@ -142,6 +143,8 @@ class Agent:
         self.registry = registry or build_registry()
         self.ctx = ToolContext(config=config, storage=self.storage)
         self.native_tools = config.tool_mode != "json"
+        self.vision = config.vision != "off"
+        self.ctx.vision_ok = self.vision
         self._session_locks: dict[str, asyncio.Lock] = {}
 
     # ---------------- побудова контексту ----------------
@@ -159,6 +162,13 @@ class Agent:
             language=self.config.language,
             name=self.config.agent_name,
             persona=f"\nPersonality: {self.config.persona}" if self.config.persona else "",
+            vision=(
+                "- You can SEE images: pictures attached to messages are shown to you directly. To look at an image "
+                "file in the workspace (e.g. uploads/screenshot.png), call view_image. Describe what you actually see; "
+                "read text from screenshots carefully.\n"
+                if self.vision
+                else ""
+            ),
             memories=memories,
         )
         if not self.native_tools:
@@ -167,7 +177,11 @@ class Agent:
 
     def _trim_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         def size(m: dict[str, Any]) -> int:
-            return len(m.get("content") or "") + len(json.dumps(m.get("tool_calls", ""), ensure_ascii=False))
+            return (
+                len(m.get("content") or "")
+                + len(json.dumps(m.get("tool_calls", ""), ensure_ascii=False))
+                + 2500 * len(m.get("images") or [])  # картинка ≈ кілька тисяч токенів
+            )
 
         msgs = list(history)
         total = sum(size(m) for m in msgs)
@@ -195,7 +209,52 @@ class Agent:
                     )
                 out.append({"role": "assistant", "content": "\n".join(p for p in parts if p)})
             else:
-                out.append({"role": m["role"], "content": m.get("content", "")})
+                msg = {"role": m["role"], "content": m.get("content", "")}
+                if m.get("images"):
+                    msg["images"] = m["images"]
+                out.append(msg)
+        return out
+
+    # ---------------- зображення ----------------
+    def _image_refs(self, text: str) -> list[str]:
+        """Наявні в workspace картинки, згадані в тексті задачі."""
+        found = []
+        for ref in find_image_refs(text):
+            try:
+                p = self.ctx.resolve_path(ref)
+            except ToolError:
+                continue
+            if p.is_file() and is_image(p):
+                found.append(ref)
+        return found
+
+    def _attach_images(self, msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Шляхи → base64 для останніх N повідомлень з картинками; решта — текстова примітка."""
+        budget = self.config.max_images_in_context if self.vision else 0
+        out: list[dict[str, Any]] = []
+        for m in reversed(msgs):
+            paths = m.get("images")
+            if not paths:
+                out.append(m)
+                continue
+            m = {k: v for k, v in m.items() if k != "images"}
+            loaded, notes = [], []
+            for path in paths:
+                if budget <= 0:
+                    why = "переглядалось раніше" if self.vision else "поточна модель не бачить зображень"
+                    notes.append(f"[зображення {path} — {why}]")
+                    continue
+                try:
+                    loaded.append(load_image(self.ctx.resolve_path(path)))
+                except Exception as e:  # noqa: BLE001
+                    notes.append(f"[зображення {path} не вдалося відкрити: {e}]")
+            if loaded:
+                budget -= 1
+                m["images"] = loaded
+            if notes:
+                m["content"] = (m.get("content") or "") + "\n" + "\n".join(notes)
+            out.append(m)
+        out.reverse()
         return out
 
     # ---------------- основний цикл ----------------
@@ -209,7 +268,10 @@ class Agent:
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             history = self.storage.load_session(session_id)
-            history.append({"role": "user", "content": user_text})
+            user_msg: dict[str, Any] = {"role": "user", "content": user_text}
+            if self.vision and (refs := self._image_refs(user_text)):
+                user_msg["images"] = refs
+            history.append(user_msg)
             try:
                 answer = await self._loop(history, user_text, emit, confirm)
             finally:
@@ -236,12 +298,17 @@ class Agent:
             else:
                 history.append({"role": "assistant", "content": result.content})
 
+            self.ctx.pending_images.clear()
             for name, args in calls:
                 output = await self._execute(name, args, emit, confirm)
                 if self.native_tools:
                     history.append({"role": "tool", "tool_name": name, "content": output})
                 else:
                     history.append({"role": "user", "content": f"TOOL RESULT ({name}):\n{output}"})
+            # картинки від view_image — окремим повідомленням після всіх результатів інструментів
+            if self.ctx.pending_images:
+                paths = list(dict.fromkeys(self.ctx.pending_images))
+                history.append({"role": "user", "content": "[view_image] " + ", ".join(paths), "images": paths})
 
         answer = (
             f"Я зробив {self.config.max_steps} кроків і не встиг завершити задачу. "
@@ -262,11 +329,18 @@ class Agent:
         while True:
             trimmed = self._trim_history(history)
             msgs = trimmed if self.native_tools else self._to_json_protocol(trimmed)
+            msgs = self._attach_images(msgs)
             messages = [{"role": "system", "content": self._system_prompt(user_text)}, *msgs]
             try:
                 return await self.llm.chat(
                     messages, tools=self.registry.schemas() if self.native_tools else None, on_token=on_token
                 )
+            except VisionNotSupported:
+                if not self.vision:
+                    raise
+                log.warning("Модель не приймає зображення — вимикаю зір (додай mmproj, щоб увімкнути)")
+                self.vision = self.ctx.vision_ok = False
+                continue
             except ToolsNotSupported:
                 if self.config.tool_mode == "native":
                     raise
