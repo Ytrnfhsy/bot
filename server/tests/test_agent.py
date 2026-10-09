@@ -271,3 +271,25 @@ def test_tool_describe_compact():
 
     d = build_registry().get("web_search").describe({"query": "NetBird news", "kind": "news"})
     assert d == "query=NetBird news, kind=news"
+
+
+async def test_read_docx_and_binary(cfg):
+    import zipfile
+
+    from bonsai_agent.tools.files import read_file
+
+    ctx = ToolContext(cfg, Storage(cfg.db_path))
+    doc = cfg.workspace / "uploads" / "звіт.docx"
+    doc.parent.mkdir(parents=True)
+    xml = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+        "<w:p><w:r><w:t>Перший </w:t></w:r><w:r><w:t>абзац</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>Другий абзац</w:t></w:r></w:p></w:body></w:document>"
+    )
+    with zipfile.ZipFile(doc, "w") as z:
+        z.writestr("word/document.xml", xml)
+    out = await read_file(ctx, "uploads/звіт.docx")
+    assert "Перший абзац" in out and "Другий абзац" in out
+    (cfg.workspace / "pic.png").write_bytes(b"\x89PNG\x00\x00")
+    with pytest.raises(ToolError, match="зображення"):
+        await read_file(ctx, "pic.png")

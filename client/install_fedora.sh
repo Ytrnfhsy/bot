@@ -32,7 +32,48 @@ chmod +x "${BIN}/bonsai-robot"
 
 sed "s|@EXEC@|${BIN}/bonsai-robot|" "${HERE}/packaging/bonsai-robot.desktop" > "${APPS}/bonsai-robot.desktop"
 cp "${APPS}/bonsai-robot.desktop" "${AUTOSTART}/bonsai-robot.desktop"
+
+echo "==> Гаряча клавіша Ctrl+Alt+B → поле вводу робота"
+cat > "${APPS}/bonsai-robot-toggle.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Bonsai Robot — поле вводу
+Comment=Показати/сховати поле вводу задачі
+Exec=${BIN}/bonsai-robot --toggle
+Icon=face-smile-big
+Terminal=false
+Categories=Utility;
+X-KDE-Shortcuts=Ctrl+Alt+B
+EOF
 update-desktop-database "${APPS}" 2>/dev/null || true
+
+HOTKEY_OK=0
+case "${XDG_CURRENT_DESKTOP:-}" in
+  *KDE*)
+    KWC="$(command -v kwriteconfig6 || command -v kwriteconfig5 || true)"
+    if [[ -n "${KWC}" ]]; then
+      "${KWC}" --file kglobalshortcutsrc --group services --group bonsai-robot-toggle.desktop \
+        --key _launch "Ctrl+Alt+B" && HOTKEY_OK=1
+      # перезапуск служби глобальних шорткатів, щоб підхопила зміни
+      systemctl --user restart plasma-kglobalaccel.service 2>/dev/null || true
+    fi
+    ;;
+  *GNOME*)
+    if command -v gsettings >/dev/null; then
+      KB=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/bonsai-robot/
+      LIST="$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings)"
+      if [[ "${LIST}" != *"${KB}"* ]]; then
+        NEW="$(python3 -c "import ast,sys; l=ast.literal_eval(sys.argv[1].replace('@as ','')); l.append(sys.argv[2]); print(str(l))" "${LIST}" "${KB}")"
+        gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "${NEW}"
+      fi
+      S="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:${KB}"
+      gsettings set "${S}" name "Bonsai Robot"
+      gsettings set "${S}" command "${BIN}/bonsai-robot --toggle"
+      gsettings set "${S}" binding "<Control><Alt>b"
+      HOTKEY_OK=1
+    fi
+    ;;
+esac
 
 if [[ $# -ge 1 ]]; then
   CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/bonsai-robot"
@@ -53,3 +94,9 @@ echo
 echo "Готово! Запуск: bonsai-robot   (або знайди «Bonsai Robot» у меню)"
 echo "Робот стартуватиме автоматично при вході в систему (вимкнути: rm ${AUTOSTART}/bonsai-robot.desktop)."
 echo "Адресу сервера й токен можна змінити: ПКМ по роботу → Налаштування."
+if [[ "${HOTKEY_OK}" == "1" ]]; then
+  echo "Гаряча клавіша: Ctrl+Alt+B (якщо не спрацює одразу — перезайди в систему)."
+else
+  echo "Гарячу клавішу признач вручну: Параметри системи → Клавіатура → Скорочення →"
+  echo "  додати застосунок «Bonsai Robot — поле вводу» (команда: ${BIN}/bonsai-robot --toggle)."
+fi

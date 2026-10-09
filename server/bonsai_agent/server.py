@@ -7,6 +7,7 @@
   {"type": "confirm_response", "id": "<confirm id>", "approved": true}
   {"type": "cancel"}
   {"type": "reset", "session_id": "default"}
+  {"type": "upload", "id": "...", "name": "звіт.pdf", "data": "<base64>"}  — збереже у workspace/uploads/
   {"type": "ping"}
 
 Сервер → клієнт:
@@ -18,6 +19,7 @@
   {"type": "tool_result", "id", "name", "ok", "preview"}
   {"type": "confirm_request", "id", "tool", "summary"}
   {"type": "final", "text": "..."}
+  {"type": "uploaded", "id", "name", "path", "size"} | {"type": "upload_error", "id", "name", "message"}
   {"type": "error", "message": "..."}
   {"type": "pong"}
 """
@@ -25,10 +27,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -39,6 +44,8 @@ from .agent import Agent
 from .config import Config
 
 log = logging.getLogger("bonsai.server")
+
+MAX_UPLOAD = 25 * 1024 * 1024  # файли, перетягнуті на робота
 
 
 def _check_token(cfg: Config, supplied: str | None) -> bool:
@@ -153,6 +160,34 @@ class Connection:
             await self.send({"type": "error", "message": str(e)})
             await self.send({"type": "status", "state": "idle"})
 
+    async def _save_upload(self, msg: dict[str, Any]) -> None:
+        """Файл, перетягнутий на робота: зберігаємо у workspace/uploads/ (без перезапису наявних)."""
+        uid, raw_name = msg.get("id"), str(msg.get("name") or "file")
+        name = Path(raw_name.replace("\\", "/")).name.lstrip(".")[:120] or "file"
+        try:
+            data = base64.b64decode(str(msg.get("data", "")), validate=True)
+        except (binascii.Error, ValueError):
+            await self.send({"type": "upload_error", "id": uid, "name": name, "message": "пошкоджені дані"})
+            return
+        if len(data) > MAX_UPLOAD:
+            await self.send({"type": "upload_error", "id": uid, "name": name, "message": "файл більший за 25 МБ"})
+            return
+        ws_dir = self.agent.config.workspace
+        target = ws_dir / "uploads" / name
+        stem, suffix, n = target.stem, target.suffix, 1
+        while target.exists():
+            n += 1
+            target = target.with_name(f"{stem}-{n}{suffix}")
+
+        def write() -> None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+
+        await asyncio.to_thread(write)
+        rel = target.relative_to(ws_dir).as_posix()
+        log.info("Отримано файл %s (%d байт)", rel, len(data))
+        await self.send({"type": "uploaded", "id": uid, "name": name, "path": rel, "size": len(data)})
+
     def _cancel_pending(self) -> None:
         for fut in self.pending.values():
             if not fut.done():
@@ -183,6 +218,8 @@ class Connection:
                 elif kind == "reset":
                     self.agent.reset_session(str(msg.get("session_id") or "default"))
                     await self.send({"type": "final", "text": "🧹 Розмову очищено."})
+                elif kind == "upload":
+                    await self._save_upload(msg)
                 elif kind == "ping":
                     await self.send({"type": "pong"})
         except WebSocketDisconnect:
@@ -200,4 +237,5 @@ def run_server(config: Config) -> None:
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    uvicorn.run(create_app(config), host=config.host, port=config.port, ws_ping_interval=20, ws_ping_timeout=60)
+    uvicorn.run(create_app(config), host=config.host, port=config.port, ws_ping_interval=20, ws_ping_timeout=60,
+                ws_max_size=48 * 1024 * 1024)  # base64 від файлу до 25 МБ

@@ -78,6 +78,10 @@ class RobotWindow(QWidget):
 
         # сигнали
         self.robot.clicked.connect(self.on_robot_clicked)
+        self.robot.double_clicked.connect(self.repeat_last_task)
+        self.robot.petted.connect(self.on_petted)
+        self.robot.files_dropped.connect(self.upload_files)
+        self.robot.text_dropped.connect(self.on_text_dropped)
         self.robot.drag_moved.connect(self.on_drag)
         self.robot.drag_finished.connect(self.save_position)
         self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
@@ -212,9 +216,128 @@ class RobotWindow(QWidget):
             self.robot.set_state("sad", 2.5, then="offline")
             return
         self.panel.add_entry("user", text)
+        if text != self.settings.last_task:
+            self.settings.last_task = text
+            self.settings.save()
         self.busy = True
         self.panel.set_busy(True)
         self.robot.set_state("thinking")
+
+    def repeat_last_task(self) -> None:
+        """Подвійний клік: повторити останню задачу."""
+        self.touch()
+        last = self.settings.last_task
+        if self.busy:
+            self.show_panel()
+            self.panel.set_activity("⏳ Я ще працюю над попередньою задачею")
+            return
+        if not last:
+            self.show_panel()
+            self.panel.set_activity("Подвійний клік повторює останню задачу — але її ще не було 🙂")
+            return
+        self.show_panel()
+        self.send_task(last)
+
+    def on_petted(self) -> None:
+        self.touch()
+        if self.robot.state == "sleeping":
+            self.robot.set_state("idle")  # прокидається від гладження і муркоче далі
+
+    # ---------------- перетягування файлів ----------------
+    MAX_UPLOAD = 25 * 1024 * 1024
+
+    def upload_files(self, paths: list) -> None:
+        import base64
+        import uuid
+        from pathlib import Path
+
+        self.touch()
+        self.show_panel()
+        if not self.conn.is_connected:
+            self.panel.add_entry("error", "Немає з'єднання з сервером — файл нікуди передати.")
+            self.robot.set_state("sad", 2.5, then="offline")
+            return
+        self._pending_uploads = getattr(self, "_pending_uploads", {})
+        for raw in paths:
+            path = Path(raw)
+            if path.is_dir():
+                self.panel.add_entry("error", f"{path.name}/ — це тека; перетягни окремі файли.")
+                continue
+            try:
+                size = path.stat().st_size
+                if size > self.MAX_UPLOAD:
+                    self.panel.add_entry("error", f"{path.name}: завеликий ({size // 1024 // 1024} МБ, максимум 25 МБ).")
+                    continue
+                data = base64.b64encode(path.read_bytes()).decode("ascii")
+            except OSError as e:
+                self.panel.add_entry("error", f"{path.name}: не вдалося прочитати ({e}).")
+                continue
+            uid = uuid.uuid4().hex[:8]
+            self._pending_uploads[uid] = path.name
+            self.conn.send({"type": "upload", "id": uid, "name": path.name, "data": data})
+            self.panel.set_activity(f"📤 Передаю {path.name}…")
+        self.robot.set_state("working")
+
+    def on_text_dropped(self, text: str) -> None:
+        self.touch()
+        text = text.strip()
+        if not text:
+            return
+        if text.startswith(("http://", "https://")) and "\n" not in text:
+            self.panel.prefill(f"Відкрий і коротко перекажи: {text}")
+        elif len(text) > 4000:
+            # великий фрагмент — передаємо як файл, щоб не роздувати поле вводу
+            import tempfile
+
+            tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", prefix="текст-", delete=False, encoding="utf-8")
+            tmp.write(text)
+            tmp.close()
+            self.upload_files([tmp.name])
+            return
+        else:
+            self.panel.prefill(f"Ось текст:\n«{text}»\n\nЩо з ним зробити: ")
+        self.show_panel()
+
+    def _on_uploaded(self, ev: dict) -> None:
+        self._pending_uploads = getattr(self, "_pending_uploads", {})
+        self._pending_uploads.pop(ev.get("id"), None)
+        self._uploaded = getattr(self, "_uploaded", [])
+        self._uploaded.append(ev["path"])
+        size_kb = max(1, int(ev.get("size", 0)) // 1024)
+        self.panel.add_entry("tool", f"📎 {ev['path']} ({size_kb} КБ) — на сервері")
+        if not self._pending_uploads:  # усе передано — підказуємо задачу
+            files = ", ".join(self._uploaded)
+            noun = "файл" if len(self._uploaded) == 1 else "файли"
+            self._uploaded = []
+            self.panel.set_activity("")
+            self.panel.prefill(f"Проаналізуй {noun} {files}: ")
+            if not self.busy:
+                self.robot.set_state("happy", 1.2)
+
+    # ---------------- гаряча клавіша / команди ----------------
+    def handle_command(self, cmd: str) -> None:
+        """Команди від `bonsai-robot --toggle | --show | --ask ТЕКСТ` (другий запуск)."""
+        name, _, arg = cmd.strip().partition(" ")
+        if not self.isVisible():
+            self.toggle_visible()
+        if name == "raise":  # повторний запуск без параметрів — просто показуємо робота
+            self.raise_()
+        elif name == "toggle":
+            if self.panel.isVisible():
+                self.panel.hide_panel()
+            else:
+                self.show_panel()
+                self.panel.activateWindow()
+        elif name == "show":
+            self.show_panel()
+        elif name == "ask" and arg:
+            self.show_panel()
+            if self.busy:
+                self.panel.prefill(arg)
+            else:
+                self.send_task(arg)
+        elif name == "quit":
+            QApplication.quit()
 
     def cancel_task(self) -> None:
         self.conn.send({"type": "cancel"})
@@ -244,6 +367,15 @@ class RobotWindow(QWidget):
     def on_event(self, ev: dict) -> None:  # noqa: C901
         self.touch()
         t = ev.get("type")
+        if t == "uploaded":
+            self._on_uploaded(ev)
+            return
+        if t == "upload_error":
+            self._pending_uploads = getattr(self, "_pending_uploads", {})
+            self._pending_uploads.pop(ev.get("id"), None)
+            self.panel.add_entry("error", f"Не вдалося передати {ev.get('name')}: {ev.get('message')}")
+            self.robot.set_state("sad", 2.0)
+            return
         if t == "hello":
             self.panel.set_status(f"підключено · {str(ev.get('model', '')).split('/')[-1]}", True)
         elif t == "status":
@@ -308,6 +440,56 @@ class RobotWindow(QWidget):
             self.robot.set_state("sleeping")
 
 
+def _ipc_name() -> str:
+    return f"bonsai-robot-{os.getuid()}"
+
+
+def _command_from_argv(argv: list[str]) -> str | None:
+    """--toggle | --show | --ask ТЕКСТ | --quit → команда для вже запущеного робота."""
+    for flag in ("--toggle", "--show", "--quit"):
+        if flag in argv:
+            return flag[2:]
+    if "--ask" in argv:
+        text = " ".join(argv[argv.index("--ask") + 1 :]).strip()
+        return f"ask {text}" if text else "toggle"
+    return None
+
+
+def _send_to_running(cmd: str) -> bool:
+    from PySide6.QtNetwork import QLocalSocket
+
+    sock = QLocalSocket()
+    sock.connectToServer(_ipc_name())
+    if not sock.waitForConnected(300):
+        return False
+    sock.write((cmd.replace("\n", " ") + "\n").encode("utf-8"))
+    sock.flush()
+    sock.waitForBytesWritten(1000)
+    sock.disconnectFromServer()
+    return True
+
+
+def _listen_for_commands(win: RobotWindow) -> None:
+    from PySide6.QtNetwork import QLocalServer
+
+    server = QLocalServer(win)
+    QLocalServer.removeServer(_ipc_name())  # прибираємо «завислий» сокет після аварійного виходу
+    server.listen(_ipc_name())
+
+    def on_new() -> None:
+        conn = server.nextPendingConnection()
+
+        def read() -> None:
+            while conn.canReadLine():
+                win.handle_command(bytes(conn.readLine()).decode("utf-8", "replace"))
+
+        conn.readyRead.connect(read)
+        conn.disconnected.connect(conn.deleteLater)
+        read()
+
+    server.newConnection.connect(on_new)
+
+
 def main() -> None:
     # На Wayland (типово у Fedora) вікна не можуть самі тримати себе поверх інших
     # і позиціонуватися — тому використовуємо XWayland (xcb), якщо користувач не вказав інше.
@@ -316,13 +498,26 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Bonsai Robot")
     app.setQuitOnLastWindowClosed(False)
-    settings = Settings.load()
     demo = "--demo" in sys.argv
+    cmd = _command_from_argv(sys.argv)
+
+    if not demo:
+        # робот уже запущений? — передаємо йому команду (гаряча клавіша) і виходимо
+        if _send_to_running(cmd or "raise"):
+            return
+        if cmd == "quit":
+            return
+
+    settings = Settings.load()
     win = RobotWindow(settings, demo=demo)
     win.show()
     if demo:
         args = sys.argv[sys.argv.index("--demo") + 1 :]
         _demo(win, args[0] if args and not args[0].startswith("-") else None)
+    else:
+        _listen_for_commands(win)
+        if cmd:
+            QTimer.singleShot(400, lambda: win.handle_command(cmd))
     sys.exit(app.exec())
 
 

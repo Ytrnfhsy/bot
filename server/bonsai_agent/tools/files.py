@@ -9,6 +9,33 @@ import re
 
 from . import Tool, ToolContext, ToolError, truncate
 
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic"}
+
+
+def _office_to_text(p) -> str:
+    """Текст із .docx / .odt без сторонніх бібліотек (обидва — zip з XML)."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    inner = "word/document.xml" if p.suffix.lower() == ".docx" else "content.xml"
+    try:
+        with zipfile.ZipFile(p) as z:
+            root = ET.fromstring(z.read(inner))
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+        raise ToolError(f"Не вдалося розібрати документ: {e}") from e
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    paragraphs = []
+    for el in root.iter():
+        if local(el.tag) in {"p", "h"}:  # абзаци docx (w:p) та odt (text:p / text:h)
+            if inner.startswith("word/"):
+                paragraphs.append("".join(t.text or "" for t in el.iter() if local(t.tag) == "t"))
+            else:
+                paragraphs.append("".join(el.itertext()))
+    return "\n".join(paragraphs)
+
+
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".bonsai_tmp"}
 
 
@@ -18,10 +45,20 @@ async def read_file(ctx: ToolContext, path: str, start_line: int = 1, max_lines:
         raise ToolError(f"Файл не знайдено: {path}")
     if p.stat().st_size > 20 * 1024 * 1024:
         raise ToolError("Файл завеликий (>20 МБ)")
-    data = p.read_bytes()
-    if b"\x00" in data[:4096]:
-        raise ToolError("Схоже, це бінарний файл — прочитати як текст неможливо")
-    lines = data.decode("utf-8", "replace").splitlines()
+    suffix = p.suffix.lower()
+    if suffix == ".pdf":
+        from .web import _pdf_to_text
+
+        text = await asyncio.to_thread(_pdf_to_text, p.read_bytes())
+    elif suffix in {".docx", ".odt"}:
+        text = await asyncio.to_thread(_office_to_text, p)
+    else:
+        data = p.read_bytes()
+        if b"\x00" in data[:4096]:
+            kind = "зображення" if suffix in _IMAGE_EXT else "бінарний файл"
+            raise ToolError(f"Це {kind} — модель працює лише з текстом, прочитати його неможливо")
+        text = data.decode("utf-8", "replace")
+    lines = text.splitlines()
     start = max(1, int(start_line))
     end = min(len(lines), start - 1 + max(1, int(max_lines)))
     body = "\n".join(f"{i:>5}| {lines[i - 1]}" for i in range(start, end + 1))
@@ -112,7 +149,10 @@ _PATH = {"type": "string", "description": "Шлях (відносно робоч
 TOOLS = [
     Tool(
         name="read_file",
-        description="Читає текстовий файл (з номерами рядків). Для великих файлів використовуй start_line.",
+        description=(
+            "Читає файл як текст (з номерами рядків): звичайні текстові файли, а також PDF, DOCX, ODT. "
+            "Для великих файлів використовуй start_line. Файли, які користувач передав, лежать в uploads/."
+        ),
         parameters={
             "type": "object",
             "properties": {

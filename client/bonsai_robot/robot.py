@@ -21,7 +21,7 @@ from PySide6.QtGui import (
     QPen,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 # Колір «настрою» (очі, антена, підсвітка) для кожного стану
 STATE_COLORS = {
@@ -37,6 +37,9 @@ STATE_COLORS = {
 }
 
 BASE_W, BASE_H = 200.0, 220.0
+HEAD_RECT = QRectF(30, 30, 140, 100)  # де «гладити» (у базових координатах)
+PETTABLE = {"idle", "happy", "sleeping"}  # під час роботи гладити не відволікаємо
+PURR_COLOR = QColor("#FF7EB6")
 
 
 def _pen(color: QColor | str, width: float) -> QPen:
@@ -52,6 +55,10 @@ def _lerp(a: float, b: float, k: float) -> float:
 
 class RobotWidget(QWidget):
     clicked = Signal()
+    double_clicked = Signal()
+    petted = Signal()  # почав муркотіти
+    files_dropped = Signal(list)  # локальні шляхи
+    text_dropped = Signal(str)  # URL або виділений текст
     drag_moved = Signal(QPointF)  # глобальна позиція курсора під час перетягування
     drag_finished = Signal()
     context_requested = Signal(QPointF)
@@ -83,6 +90,18 @@ class RobotWidget(QWidget):
         # перетягування
         self._press_pos: QPointF | None = None
         self._dragging = False
+        # одинарний клік спрацьовує із затримкою, щоб відрізнити його від подвійного
+        self._click_timer = QTimer(self, singleShot=True)
+        self._click_timer.timeout.connect(self.clicked)
+        # гладження
+        self._pet = 0.0  # «накопичене» гладження
+        self._purr = 0.0  # 0..1 — інтенсивність муркотіння
+        self._pet_last: tuple[QPointF, float] | None = None
+        self._hearts: list[list[float]] = []  # [x, y, вік, дрейф]
+        self._next_heart = 0.0
+        # перетягування файлів
+        self._drop_hover = False
+        self.setAcceptDrops(True)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -102,6 +121,10 @@ class RobotWidget(QWidget):
     def poke(self) -> None:
         self._squish = 1.0
 
+    @property
+    def purring(self) -> bool:
+        return self._purr > 0.5 and self.state in PETTABLE
+
     # ---------------- анімаційний цикл ----------------
     def _tick(self) -> None:
         now = time.monotonic()
@@ -113,8 +136,27 @@ class RobotWidget(QWidget):
             self._state_until = 0.0
             self.state = self._after_state
 
+        # гладження: накопичене поступово «вивітрюється»
+        self._pet = max(0.0, self._pet - dt * 0.7)
+        was_purring = self._purr > 0.5
+        want = 1.0 if (self._pet > 1.0 and self.state in PETTABLE) else 0.0
+        self._purr = _lerp(self._purr, want, min(1.0, dt * (4 if want else 1.5)))
+        if self._purr > 0.5 and not was_purring:
+            self.petted.emit()
+        if self._purr > 0.5 and now >= self._next_heart:
+            self._next_heart = now + random.uniform(0.25, 0.5)
+            self._hearts.append([random.uniform(60, 140), 40.0, 0.0, random.uniform(-15, 15)])
+        for h in self._hearts:
+            h[1] -= 28 * dt
+            h[0] += h[3] * dt
+            h[2] += dt
+        self._hearts = [h for h in self._hearts if h[2] < 1.6]
+
         # плавна зміна кольору
-        target = STATE_COLORS[self.state]
+        if self._drop_hover:
+            target = STATE_COLORS["happy"]
+        else:
+            target = PURR_COLOR if self.purring else STATE_COLORS[self.state]
         k = min(1.0, dt * 6)
         self._color = QColor.fromRgbF(
             _lerp(self._color.redF(), target.redF(), k),
@@ -157,7 +199,14 @@ class RobotWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.scale(self.scale_factor, self.scale_factor)
 
-        st, t, c = self.state, self.t, self._color
+        t, c = self.t, self._color
+        # що малювати: перетягування файлу й муркотіння «перекривають» поточний стан
+        face_st = body_st = self.state
+        if self._drop_hover:
+            face_st = body_st = "happy"
+        elif self.purring:
+            face_st, body_st = "happy", "idle"
+        st = body_st
         speed = {"working": 6.0, "thinking": 3.0, "sleeping": 1.0, "happy": 5.0}.get(st, 2.2)
         amp = {"sleeping": 2.0, "happy": 7.0, "offline": 0.0}.get(st, 4.0)
         bob = math.sin(t * speed) * amp
@@ -166,6 +215,9 @@ class RobotWidget(QWidget):
         tilt = {"sad": -8.0, "sleeping": 6.0, "offline": 4.0}.get(st, math.sin(t * 1.1) * 2.0)
         if st == "thinking":
             tilt = 7.0 + math.sin(t * 2) * 2
+        if self._purr > 0.05 and not self._drop_hover:
+            # блаженне погойдування головою
+            tilt = _lerp(tilt, math.sin(t * 5) * 6, self._purr)
 
         # тінь
         shadow_w = 70 - bob * 1.5
@@ -189,12 +241,42 @@ class RobotWidget(QWidget):
         p.translate(100, 115)
         p.rotate(tilt)
         p.translate(-100, -115)
-        self._draw_head(p, c, t, st)
+        self._draw_head(p, c, t, face_st)
         p.restore()
         p.restore()
 
-        self._draw_overlay(p, c, t, st, bob)
+        if self._drop_hover:
+            self._draw_drop_hint(p, c, t, bob)
+        else:
+            self._draw_overlay(p, c, t, self.state if not self.purring else "idle", bob)
+        self._draw_purr(p, t, bob)
         p.end()
+
+    def _draw_drop_hint(self, p: QPainter, c: QColor, t: float, bob: float) -> None:
+        rect = QRectF(140, 0 + bob, 56, 36)
+        p.setPen(QPen(QColor("#5B6B82"), 2))
+        p.setBrush(QColor(255, 255, 255, 235))
+        p.drawRoundedRect(rect, 14, 14)
+        f = QFont("Sans", 16, QFont.Weight.Black)
+        p.setFont(f)
+        p.setPen(c)
+        p.drawText(rect.translated(0, 2 * math.sin(t * 8)), Qt.AlignmentFlag.AlignCenter, "⬇")
+
+    def _draw_purr(self, p: QPainter, t: float, bob: float) -> None:
+        p.setPen(Qt.PenStyle.NoPen)
+        for x, y, age, _ in self._hearts:
+            a = max(0.0, 1.0 - age / 1.6)
+            col = QColor(PURR_COLOR)
+            col.setAlphaF(a)
+            p.setBrush(col)
+            self._heart(p, QPointF(x, y + bob), 5 + 3 * age)
+        if self._purr > 0.6:
+            f = QFont("Sans", 10, QFont.Weight.Bold)
+            p.setFont(f)
+            col = QColor("#E8589A")
+            col.setAlphaF(min(1.0, (self._purr - 0.6) * 2.5) * (0.6 + 0.4 * math.sin(t * 4)))
+            p.setPen(col)
+            p.drawText(QPointF(150, 70 + bob + 3 * math.sin(t * 3)), "мрр~")
 
     def _metal(self, rect: QRectF, light: str = "#FFFFFF", dark: str = "#C9D6E8") -> QLinearGradient:
         g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
@@ -368,7 +450,8 @@ class RobotWidget(QWidget):
         # рум'янець
         if st in {"happy", "talking"} or self._hover:
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(255, 120, 160, 90 if st == "happy" else 55))
+            alpha = 90 if st == "happy" else 55
+            p.setBrush(QColor(255, 120, 160, int(alpha + 80 * self._purr)))
             p.drawEllipse(QPointF(62, 96), 7, 4)
             p.drawEllipse(QPointF(138, 96), 7, 4)
 
@@ -484,6 +567,7 @@ class RobotWidget(QWidget):
 
     def leaveEvent(self, _e) -> None:
         self._hover = False
+        self._pet_last = None
 
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton:
@@ -492,8 +576,21 @@ class RobotWidget(QWidget):
         elif e.button() == Qt.MouseButton.RightButton:
             self.context_requested.emit(e.globalPosition())
 
+    def _track_pet(self, pos: QPointF) -> None:
+        """Повільні рухи курсора по голові накопичують «гладження»."""
+        local = QPointF(pos.x() / self.scale_factor, pos.y() / self.scale_factor)
+        now = time.monotonic()
+        if HEAD_RECT.contains(local) and self._pet_last is not None:
+            prev, prev_t = self._pet_last
+            dist = math.hypot(local.x() - prev.x(), local.y() - prev.y())
+            speed = dist / max(now - prev_t, 1e-3)  # базових одиниць за секунду
+            if 20 < speed < 900:  # повільно-помірно — гладимо; різко — ні
+                self._pet = min(3.0, self._pet + dist * 0.012)
+        self._pet_last = (local, now)
+
     def mouseMoveEvent(self, e) -> None:
         if self._press_pos is None:
+            self._track_pet(e.position())
             return
         if not self._dragging and (e.globalPosition() - self._press_pos).manhattanLength() > 6:
             self._dragging = True
@@ -508,6 +605,35 @@ class RobotWidget(QWidget):
             self.drag_finished.emit()
         else:
             self.poke()
-            self.clicked.emit()
+            self._click_timer.start(QApplication.doubleClickInterval())
         self._press_pos = None
         self._dragging = False
+
+    def mouseDoubleClickEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.stop()  # це не одинарний клік
+            self.poke()
+            self.double_clicked.emit()
+
+    # ---------------- перетягування файлів / тексту ----------------
+    def dragEnterEvent(self, e) -> None:
+        md = e.mimeData()
+        if md.hasUrls() or md.hasText():
+            self._drop_hover = True
+            e.acceptProposedAction()
+
+    def dragLeaveEvent(self, _e) -> None:
+        self._drop_hover = False
+
+    def dropEvent(self, e) -> None:
+        self._drop_hover = False
+        md = e.mimeData()
+        files = [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
+        if files:
+            self.files_dropped.emit(files)
+        elif md.hasUrls():
+            self.text_dropped.emit(" ".join(u.toString() for u in md.urls()))
+        elif md.hasText():
+            self.text_dropped.emit(md.text())
+        self.poke()
+        e.acceptProposedAction()

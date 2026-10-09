@@ -55,3 +55,21 @@ def test_rest_task_and_health(cfg):
         r = client.post("/api/task", json={"text": "ls"}, headers={"Authorization": "Bearer secret"})
         assert r.status_code == 200
         assert r.json()["answer"].startswith("не дозволено")
+
+
+def test_ws_upload(cfg):
+    import base64
+
+    client, _ = _client(cfg, [])
+    with client, client.websocket_connect("/ws?token=secret") as ws:
+        ws.receive_json()  # hello
+        payload = base64.b64encode("привіт, файл".encode()).decode()
+        for _ in range(2):  # двічі те саме ім'я — другий не перезаписує перший
+            ws.send_json({"type": "upload", "id": "u1", "name": "../../нотатки.txt", "data": payload})
+        first, second = ws.receive_json(), ws.receive_json()
+        ws.send_json({"type": "upload", "id": "u2", "name": "bad.bin", "data": "@@@не base64"})
+        bad = ws.receive_json()
+    assert first["type"] == "uploaded" and first["path"] == "uploads/нотатки.txt"
+    assert second["path"] == "uploads/нотатки-2.txt"
+    assert (cfg.workspace / "uploads/нотатки.txt").read_text() == "привіт, файл"
+    assert bad["type"] == "upload_error"

@@ -169,6 +169,14 @@ class ChatPanel(QWidget):
         self.status.setToolTip(details or text)
         self.adjustSize()
 
+    def prefill(self, text: str) -> None:
+        """Підставляє текст у поле вводу (курсор у кінці), щоб користувач дописав і натиснув Enter."""
+        self.input.setPlainText(text)
+        cur = self.input.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+        self.input.setTextCursor(cur)
+        self.input.setFocus()
+
     def set_busy(self, busy: bool) -> None:
         self.btn_stop.setVisible(busy)
         self.btn_send.setVisible(not busy)

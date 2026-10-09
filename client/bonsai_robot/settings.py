@@ -24,6 +24,7 @@ class Settings:
     pos_y: int | None = None
     sleep_after_sec: int = 180
     show_thinking: bool = False
+    last_task: str = ""
 
     @classmethod
     def load(cls) -> "Settings":
