@@ -56,21 +56,61 @@ async def _searxng_search(base: str, query: str, max_results: int, kind: str) ->
     ]
 
 
+def _is_no_results(e: Exception) -> bool:
+    return "no results" in str(e).lower()
+
+
+async def _search_once(ctx: ToolContext, query: str, n: int, kind: str, region: str, errors: list[str]) -> list[dict[str, Any]] | None:
+    """Результати (можливо порожні) або None, якщо всі пошуковики впали з помилкою."""
+    ok = False
+    if ctx.config.searxng_url:
+        try:
+            results = await _searxng_search(ctx.config.searxng_url, query, n, kind)
+            if results:
+                return results
+            ok = True
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"SearXNG: {e}")
+    for attempt in range(2):
+        try:
+            return await asyncio.to_thread(_ddgs_search, query, n, kind, region)
+        except Exception as e:  # noqa: BLE001
+            if _is_no_results(e):  # ddgs кидає виняток замість порожнього списку
+                return []
+            if attempt == 0 and "ratelimit" in type(e).__name__.lower() + str(e).lower():
+                await asyncio.sleep(2)
+                continue
+            errors.append(f"DuckDuckGo: {e}")
+            break
+    return [] if ok else None
+
+
 async def web_search(ctx: ToolContext, query: str, max_results: int = 6, kind: str = "text", region: str = "wt-wt") -> str:
     max_results = max(1, min(int(max_results), 15))
     kind = "news" if kind == "news" else "text"
-    errors = []
-    if ctx.config.searxng_url:
-        try:
-            return _format_results(await _searxng_search(ctx.config.searxng_url, query, max_results, kind))
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"SearXNG: {e}")
-    try:
-        results = await asyncio.to_thread(_ddgs_search, query, max_results, kind, region)
-        return _format_results(results)
-    except Exception as e:  # noqa: BLE001
-        errors.append(f"DuckDuckGo: {e}")
-    raise ToolError("Пошук недоступний: " + "; ".join(errors))
+    # якщо вузький пошук порожній — розширюємо: новини → звичайний пошук, регіон → увесь світ
+    plan = [(kind, region)]
+    if kind == "news":
+        plan.append(("text", region))
+    if region != "wt-wt":
+        plan.append(("text", "wt-wt"))
+
+    errors: list[str] = []
+    failed = 0
+    for i, (k, r) in enumerate(plan):
+        results = await _search_once(ctx, query, max_results, k, r, errors)
+        if results is None:
+            failed += 1
+            continue
+        if results:
+            note = "" if i == 0 else f"(За kind={kind!r}, region={region!r} нічого не знайдено — показую ширший пошук)\n"
+            return note + _format_results(results)
+    if failed == len(plan):
+        raise ToolError("Пошук недоступний: " + "; ".join(dict.fromkeys(errors)))
+    return (
+        "Нічого не знайдено за цим запитом (це не помилка пошуку). Спробуй коротший запит, "
+        "інші ключові слова або англійською; якщо вже маєш потрібні URL — відкрий їх через fetch_url."
+    )
 
 
 def _html_to_text(html: str) -> tuple[str, str]:

@@ -227,3 +227,47 @@ def test_llama_server_preset(monkeypatch):
             monkeypatch.delenv(k)
     cfg = Config.from_env(Path(__file__).parent.parent / ".env.llama-server")
     assert (cfg.backend, cfg.llm_url, cfg.model, cfg.temperature) == ("openai", "http://127.0.0.1:8085", "bonsai-2-27b", None)
+
+
+# ---------------- веб-пошук ----------------
+async def test_web_search_no_results_falls_back_to_text(cfg, monkeypatch):
+    from bonsai_agent.tools import web
+
+    calls = []
+
+    def fake(query, n, kind, region):
+        calls.append(kind)
+        if kind == "news":
+            raise Exception("No results found.")
+        return [{"title": "NetBird 1.0", "url": "https://netbird.io/blog", "snippet": "реліз"}]
+
+    monkeypatch.setattr(web, "_ddgs_search", fake)
+    ctx = ToolContext(cfg, Storage(cfg.db_path))
+    out = await web.web_search(ctx, "NetBird", kind="news")
+    assert calls == ["news", "text"]
+    assert "netbird.io/blog" in out and "ширший пошук" in out
+
+
+async def test_web_search_empty_is_not_error(cfg, monkeypatch):
+    from bonsai_agent.tools import web
+
+    monkeypatch.setattr(web, "_ddgs_search", lambda *a: (_ for _ in ()).throw(Exception("No results found.")))
+    ctx = ToolContext(cfg, Storage(cfg.db_path))
+    out = await web.web_search(ctx, "щось дуже рідкісне")
+    assert "не помилка" in out
+
+
+async def test_web_search_real_failure_raises(cfg, monkeypatch):
+    from bonsai_agent.tools import web
+
+    monkeypatch.setattr(web, "_ddgs_search", lambda *a: (_ for _ in ()).throw(ConnectionError("network down")))
+    ctx = ToolContext(cfg, Storage(cfg.db_path))
+    with pytest.raises(ToolError, match="network down"):
+        await web.web_search(ctx, "x")
+
+
+def test_tool_describe_compact():
+    from bonsai_agent.tools import build_registry
+
+    d = build_registry().get("web_search").describe({"query": "NetBird news", "kind": "news"})
+    assert d == "query=NetBird news, kind=news"

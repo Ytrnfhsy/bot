@@ -58,7 +58,11 @@ class Tool:
                 return self.summarize(args)
             except Exception:  # noqa: BLE001
                 pass
-        return f"{self.name}({args})"
+        parts = []
+        for k, v in args.items():
+            text = v if isinstance(v, str) else repr(v)
+            parts.append(f"{k}={text[:120]}")
+        return ", ".join(parts) or "(без параметрів)"
 
 
 @dataclass
