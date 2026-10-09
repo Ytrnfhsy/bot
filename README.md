@@ -11,7 +11,7 @@
 │  • кнопки «Дозволити / Відхилити»        │        │  • файли, shell, Python                │
 └──────────────────────────────────────────┘        │  • пам'ять (SQLite FTS5), сесії        │
                                                     │           │                            │
-   bonsai chat --server ws://… (CLI/REPL) ─────────▶│     Ollama / llama-server              │
+   bonsai chat --server ws://… (CLI/REPL) ─────────▶│  llama-server :8085 (Docker) / Ollama  │
                                                     └────────────────────────────────────────┘
 ```
 
@@ -50,24 +50,36 @@
 
 ### 1.1 Модель
 
+Агент вміє працювати з двома бекендами. Обидва дають ту саму функціональність.
+
+**Варіант А — llama-server у Docker (форк PrismML).** Рекомендовано для ternary-моделей.
+Агент розрахований на наявний `docker-compose.yml` з `llama-server` на `127.0.0.1:8085`,
+`--alias bonsai-2-27b` і `--jinja`:
+
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull hf.co/prism-ml/Ternary-Bonsai-27B-gguf     # або конкретний квант: …:Q2_0
+docker compose up -d                       # у директорії з compose і .gguf
+curl -s http://127.0.0.1:8085/v1/models    # має показати "bonsai-2-27b"
 ```
 
-> ⚠️ **Важливо про ternary-формат.** За даними PrismML, ternary GGUF (Q2_0, група 128) потребує
-> їхнього форку llama.cpp, і деякі релізи Ollama можуть відмовлятися завантажувати модель.
-> Якщо `ollama pull` або `ollama run` завершується помилкою, запусти модель через `llama-server`
-> з форку PrismML (OpenAI-сумісний API) і перемкни агента на нього:
->
-> ```bash
-> ./llama-server -m Ternary-Bonsai-27B-Q2_0.gguf --jinja -c 16384 --port 8080
-> ```
-> ```ini
-> BONSAI_BACKEND=openai
-> BONSAI_LLM_URL=http://127.0.0.1:8080
-> ```
-> Прапорець `--jinja` вмикає шаблон чату з підтримкою tool calls.
+Готовий конфіг агента лежить у [`server/.env.llama-server`](server/.env.llama-server):
+`BONSAI_BACKEND=openai`, `BONSAI_LLM_URL=http://127.0.0.1:8085`, `BONSAI_MODEL=bonsai-2-27b`,
+історія розрахована на `-c 81920`. Температуру агент не передає, тому діють `--temp/--top-p/--top-k`
+з compose (задати свою можна через `BONSAI_TEMPERATURE`).
+
+> Порт опублікований лише на `127.0.0.1`, тому агент-сервер має працювати на тій самій машині, що й
+> контейнер. Агент сам віддаватиме WebSocket-порт 8765 клієнтам. Контейнер має `restart: "no"`:
+> якщо модель не запущена, агент повідомить про це в логах і відповідях, а після `docker compose up -d`
+> підхопить її без перезапуску.
+
+**Варіант Б — Ollama.**
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull hf.co/prism-ml/Ternary-Bonsai-27B-gguf
+```
+
+> ⚠️ За даними PrismML, ternary GGUF потребує їхнього форку llama.cpp, і релізи Ollama можуть
+> відмовлятися завантажувати модель. У такому разі використовуй варіант А.
 
 ### 1.2 Агент
 
@@ -77,7 +89,8 @@ ollama pull hf.co/prism-ml/Ternary-Bonsai-27B-gguf     # або конкретн
 cd server
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
-cp .env.example .env          # і задай BONSAI_TOKEN: openssl rand -hex 24
+cp .env.llama-server .env     # варіант А; для Ollama — .env.example
+                              # і задай BONSAI_TOKEN: openssl rand -hex 24
 bonsai health                 # перевірка доступності моделі
 bonsai serve                  # ws://0.0.0.0:8765/ws
 ```
@@ -85,7 +98,8 @@ bonsai serve                  # ws://0.0.0.0:8765/ws
 Або одразу як systemd-сервіс (автозапуск, логи в journald):
 
 ```bash
-cd server && ./install_server.sh          # PULL_MODEL=1 ./install_server.sh — заодно завантажить модель
+cd server && ./install_server.sh --llama-server   # варіант А (Docker / llama-server)
+cd server && ./install_server.sh                  # варіант Б (Ollama); PULL_MODEL=1 — заодно завантажить модель
 journalctl --user -u bonsai-agent -f
 ```
 

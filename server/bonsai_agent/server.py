@@ -62,7 +62,10 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
         if not health.get("ok"):
             log.warning("LLM-сервер недоступний: %s", health.get("error"))
         elif not health.get("model_present"):
-            log.warning("Модель %s не знайдена в Ollama. Виконай: ollama pull %s", cfg.model, cfg.model)
+            if cfg.backend == "openai":
+                log.warning("LLM-сервер віддає %s, а BONSAI_MODEL=%s (перевір --alias)", health.get("served"), cfg.model)
+            else:
+                log.warning("Модель %s не знайдена в Ollama. Виконай: ollama pull %s", cfg.model, cfg.model)
         if not cfg.token:
             log.warning("BONSAI_TOKEN не задано — сервер доступний без авторизації!")
         yield
@@ -73,7 +76,7 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
         ag: Agent = request.app.state.agent
-        return {"ok": True, "version": __version__, "ollama": await ag.llm.health()}
+        return {"ok": True, "version": __version__, "backend": ag.config.backend, "llm": await ag.llm.health()}
 
     @app.post("/api/task")
     async def api_task(req: TaskRequest, request: Request) -> dict[str, Any]:

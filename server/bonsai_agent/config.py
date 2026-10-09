@@ -37,6 +37,11 @@ def _env_opt_bool(name: str) -> bool | None:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+def _env_opt_float(name: str) -> float | None:
+    value = os.environ.get(f"BONSAI_{name}", "").strip()
+    return None if value in {"", "auto"} else float(value)
+
+
 @dataclass
 class Config:
     # LLM: "ollama" (типово) або "openai" — OpenAI-сумісний сервер
@@ -51,7 +56,8 @@ class Config:
     tool_mode: str = "auto"
     think: bool | None = None  # None = не передавати параметр think
     num_ctx: int = 16384
-    temperature: float = 0.6
+    # None — не передавати: діють налаштування сервера моделі (напр. --temp у llama-server)
+    temperature: float | None = None
     keep_alive: str = "30m"
     request_timeout: float = 600.0
 
@@ -92,7 +98,7 @@ class Config:
             tool_mode=_env("TOOL_MODE", d.tool_mode).lower(),
             think=_env_opt_bool("THINK"),
             num_ctx=int(_env("NUM_CTX", str(d.num_ctx))),
-            temperature=float(_env("TEMPERATURE", str(d.temperature))),
+            temperature=_env_opt_float("TEMPERATURE"),
             keep_alive=_env("KEEP_ALIVE", d.keep_alive),
             request_timeout=float(_env("REQUEST_TIMEOUT", str(d.request_timeout))),
             max_steps=int(_env("MAX_STEPS", str(d.max_steps))),

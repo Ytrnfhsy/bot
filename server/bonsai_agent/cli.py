@@ -98,7 +98,8 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
     if not health.get("ok"):
         print(f"{RED}LLM-сервер недоступний: {health.get('error')}{RESET}")
     elif not health.get("model_present"):
-        print(f"{YELLOW}Модель {cfg.model} не знайдено. Виконай: ollama pull {cfg.model}{RESET}")
+        hint = "перевір --alias у llama-server" if cfg.backend == "openai" else f"виконай: ollama pull {cfg.model}"
+        print(f"{YELLOW}Модель {cfg.model} не знайдено — {hint}{RESET}")
 
     try:
         if once:

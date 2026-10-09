@@ -40,14 +40,16 @@ class OllamaClient:
         model: str,
         *,
         num_ctx: int = 16384,
-        temperature: float = 0.6,
+        temperature: float | None = None,
         keep_alive: str = "30m",
         think: bool | None = None,
         timeout: float = 600.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.options = {"num_ctx": num_ctx, "temperature": temperature}
+        self.options: dict[str, Any] = {"num_ctx": num_ctx}
+        if temperature is not None:
+            self.options["temperature"] = temperature
         self.keep_alive = keep_alive
         self.think = think
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0))
@@ -150,7 +152,7 @@ class OpenAICompatClient:
         model: str,
         *,
         api_key: str = "",
-        temperature: float = 0.6,
+        temperature: float | None = None,
         timeout: float = 600.0,
     ) -> None:
         base = base_url.rstrip("/")
@@ -170,8 +172,8 @@ class OpenAICompatClient:
             models = [m.get("id", "") for m in r.json().get("data", [])]
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
-        # llama-server обслуговує одну модель і приймає будь-яку назву
-        return {"ok": True, "model": self.model, "model_present": True, "served": models}
+        # llama-server обслуговує одну модель (id = --alias); запити з іншою назвою він теж приймає
+        return {"ok": True, "model": self.model, "model_present": not models or self.model in models, "served": models}
 
     @staticmethod
     def convert_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -215,8 +217,9 @@ class OpenAICompatClient:
             "model": self.model,
             "messages": self.convert_messages(messages),
             "stream": True,
-            "temperature": self.temperature,
         }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
         if tools:
             payload["tools"] = tools
         result = ChatResult()
@@ -233,7 +236,7 @@ class OpenAICompatClient:
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
-                        break
+                        continue  # не break: даємо стріму закритися штатно
                     chunk = json.loads(data)
                     if "error" in chunk:
                         raise OllamaError(str(chunk["error"]))

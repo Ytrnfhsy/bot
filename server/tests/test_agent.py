@@ -213,3 +213,17 @@ async def test_openai_compat_stream():
     msgs = seen["body"]["messages"]
     assert msgs[1]["tool_calls"][0]["id"] == msgs[2]["tool_call_id"]
     assert json.loads(msgs[1]["tool_calls"][0]["function"]["arguments"]) == {"query": "a"}
+    # без явного BONSAI_TEMPERATURE діють --temp/--top-p/--top-k самого llama-server
+    assert "temperature" not in seen["body"]
+
+
+def test_llama_server_preset(monkeypatch):
+    from pathlib import Path
+
+    from bonsai_agent.config import Config
+
+    for k in list(__import__("os").environ):
+        if k.startswith("BONSAI_"):
+            monkeypatch.delenv(k)
+    cfg = Config.from_env(Path(__file__).parent.parent / ".env.llama-server")
+    assert (cfg.backend, cfg.llm_url, cfg.model, cfg.temperature) == ("openai", "http://127.0.0.1:8085", "bonsai-2-27b", None)
