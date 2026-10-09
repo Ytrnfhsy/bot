@@ -55,7 +55,7 @@ class SettingsDialog(QDialog):
 
 
 class RobotWindow(QWidget):
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, demo: bool = False) -> None:
         super().__init__(
             None,
             Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
@@ -95,9 +95,9 @@ class RobotWindow(QWidget):
 
         self._sleep_timer = QTimer(self, interval=5000)
         self._sleep_timer.timeout.connect(self._check_sleep)
-        self._sleep_timer.start()
-
-        self.conn.open()
+        if not demo:  # у демо — без сервера і без автозасинання, щоб ніщо не перебивало анімації
+            self._sleep_timer.start()
+            self.conn.open()
 
     # ---------------- розміщення ----------------
     def _place_initial(self) -> None:
@@ -317,19 +317,49 @@ def main() -> None:
     app.setApplicationName("Bonsai Robot")
     app.setQuitOnLastWindowClosed(False)
     settings = Settings.load()
-    win = RobotWindow(settings)
+    demo = "--demo" in sys.argv
+    win = RobotWindow(settings, demo=demo)
     win.show()
-    if "--demo" in sys.argv:
-        _demo(win)
+    if demo:
+        args = sys.argv[sys.argv.index("--demo") + 1 :]
+        _demo(win, args[0] if args and not args[0].startswith("-") else None)
     sys.exit(app.exec())
 
 
-def _demo(win: RobotWindow) -> None:
-    """Прогін усіх анімацій без сервера: bonsai-robot --demo"""
-    states = ["idle", "thinking", "working", "waiting", "talking", "happy", "sad", "sleeping", "offline"]
-    for i, st in enumerate(states):
-        QTimer.singleShot(i * 2500, lambda st=st: win.robot.set_state(st))
+DEMO_STATES = [
+    ("idle", "чекає (наведи курсор — помахає, поводь мишкою — стежитиме очима)"),
+    ("thinking", "думає"),
+    ("working", "працює з інструментом"),
+    ("waiting", "чекає на твій дозвіл"),
+    ("talking", "відповідає"),
+    ("happy", "задачу виконано"),
+    ("sad", "помилка"),
+    ("sleeping", "спить"),
+    ("offline", "немає з'єднання"),
+]
 
 
-if __name__ == "__main__":
-    main()
+def _demo(win: RobotWindow, only: str | None = None) -> None:
+    """Перегляд анімацій без сервера.
+
+    bonsai-robot --demo            — усі стани по колу, по 4 с кожен
+    bonsai-robot --demo thinking   — один стан, щоб роздивитися
+    """
+    names = dict(DEMO_STATES)
+    states = [(only, names.get(only, only))] if only else DEMO_STATES
+    step = {"i": 0}
+
+    def show() -> None:
+        name, title = states[step["i"] % len(states)]
+        win.robot.set_state(name)
+        num = f"{step['i'] % len(states) + 1}/{len(states)} · " if len(states) > 1 else ""
+        win.panel.set_status(f"Демо {num}{name} — {title}", True)
+        print(f"[demo] {name}: {title}", flush=True)
+        step["i"] += 1
+
+    show()
+    win.show_panel()
+    if len(states) > 1:
+        timer = QTimer(win, interval=4000)
+        timer.timeout.connect(show)
+        timer.start()
