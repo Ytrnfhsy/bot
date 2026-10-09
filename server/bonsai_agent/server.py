@@ -8,6 +8,9 @@
   {"type": "cancel"}
   {"type": "reset", "session_id": "default"}
   {"type": "upload", "id": "...", "name": "звіт.pdf", "data": "<base64>"}  — збереже у workspace/uploads/
+  {"type": "chat_save", "session_id", "title"?, "id"?}  — зберегти поточну розмову (id — оновити існуючий)
+  {"type": "chat_list"} | {"type": "chat_open", "id", "session_id"} | {"type": "chat_delete", "id"}
+  {"type": "chat_export", "session_id" | "id"}  — Markdown поточної або збереженої розмови
   {"type": "ping"}
 
 Сервер → клієнт:
@@ -20,6 +23,9 @@
   {"type": "confirm_request", "id", "tool", "summary"}
   {"type": "final", "text": "..."}
   {"type": "uploaded", "id", "name", "path", "size"} | {"type": "upload_error", "id", "name", "message"}
+  {"type": "chat_saved", "id", "title"} | {"type": "chat_list", "chats": [{id, title, count, created_at, updated_at}]}
+  {"type": "chat_opened", "id", "title", "transcript": [{role, text}]} | {"type": "chat_export", "title", "markdown"}
+  {"type": "chat_error", "message"}
   {"type": "error", "message": "..."}
   {"type": "pong"}
 """
@@ -190,6 +196,29 @@ class Connection:
         log.info("Отримано файл %s (%d байт)", rel, len(data))
         await self.send({"type": "uploaded", "id": uid, "name": name, "path": rel, "size": len(data)})
 
+    async def _chats(self, kind: str, msg: dict[str, Any]) -> None:
+        """Збережені чати: зберегти / список / відкрити / видалити / експорт у Markdown."""
+        ag, session = self.agent, str(msg.get("session_id") or "default")
+        chat_id = int(msg["id"]) if msg.get("id") not in (None, "") else None
+        try:
+            if kind == "chat_save":
+                if self.task and not self.task.done():
+                    raise ValueError("Зачекай, поки я закінчу задачу, — тоді збережу")
+                saved = ag.save_chat(session, msg.get("title"), chat_id)
+                await self.send({"type": "chat_saved", **saved})
+            elif kind == "chat_open":
+                if self.task and not self.task.done():
+                    raise ValueError("Спершу зупини поточну задачу")
+                await self.send({"type": "chat_opened", **ag.open_chat(chat_id, session)})
+            elif kind == "chat_delete":
+                ag.delete_chat(chat_id)
+            elif kind == "chat_export":
+                await self.send({"type": "chat_export", **ag.export_chat(session, chat_id)})
+            if kind in {"chat_list", "chat_delete", "chat_save"}:
+                await self.send({"type": "chat_list", "chats": ag.list_chats()})
+        except (ValueError, TypeError, KeyError) as e:
+            await self.send({"type": "chat_error", "message": str(e)})
+
     def _cancel_pending(self) -> None:
         for fut in self.pending.values():
             if not fut.done():
@@ -221,6 +250,8 @@ class Connection:
                 elif kind == "reset":
                     self.agent.reset_session(str(msg.get("session_id") or "default"))
                     await self.send({"type": "final", "text": "🧹 Розмову очищено."})
+                elif kind in {"chat_save", "chat_list", "chat_open", "chat_delete", "chat_export"}:
+                    await self._chats(kind, msg)
                 elif kind == "upload":
                     await self._save_upload(msg)
                 elif kind == "ping":

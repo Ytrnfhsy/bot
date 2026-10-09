@@ -31,6 +31,11 @@ class Storage:
                 "CREATE TABLE IF NOT EXISTS sessions ("
                 " id TEXT PRIMARY KEY, messages TEXT NOT NULL, updated_at REAL NOT NULL)"
             )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS saved_chats ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, messages TEXT NOT NULL,"
+                " created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+            )
             try:
                 self._db.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5("
@@ -112,3 +117,50 @@ class Storage:
     def clear_session(self, session_id: str) -> None:
         with self._lock, self._db:
             self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+    # ---------- збережені чати ----------
+    def save_chat(self, title: str, messages: list[dict[str, Any]], chat_id: int | None = None) -> int:
+        now = time.time()
+        data = json.dumps(messages, ensure_ascii=False)
+        with self._lock, self._db:
+            if chat_id is not None:
+                cur = self._db.execute(
+                    "UPDATE saved_chats SET title = ?, messages = ?, updated_at = ? WHERE id = ?",
+                    (title, data, now, chat_id),
+                )
+                if cur.rowcount:
+                    return chat_id
+            cur = self._db.execute(
+                "INSERT INTO saved_chats(title, messages, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (title, data, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def list_chats(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, title, messages, created_at, updated_at FROM saved_chats ORDER BY updated_at DESC"
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+                "count": sum(1 for m in json.loads(r["messages"]) if m.get("role") == "user"),
+            }
+            for r in rows
+        ]
+
+    def load_chat(self, chat_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id, title, messages, created_at, updated_at FROM saved_chats WHERE id = ?", (chat_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return {**dict(row), "messages": json.loads(row["messages"])}
+
+    def delete_chat(self, chat_id: int) -> bool:
+        with self._lock, self._db:
+            return self._db.execute("DELETE FROM saved_chats WHERE id = ?", (chat_id,)).rowcount > 0

@@ -15,13 +15,17 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFileDialog,
+    QInputDialog,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
+from .chats_dialog import ChatsDialog
 from .connection import AgentConnection, normalize_url
 from .panel import ChatPanel
 from .robot import RobotWidget
@@ -89,6 +93,18 @@ class RobotWindow(QWidget):
         self.robot.drag_finished.connect(self.save_position)
         self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
         self.panel.task_submitted.connect(self.send_task)
+        self.panel.save_requested.connect(self.save_chat)
+        self.panel.chats_requested.connect(self.show_chats)
+        # збережені чати
+        self.chat_id: int | None = None  # поточна розмова вже збережена під цим id
+        self.chat_title = ""
+        self.dirty = False  # є незбережені зміни
+        self._after_save = None  # дія після успішного збереження (очистити / відкрити інший)
+        self._export_target: str | None = None
+        self.chats_dialog = ChatsDialog()
+        self.chats_dialog.open_requested.connect(self.open_chat)
+        self.chats_dialog.export_requested.connect(lambda cid: self.export_chat(cid))
+        self.chats_dialog.delete_requested.connect(self._delete_chat)
         self.panel.image_pasted.connect(lambda path: self.upload_files([path]))
         self.panel.cancel_requested.connect(self.cancel_task)
         self.panel.reset_requested.connect(self.reset_chat)
@@ -149,6 +165,9 @@ class RobotWindow(QWidget):
         self.menu = QMenu()
         self.menu.addAction("💬 Відкрити чат", self.show_panel)
         self.menu.addAction("⟲ Нова розмова", self.reset_chat)
+        self.menu.addAction("💾 Зберегти чат…", self.save_chat)
+        self.menu.addAction("📂 Збережені чати…", self.show_chats)
+        self.menu.addAction("📤 Експорт розмови в Markdown…", lambda: self.export_chat(None))
         self.menu.addAction("■ Зупинити задачу", self.cancel_task)
         self.menu.addSeparator()
         self.menu.addAction("⚙ Налаштування…", self.open_settings)
@@ -220,6 +239,7 @@ class RobotWindow(QWidget):
             self.robot.set_state("sad", 2.5, then="offline")
             return
         self.panel.add_entry("user", text)
+        self.dirty = True
         if text != self.settings.last_task:
             self.settings.last_task = text
             self.settings.save()
@@ -352,8 +372,137 @@ class RobotWindow(QWidget):
         self.panel.drop_confirms()
 
     def reset_chat(self) -> None:
+        if not self._confirm_discard(self._do_reset):
+            return
+        self._do_reset()
+
+    def _do_reset(self) -> None:
         self.panel.clear()
+        self.chat_id, self.chat_title, self.dirty = None, "", False
         self.conn.send({"type": "reset", "session_id": self.settings.session_id})
+
+    # ---------------- збережені чати ----------------
+    def _suggested_title(self) -> str:
+        if self.chat_title:
+            return self.chat_title
+        first = next((text for role, text in self.panel.entries if role == "user"), "")
+        first = " ".join(first.split())
+        return first[:60] + ("…" if len(first) > 60 else "")
+
+    def _confirm_discard(self, then) -> bool:
+        """Є незбережена розмова? Запитати. True — можна продовжувати одразу."""
+        if not self.dirty or not self.panel.entries:
+            return True
+        box = QMessageBox(QMessageBox.Icon.Question, "Незбережена розмова",
+                          "Зберегти поточну розмову перед тим, як продовжити?",
+                          QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                          | QMessageBox.StandardButton.Cancel)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        answer = box.exec()
+        if answer == QMessageBox.StandardButton.Cancel:
+            return False
+        if answer == QMessageBox.StandardButton.Save:
+            self._after_save = then
+            self._send_save(self._suggested_title())
+            return False  # продовжимо після chat_saved
+        return True
+
+    def save_chat(self) -> None:
+        self.touch()
+        if self.busy:
+            self.panel.set_activity("⏳ Зачекай, поки я закінчу задачу, — тоді збережу")
+            return
+        if not self.panel.entries:
+            self.panel.set_activity("Розмова порожня — нічого зберігати")
+            return
+        dlg = QInputDialog(self)
+        dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        dlg.setWindowTitle("Зберегти чат")
+        dlg.setLabelText("Назва:")
+        dlg.setTextValue(self._suggested_title())
+        dlg.resize(420, dlg.height())
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._send_save(dlg.textValue().strip())
+
+    def _send_save(self, title: str) -> None:
+        msg = {"type": "chat_save", "session_id": self.settings.session_id, "title": title}
+        if self.chat_id is not None:
+            msg["id"] = self.chat_id  # уже збережений чат — оновлюємо
+        if not self.conn.send(msg):
+            self.panel.add_entry("error", "Немає з'єднання з сервером — зберегти не вдалося.")
+            self._after_save = None
+
+    def show_chats(self) -> None:
+        self.touch()
+        self.conn.send({"type": "chat_list"})
+        self.chats_dialog.show()
+        self.chats_dialog.raise_()
+        self.chats_dialog.activateWindow()
+
+    def open_chat(self, chat_id: int) -> None:
+        if self.busy:
+            self.panel.set_activity("⏳ Спершу дочекайся завершення задачі або зупини її (■)")
+            return
+        then = lambda: self.conn.send({"type": "chat_open", "id": chat_id, "session_id": self.settings.session_id})  # noqa: E731
+        if self._confirm_discard(then):
+            then()
+
+    def export_chat(self, chat_id: int | None) -> None:
+        self.touch()
+        msg = {"type": "chat_export", "session_id": self.settings.session_id}
+        if chat_id is not None:
+            msg["id"] = chat_id
+        elif self.chat_id is not None and not self.dirty:
+            msg["id"] = self.chat_id  # зберігаємо назву збереженого чату
+        self.conn.send(msg)
+
+    def _delete_chat(self, chat_id: int) -> None:
+        self.conn.send({"type": "chat_delete", "id": chat_id})
+        if chat_id == self.chat_id:
+            self.chat_id, self.chat_title = None, ""
+            self.dirty = bool(self.panel.entries)
+
+    def _write_export(self, ev: dict) -> None:
+        from pathlib import Path
+
+        docs = next((d for d in (Path.home() / "Документи", Path.home() / "Documents") if d.is_dir()), Path.home())
+        name = "".join(ch if ch.isalnum() or ch in " -_." else "_" for ch in ev["title"])[:60].strip() or "чат"
+        path, _ = QFileDialog.getSaveFileName(None, "Експорт розмови", str(docs / f"{name}.md"), "Markdown (*.md)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(ev["markdown"], encoding="utf-8")
+        except OSError as e:
+            self.panel.add_entry("error", f"Не вдалося записати {path}: {e}")
+            return
+        self.show_panel()
+        self.panel.set_activity(f"📤 Збережено у {path}")
+
+    def _on_chat_event(self, ev: dict) -> None:
+        t = ev["type"]
+        if t == "chat_saved":
+            self.chat_id, self.chat_title, self.dirty = ev["id"], ev["title"], False
+            self.panel.set_activity(f"💾 Збережено «{ev['title']}»")
+            self.robot.set_state("happy", 1.2)
+            then, self._after_save = self._after_save, None
+            if then:
+                then()
+        elif t == "chat_list":
+            self.chats_dialog.set_chats(ev["chats"])
+        elif t == "chat_opened":
+            self.panel.clear()
+            for item in ev["transcript"]:
+                self.panel.add_entry(item["role"], item["text"])
+            self.chat_id, self.chat_title, self.dirty = ev["id"], ev["title"], False
+            self.show_panel()
+            self.panel.set_activity(f"📂 «{ev['title']}» — можна продовжувати розмову")
+            QTimer.singleShot(100, self.position_panel)
+        elif t == "chat_export":
+            self._write_export(ev)
+        elif t == "chat_error":
+            self._after_save = None
+            self.show_panel()
+            self.panel.set_activity(f"⚠ {ev['message']}")
 
     def answer_confirm(self, cid: str, approved: bool) -> None:
         self.touch()
@@ -375,6 +524,9 @@ class RobotWindow(QWidget):
     def on_event(self, ev: dict) -> None:  # noqa: C901
         self.touch()
         t = ev.get("type")
+        if t.startswith("chat_"):
+            self._on_chat_event(ev)
+            return
         if t == "uploaded":
             self._on_uploaded(ev)
             return

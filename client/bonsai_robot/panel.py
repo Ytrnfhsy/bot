@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
@@ -73,6 +73,8 @@ class ChatPanel(QWidget):
     image_pasted = Signal(str)
     cancel_requested = Signal()
     reset_requested = Signal()
+    save_requested = Signal()
+    chats_requested = Signal()
     confirm_answered = Signal(str, bool)
     closed = Signal()
 
@@ -104,10 +106,17 @@ class ChatPanel(QWidget):
         self.status = QLabel("● не підключено", objectName="status")
         self.status.setWordWrap(True)
         head.addWidget(self.status, 1)
+        self.btn_save = QPushButton("💾", objectName="flat", toolTip="Зберегти чат (Ctrl+S)")
+        self.btn_save.clicked.connect(self.save_requested)
+        self.btn_chats = QPushButton("📂", objectName="flat", toolTip="Збережені чати")
+        self.btn_chats.clicked.connect(self.chats_requested)
         self.btn_reset = QPushButton("⟲", objectName="flat", toolTip="Нова розмова")
         self.btn_reset.clicked.connect(self.reset_requested)
+        QShortcut(QKeySequence.StandardKey.Save, self, activated=self.save_requested.emit)
         self.btn_close = QPushButton("✕", objectName="flat", toolTip="Сховати")
         self.btn_close.clicked.connect(self.hide_panel)
+        head.addWidget(self.btn_save)
+        head.addWidget(self.btn_chats)
         head.addWidget(self.btn_reset)
         head.addWidget(self.btn_close)
         lay.addLayout(head)

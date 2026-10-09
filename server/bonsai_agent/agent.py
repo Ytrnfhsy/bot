@@ -395,5 +395,48 @@ class Agent:
     def reset_session(self, session_id: str) -> None:
         self.storage.clear_session(session_id)
 
+    # ---------------- збережені чати ----------------
+    def save_chat(self, session_id: str, title: str | None = None, chat_id: int | None = None) -> dict[str, Any]:
+        from .chats import default_title
+
+        messages = self.storage.load_session(session_id)
+        if not messages:
+            raise ValueError("Розмова порожня — нічого зберігати")
+        title = (title or "").strip() or default_title(messages)
+        new_id = self.storage.save_chat(title, messages, chat_id)
+        return {"id": new_id, "title": title}
+
+    def list_chats(self) -> list[dict[str, Any]]:
+        return self.storage.list_chats()
+
+    def open_chat(self, chat_id: int, session_id: str) -> dict[str, Any]:
+        """Відновлює збережений чат як поточну розмову (можна продовжувати)."""
+        from .chats import transcript
+
+        chat = self.storage.load_chat(chat_id)
+        if chat is None:
+            raise ValueError(f"Чат #{chat_id} не знайдено")
+        self.storage.save_session(session_id, chat["messages"])
+        return {"id": chat["id"], "title": chat["title"], "transcript": transcript(chat["messages"])}
+
+    def delete_chat(self, chat_id: int) -> bool:
+        return self.storage.delete_chat(chat_id)
+
+    def export_chat(self, session_id: str | None = None, chat_id: int | None = None) -> dict[str, str]:
+        """Markdown поточної розмови (session_id) або збереженого чату (chat_id)."""
+        from .chats import default_title, to_markdown
+
+        if chat_id is not None:
+            chat = self.storage.load_chat(chat_id)
+            if chat is None:
+                raise ValueError(f"Чат #{chat_id} не знайдено")
+            title, messages, when = chat["title"], chat["messages"], chat["updated_at"]
+        else:
+            messages = self.storage.load_session(session_id or "default")
+            if not messages:
+                raise ValueError("Розмова порожня — нічого експортувати")
+            title, when = default_title(messages), None
+        return {"title": title, "markdown": to_markdown(title, messages, self.config.agent_name, when)}
+
     async def close(self) -> None:
         await self.llm.close()

@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from typing import Any
 
 from .config import Config
@@ -19,13 +20,54 @@ DIM, BOLD, CYAN, YELLOW, GREEN, RED, RESET = (
 
 _current: asyncio.Task | None = None  # задача, яку скасовує Ctrl+C
 
-HELP = f"""{DIM}Команди: /reset — очистити розмову, /exit — вийти, Ctrl+C — скасувати поточну задачу{RESET}"""
+HELP = (
+    f"{DIM}Команди: /reset — нова розмова, /save [назва] — зберегти чат, /chats — збережені чати,\n"
+    f"/open N — відкрити чат №N, /delete N — видалити, /export [файл.md] — експорт у Markdown,\n"
+    f"/exit — вийти, Ctrl+C — скасувати поточну задачу{RESET}"
+)
+
+
+def parse_chat_command(text: str, session: str) -> tuple[dict[str, Any], str | None] | None:
+    """/save, /chats, /open, /delete, /export → (повідомлення протоколу, шлях для експорту)."""
+    cmd, _, arg = text.partition(" ")
+    arg = arg.strip()
+    if cmd == "/save":
+        return {"type": "chat_save", "session_id": session, "title": arg or None}, None
+    if cmd == "/chats":
+        return {"type": "chat_list"}, None
+    if cmd in {"/open", "/delete"} and arg.isdigit():
+        kind = "chat_open" if cmd == "/open" else "chat_delete"
+        return {"type": kind, "id": int(arg), "session_id": session}, None
+    if cmd == "/export":
+        return {"type": "chat_export", "session_id": session}, arg or None
+    return None
+
+
+def run_chat_command_locally(agent: Any, msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Те саме, що робить сервер на chat_* повідомлення, але без мережі (для локального режиму)."""
+    kind, session, cid = msg["type"], msg.get("session_id", "cli"), msg.get("id")
+    try:
+        events: list[dict[str, Any]] = []
+        if kind == "chat_save":
+            events.append({"type": "chat_saved", **agent.save_chat(session, msg.get("title"))})
+        elif kind == "chat_open":
+            events.append({"type": "chat_opened", **agent.open_chat(cid, session)})
+        elif kind == "chat_delete":
+            agent.delete_chat(cid)
+        elif kind == "chat_export":
+            events.append({"type": "chat_export", **agent.export_chat(session)})
+        if kind in {"chat_list", "chat_delete"}:
+            events.append({"type": "chat_list", "chats": agent.list_chats()})
+        return events
+    except ValueError as e:
+        return [{"type": "chat_error", "message": str(e)}]
 
 
 class Printer:
     """Друкує події агента в термінал."""
 
     def __init__(self, show_thinking: bool) -> None:
+        self.export_path: str | None = None  # куди записати наступний chat_export
         self.show_thinking = show_thinking
         self.streaming = False
         self.in_thinking = False
@@ -69,6 +111,27 @@ class Printer:
             print(f"{RED}Помилка: {ev['message']}{RESET}")
         elif t == "hello":
             print(f"{DIM}Підключено. Модель: {ev.get('model')}{RESET}")
+        elif t == "chat_saved":
+            print(f"{GREEN}💾 Збережено як #{ev['id']} «{ev['title']}»{RESET}")
+        elif t == "chat_list":
+            if not ev["chats"]:
+                print(f"{DIM}Збережених чатів немає{RESET}")
+            for c in ev["chats"]:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(c["updated_at"]))
+                print(f"  {BOLD}#{c['id']}{RESET} {c['title']} {DIM}· {c['count']} повідомл. · {when}{RESET}")
+        elif t == "chat_opened":
+            print(f"{GREEN}📂 Відкрито «{ev['title']}» — можна продовжувати розмову{RESET}")
+            for item in ev["transcript"][-6:]:
+                who = {"user": "ти", "assistant": "🤖", "tool": "  "}[item["role"]]
+                print(f"{DIM}{who}: {' '.join(item['text'].split())[:150]}{RESET}")
+        elif t == "chat_export":
+            path = self.export_path or f"{ev['title'][:40].strip() or 'chat'}.md".replace("/", "_")
+            self.export_path = None
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(ev["markdown"])
+            print(f"{GREEN}📤 Експортовано у {os.path.abspath(path)}{RESET}")
+        elif t == "chat_error":
+            print(f"{YELLOW}{ev['message']}{RESET}")
 
 
 def ask_yes_no(summary: str) -> bool:
@@ -118,6 +181,11 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
             if text == "/reset":
                 agent.reset_session(args.session)
                 print(f"{DIM}Розмову очищено{RESET}")
+                continue
+            if parsed := parse_chat_command(text, args.session):
+                msg, printer.export_path = parsed
+                for ev in run_chat_command_locally(agent, msg):
+                    printer(ev)
                 continue
             global _current
             _current = asyncio.create_task(agent.run(args.session, text, emit, confirm))
@@ -211,6 +279,11 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
                     break
                 if text == "/reset":
                     await ws.send(json.dumps({"type": "reset", "session_id": args.session}))
+                    continue
+                if parsed := parse_chat_command(text, args.session):
+                    msg, printer.export_path = parsed
+                    await ws.send(json.dumps(msg, ensure_ascii=False))
+                    await asyncio.sleep(0.3)  # відповідь надрукує reader
                     continue
                 try:
                     await run_one(text)
