@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -13,13 +14,18 @@ from PySide6.QtWebSockets import QWebSocket
 
 def normalize_url(url: str) -> str:
     """ws://host:8765 → ws://host:8765/ws; http(s):// → ws(s)://; без схеми → ws://"""
-    url = url.strip()
+    url = "".join(url.split())  # пробіли/переноси, що потрапили при копіюванні
     if "://" not in url:
         url = "ws://" + url
+    # типова одруківка: ws://host/:8765/ws → ws://host:8765/ws
+    url = re.sub(r"^(\w+://[^/?#]+)/+:(\d+)", r"\1:\2", url)
     parts = urlsplit(url)
     scheme = {"http": "ws", "https": "wss"}.get(parts.scheme, parts.scheme)
+    netloc = parts.netloc
+    if scheme == "ws" and parts.port is None:
+        netloc += ":8765"  # без порту Qt пішов би на 80 — а агент слухає 8765
     path = parts.path if parts.path not in {"", "/"} else "/ws"
-    return urlunsplit((scheme, parts.netloc, path, parts.query, ""))
+    return urlunsplit((scheme, netloc, path, parts.query, ""))
 
 
 def explain_error(raw: str) -> str:

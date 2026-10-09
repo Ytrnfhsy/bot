@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .connection import AgentConnection
+from .connection import AgentConnection, normalize_url
 from .panel import ChatPanel
 from .robot import RobotWidget
 from .settings import Settings
@@ -179,8 +179,9 @@ class RobotWindow(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         s = self.settings
-        changed_conn = (dlg.url.text().strip(), dlg.token.text().strip()) != (s.server_url, s.token)
-        s.server_url, s.token = dlg.url.text().strip(), dlg.token.text().strip()
+        url = normalize_url(dlg.url.text())  # зберігаємо вже виправлену адресу — видно, куди підключаємось
+        changed_conn = (url, dlg.token.text().strip()) != (s.server_url, s.token)
+        s.server_url, s.token = url, dlg.token.text().strip()
         s.show_thinking = dlg.thinking.isChecked()
         if abs(dlg.scale.value() - s.scale) > 1e-3:
             s.scale = dlg.scale.value()
