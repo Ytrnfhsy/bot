@@ -232,8 +232,8 @@ class RobotWindow(QWidget):
     def on_connected(self) -> None:
         self.robot.set_state("happy", 1.5)
 
-    def on_disconnected(self, reason: str) -> None:
-        self.panel.set_status(f"немає з'єднання: {reason}", False)
+    def on_disconnected(self, reason: str, raw: str = "") -> None:
+        self.panel.set_status(f"немає з'єднання: {reason}", False, details=f"{self.conn.url}\n{raw}")
         if self.busy:
             self.busy = False
             self.panel.set_busy(False)

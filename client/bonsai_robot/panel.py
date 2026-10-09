@@ -83,6 +83,7 @@ class ChatPanel(QWidget):
         # заголовок
         head = QHBoxLayout()
         self.status = QLabel("● не підключено", objectName="status")
+        self.status.setWordWrap(True)
         head.addWidget(self.status, 1)
         self.btn_reset = QPushButton("⟲", objectName="flat", toolTip="Нова розмова")
         self.btn_reset.clicked.connect(self.reset_requested)
@@ -162,9 +163,11 @@ class ChatPanel(QWidget):
         self.hide()
         self.closed.emit()
 
-    def set_status(self, text: str, ok: bool) -> None:
+    def set_status(self, text: str, ok: bool, details: str = "") -> None:
         color = "#2F9E44" if ok else "#C92A2A"
         self.status.setText(f'<span style="color:{color}">●</span> {html.escape(text)}')
+        self.status.setToolTip(details or text)
+        self.adjustSize()
 
     def set_busy(self, busy: bool) -> None:
         self.btn_stop.setVisible(busy)

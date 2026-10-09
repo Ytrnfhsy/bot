@@ -100,10 +100,11 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
         token = ws.query_params.get("token") or ws.headers.get("x-bonsai-token")
+        await ws.accept()
         if not _check_token(cfg, token):
+            # приймаємо і одразу закриваємо з кодом 4401 — клієнт відрізнить «невірний токен» від інших 403
             await ws.close(code=4401, reason="unauthorized")
             return
-        await ws.accept()
         await Connection(ws, ws.app.state.agent).serve()
 
     return app

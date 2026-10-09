@@ -136,25 +136,50 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
 async def _remote_chat(url: str, token: str, args: argparse.Namespace, once: str | None) -> None:
     import websockets
 
+    try:
+        await _remote_session(url, token, args, once)
+    except websockets.ConnectionClosed as e:
+        code = e.rcvd.code if e.rcvd else None
+        reason = "невірний токен (перевір --token / BONSAI_TOKEN)" if code == 4401 else f"з'єднання закрито ({e})"
+        print(f"{RED}Сервер відхилив підключення: {reason}{RESET}")
+    except websockets.InvalidStatus as e:
+        hint = " — адреса має закінчуватися на /ws" if e.response.status_code in (403, 404) else ""
+        print(f"{RED}Сервер відповів HTTP {e.response.status_code}{hint}{RESET}")
+    except (OSError, asyncio.TimeoutError, websockets.InvalidURI, websockets.InvalidHandshake) as e:
+        print(f"{RED}Не вдалося підключитися до {url}: {e or type(e).__name__}{RESET}")
+
+
+async def _remote_session(url: str, token: str, args: argparse.Namespace, once: str | None) -> None:
+    import websockets
+
+    if "://" not in url:
+        url = "ws://" + url
+    if url.rstrip("/").count("/") == 2:  # ws://host:port без шляху
+        url = url.rstrip("/") + "/ws"
     if token:
         url += ("&" if "?" in url else "?") + f"token={token}"
     printer = Printer(args.thinking)
-    async with websockets.connect(url, max_size=None, ping_interval=20) as ws:
+    async with websockets.connect(url, max_size=None, ping_interval=20, open_timeout=15) as ws:
         done = asyncio.Event()
+        # перше повідомлення — hello; при невірному токені сервер тут закриє з'єднання (4401)
+        printer(json.loads(await asyncio.wait_for(ws.recv(), 15)))
 
         async def reader() -> None:
-            async for raw in ws:
-                ev = json.loads(raw)
-                if ev.get("type") == "confirm_request":
-                    printer._end_stream()
-                    ok = await asyncio.to_thread(ask_yes_no, ev["summary"])
-                    await ws.send(json.dumps({"type": "confirm_response", "id": ev["id"], "approved": ok}))
-                    continue
-                printer(ev)
-                if ev.get("type") == "status" and ev.get("state") == "idle":
-                    done.set()
-                elif ev.get("type") == "error":
-                    done.set()
+            try:
+                async for raw in ws:
+                    ev = json.loads(raw)
+                    if ev.get("type") == "confirm_request":
+                        printer._end_stream()
+                        ok = await asyncio.to_thread(ask_yes_no, ev["summary"])
+                        await ws.send(json.dumps({"type": "confirm_response", "id": ev["id"], "approved": ok}))
+                        continue
+                    printer(ev)
+                    if ev.get("type") == "status" and ev.get("state") == "idle":
+                        done.set()
+                    elif ev.get("type") == "error":
+                        done.set()
+            finally:
+                done.set()  # з'єднання обірвалось — не чекаємо вічно
 
         reader_task = asyncio.create_task(reader())
         try:
@@ -167,6 +192,9 @@ async def _remote_chat(url: str, token: str, args: argparse.Namespace, once: str
                 if _current.cancelled():
                     await ws.send(json.dumps({"type": "cancel"}))
                     raise asyncio.CancelledError
+                if reader_task.done():
+                    reader_task.result()  # прокидаємо ConnectionClosed нагору
+                    raise websockets.ConnectionClosedError(None, None)
 
             if once:
                 await run_one(once)
