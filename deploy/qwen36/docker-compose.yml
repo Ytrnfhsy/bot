@@ -1,0 +1,80 @@
+# Qwen3.6-35B-A3B (MoE, ~3B активних параметрів) на RTX 3060 12 ГБ + ≥32 ГБ RAM.
+#
+# Модель (~22 ГБ) поклади поруч із репозиторієм (у ~/bot) або вкажи MODEL_DIR:
+#   curl -L -o ~/bot/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+#     https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+#
+# Запуск/зупинка — простіше через ../switch-model.sh qwen | bonsai
+#   docker compose -f deploy/qwen36/docker-compose.yml up -d
+#   docker compose -f deploy/qwen36/docker-compose.yml logs -f
+#
+# Порт той самий, що й у Bonsai (127.0.0.1:8085) — тому одночасно працює лише одна модель
+# (обидві все одно не помістяться у 12 ГБ VRAM).
+
+services:
+  qwen36:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda   # офіційна збірка llama.cpp (CUDA 12, працює з драйвером 580)
+    container_name: qwen36
+    restart: "no"
+    ports:
+      - "127.0.0.1:8085:8080"
+    volumes:
+      - ${MODEL_DIR:-../..}/${MODEL_FILE:-Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}:/models/model.gguf:ro
+    command:
+      - -m
+      - /models/model.gguf
+      - --alias
+      - qwen3.6-35b-a3b                # = BONSAI_MODEL у пресеті агента
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -ngl
+      - "99"
+      # Скільки шарів «експертів» тримати у RAM (на CPU), решта — на GPU.
+      # Менше число = швидше, але більше VRAM. 26 — з запасом для 12 ГБ і 64k контексту.
+      # Якщо в лозі «out of memory» — збільш (28, 30…); якщо в nvidia-smi лишається >1.5 ГБ — зменш.
+      - --n-cpu-moe
+      - "${N_CPU_MOE:-26}"
+      - -fa
+      - "on"
+      - -c
+      - "65536"
+      - -ctk
+      - q8_0
+      - -ctv
+      - q8_0
+      - -np
+      - "1"                            # один слот: агент працює з однією задачею — економимо VRAM
+      - --jinja                        # шаблон чату з tool calling
+      # Рекомендації Qwen для режиму міркувань у коді/агентних задачах
+      - --temp
+      - "0.6"
+      - --top-p
+      - "0.95"
+      - --top-k
+      - "20"
+      - --min-p
+      - "0"
+      # Щоб вимкнути «міркування» (швидше, але простіше відповіді), розкоментуй:
+      # - --chat-template-kwargs
+      # - '{"enable_thinking": false}'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Ваги «експертів» (~15 ГБ) живуть у RAM — ліміт має бути з запасом (не 11g, як для Bonsai)
+    mem_limit: ${MEM_LIMIT:-26g}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 120s

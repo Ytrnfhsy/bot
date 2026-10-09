@@ -89,6 +89,26 @@ ollama pull hf.co/prism-ml/Ternary-Bonsai-27B-gguf
 > ⚠️ За даними PrismML, ternary GGUF потребує їхнього форку llama.cpp, і релізи Ollama можуть
 > відмовлятися завантажувати модель. У такому разі використовуй варіант А.
 
+**Варіант В — Qwen3.6-35B-A3B (MoE).** Для RTX 3060 12 ГБ потрібно ще ≥32 ГБ RAM. Це модель із «експертами»:
+на кожен токен працює лише ~3B параметрів. Частина ваг живе у звичайній RAM (`--n-cpu-moe`), тому модель
+вміщується в 12 ГБ VRAM. Вона сильніша за Bonsai у міркуваннях і коді й має повноцінну точність, а не ternary.
+Конфіг лежить у [`deploy/qwen36/docker-compose.yml`](deploy/qwen36/docker-compose.yml) і використовує офіційний образ llama.cpp.
+
+```bash
+# модель ~22 ГБ, кладемо в ~/bot
+curl -L -C - -o ~/bot/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+  https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+
+deploy/switch-model.sh qwen     # зупинить Bonsai, запустить Qwen, перемкне агента
+deploy/switch-model.sh bonsai   # повернутися назад
+deploy/switch-model.sh status
+```
+
+Як підібрати `--n-cpu-moe` (типово 26, змінюється через змінну `N_CPU_MOE`): менше значення працює швидше, але
+займає більше VRAM. Якщо в лозі з'являється «out of memory», збільш значення. Якщо `nvidia-smi` показує понад 1.5 ГБ
+вільної пам'яті, зменш на 2–4. Міркування («thinking») увімкнені. Щоб відповіді були швидшими, розкоментуй
+`--chat-template-kwargs` у compose.
+
 ### 1.2 Агент
 
 Швидкий запуск:
