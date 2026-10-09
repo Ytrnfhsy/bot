@@ -11,7 +11,7 @@
   {"type": "ping"}
 
 Сервер → клієнт:
-  {"type": "hello", "model": ..., "version": ...}
+  {"type": "hello", "name": "Kru", "model": ..., "version": ...}
   {"type": "status", "state": "thinking|working|waiting_confirm|idle", ...}
   {"type": "thinking", "text": "..."}         — потік міркувань моделі
   {"type": "token", "text": "..."}            — потік тексту відповіді (чернетка)
@@ -194,7 +194,8 @@ class Connection:
                 fut.set_result(False)
 
     async def serve(self) -> None:
-        await self.send({"type": "hello", "model": self.agent.config.model, "version": __version__})
+        cfg = self.agent.config
+        await self.send({"type": "hello", "name": cfg.agent_name, "model": cfg.model, "version": __version__})
         try:
             while True:
                 msg = await self.ws.receive_json()

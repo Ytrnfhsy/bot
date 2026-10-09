@@ -66,6 +66,8 @@ class Config:
     max_history_chars: int = 48000
     max_tool_output_chars: int = 12000
     language: str = "українська"
+    agent_name: str = "Kru"
+    persona: str = ""  # характер/стиль, напр. "привітний, з легким гумором"
 
     # Інструменти
     workspace: Path = field(default_factory=lambda: Path.home() / "bonsai-workspace")
@@ -105,6 +107,8 @@ class Config:
             max_history_chars=int(_env("MAX_HISTORY_CHARS", str(d.max_history_chars))),
             max_tool_output_chars=int(_env("MAX_TOOL_OUTPUT_CHARS", str(d.max_tool_output_chars))),
             language=_env("LANGUAGE", d.language),
+            agent_name=_env("AGENT_NAME", d.agent_name),
+            persona=_env("PERSONA", d.persona),
             workspace=Path(_env("WORKSPACE", str(d.workspace))).expanduser(),
             allow_outside_workspace=_env_bool("ALLOW_OUTSIDE_WORKSPACE", d.allow_outside_workspace),
             auto_approve=_env_bool("AUTO_APPROVE", d.auto_approve),

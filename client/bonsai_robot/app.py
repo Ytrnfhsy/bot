@@ -377,7 +377,12 @@ class RobotWindow(QWidget):
             self.robot.set_state("sad", 2.0)
             return
         if t == "hello":
-            self.panel.set_status(f"підключено · {str(ev.get('model', '')).split('/')[-1]}", True)
+            name = ev.get("name") or "Bonsai"
+            model = str(ev.get("model", "")).split("/")[-1]
+            self.panel.set_status(f"{name} · підключено · {model}", True)
+            self.setWindowTitle(name)
+            if self.tray:
+                self.tray.setToolTip(name)
         elif t == "status":
             state = ev.get("state")
             if state == "thinking":

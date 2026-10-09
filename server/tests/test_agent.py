@@ -293,3 +293,13 @@ async def test_read_docx_and_binary(cfg):
     (cfg.workspace / "pic.png").write_bytes(b"\x89PNG\x00\x00")
     with pytest.raises(ToolError, match="зображення"):
         await read_file(ctx, "pic.png")
+
+
+async def test_agent_name_in_prompt(cfg):
+    cfg.agent_name, cfg.persona = "Kru", "привітний, з гумором"
+    llm = FakeLLM([text("Я Kru!")])
+    agent = Agent(cfg, llm=llm)
+    rec = Recorder()
+    await agent.run("s", "хто ти?", rec.emit, rec.confirm)
+    system = llm.calls[0]["messages"][0]["content"]
+    assert "Your name is Kru" in system and "привітний, з гумором" in system

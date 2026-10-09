@@ -21,7 +21,8 @@ log = logging.getLogger("bonsai.agent")
 EmitFunc = Callable[[dict[str, Any]], Awaitable[None]]
 ConfirmFunc = Callable[[str, str, dict[str, Any]], Awaitable[bool]]  # (tool, summary, args) -> approved
 
-SYSTEM_PROMPT = """You are Bonsai — a capable autonomous assistant agent running on the user's server.
+SYSTEM_PROMPT = """Your name is {name}. You are a capable autonomous assistant agent running on the user's server.
+When asked who you are, introduce yourself as {name}.{persona}
 You solve tasks step by step using tools, and you finish with a clear, well-structured answer.
 
 Current date/time: {now}
@@ -156,6 +157,8 @@ class Agent:
             now=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z (%A)"),
             workspace=self.config.workspace,
             language=self.config.language,
+            name=self.config.agent_name,
+            persona=f"\nPersonality: {self.config.persona}" if self.config.persona else "",
             memories=memories,
         )
         if not self.native_tools:
