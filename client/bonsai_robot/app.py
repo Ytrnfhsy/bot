@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from .connection import AgentConnection, normalize_url
 from .icon import app_icon
+from .winplatform import IS_WINDOWS, WinHotkey, autostart_enabled, set_autostart
 from .panel import ChatPanel
 from .robot import RobotWidget
 from .settings import Settings
@@ -49,6 +50,11 @@ class SettingsDialog(QDialog):
         form.addRow("Токен:", self.token)
         form.addRow("Розмір робота:", self.scale)
         form.addRow("", self.thinking)
+        self.autostart = None
+        if IS_WINDOWS:
+            self.autostart = QCheckBox("Запускати разом із Windows")
+            self.autostart.setChecked(autostart_enabled())
+            form.addRow("", self.autostart)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -111,6 +117,10 @@ class RobotWindow(QWidget):
 
         self._build_menu()
         self._build_tray()
+        # Windows: Ctrl+Alt+B через RegisterHotKey (на Linux клавішу реєструє інсталятор у KDE/GNOME)
+        self.hotkey = WinHotkey(lambda: self.handle_command("toggle"))
+        if IS_WINDOWS and not demo:
+            self.hotkey.register(int(self.winId()))
         self._place_initial()
 
         self._sleep_timer = QTimer(self, interval=5000)
@@ -208,6 +218,8 @@ class RobotWindow(QWidget):
         changed_conn = (url, dlg.token.text().strip()) != (s.server_url, s.token)
         s.server_url, s.token = url, dlg.token.text().strip()
         s.show_thinking = dlg.thinking.isChecked()
+        if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
+            set_autostart(dlg.autostart.isChecked())
         if abs(dlg.scale.value() - s.scale) > 1e-3:
             s.scale = dlg.scale.value()
             self.robot.scale_factor = s.scale
@@ -473,8 +485,11 @@ class RobotWindow(QWidget):
     def export_dir():
         from pathlib import Path
 
-        docs = next((d for d in (Path.home() / "Документи", Path.home() / "Documents") if d.is_dir()), Path.home())
-        return docs / "Kru"
+        from PySide6.QtCore import QStandardPaths
+
+        # системна тека «Документи» (у Fedora з українською — ~/Документи, у Windows — Documents)
+        docs = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        return Path(docs or Path.home()) / "Kru"
 
     def _write_export(self, ev: dict) -> None:
         """Експорт без системних вікон: одразу у ~/Документи/Kru/<назва>.md, далі — повідомлення в панелі."""
@@ -651,7 +666,11 @@ class RobotWindow(QWidget):
 
 
 def _ipc_name() -> str:
-    return f"bonsai-robot-{os.getuid()}"
+    import getpass
+    import re as _re
+
+    user = _re.sub(r"[^\w.-]", "_", getpass.getuser() or "user")  # os.getuid() немає на Windows
+    return f"bonsai-robot-{user}"
 
 
 def _command_from_argv(argv: list[str]) -> str | None:
@@ -673,6 +692,8 @@ def _code_hash() -> str:
     h = hashlib.sha1()
     for f in sorted(Path(__file__).parent.glob("*.py")):
         h.update(f.read_bytes())
+    if getattr(sys, "frozen", False):  # зібраний .exe: модулі всередині архіву — беремо час збірки exe
+        h.update(str(Path(sys.executable).stat().st_mtime_ns).encode())
     return h.hexdigest()[:12]
 
 
@@ -754,6 +775,11 @@ def main() -> None:
     app.setDesktopFileName("bonsai-robot")  # панель задач KDE/GNOME бере іконку з bonsai-robot.desktop
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
+    if "--selftest" in sys.argv:  # перевірка на чистій системі (CI): вікно, панель, клавіша, автозапуск
+        from .selftest import run_selftest
+
+        args = sys.argv[sys.argv.index("--selftest") + 1 :]
+        sys.exit(run_selftest(app, args[0] if args else "selftest-report.json"))
     demo = "--demo" in sys.argv
     cmd = _command_from_argv(sys.argv)
 
@@ -774,6 +800,8 @@ def main() -> None:
         _listen_for_commands(win)
         if cmd:
             QTimer.singleShot(400, lambda: win.handle_command(cmd))
+        elif getattr(settings, "first_run", False):
+            QTimer.singleShot(700, win.open_settings)  # перший запуск: одразу вказати сервер і токен
     sys.exit(app.exec())
 
 

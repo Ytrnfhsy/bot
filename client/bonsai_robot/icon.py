@@ -2,6 +2,7 @@
 
 python -m bonsai_robot.icon ~/.local/share/icons   — згенерувати PNG у hicolor (робить інсталятор)
 python -m bonsai_robot.icon --preview icons.png    — аркуш з усіма розмірами (для перевірки)
+python -m bonsai_robot.icon --ico robot.ico        — іконка Windows (усі розміри в одному .ico)
 """
 
 from __future__ import annotations
@@ -71,6 +72,31 @@ def install(icons_root: Path) -> None:
     print(f"Іконки встановлено в {icons_root}/hicolor/*/apps/bonsai-robot.png")
 
 
+def write_ico(path: Path, sizes: tuple[int, ...] = (16, 20, 24, 32, 40, 48, 64, 128, 256)) -> None:
+    """Багаторозмірний .ico (кожен розмір — PNG усередині; так підтримує Windows Vista+)."""
+    import struct
+
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+
+    blobs = []
+    for size in sizes:
+        data = QByteArray()
+        buf = QBuffer(data)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        render_icon(size).save(buf, "PNG")
+        blobs.append((size, bytes(data)))
+    header = struct.pack("<HHH", 0, 1, len(blobs))
+    offset = 6 + 16 * len(blobs)
+    entries, payload = b"", b""
+    for size, png in blobs:
+        dim = 0 if size >= 256 else size  # 0 означає 256
+        entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(png), offset + len(payload))
+        payload += png
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(header + entries + payload)
+    print(f"Іконку Windows записано: {path}")
+
+
 def preview(path: Path) -> None:
     pad = 16
     width = sum(SIZES[:-1]) + pad * len(SIZES)
@@ -91,6 +117,8 @@ def main(argv: list[str]) -> None:
     _app = QApplication.instance() or QApplication([])
     if len(argv) >= 2 and argv[0] == "--preview":
         preview(Path(argv[1]))
+    elif len(argv) >= 2 and argv[0] == "--ico":
+        write_ico(Path(argv[1]).expanduser())
     elif argv:
         install(Path(argv[0]).expanduser())
     else:

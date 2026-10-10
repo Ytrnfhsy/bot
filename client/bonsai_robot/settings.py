@@ -1,4 +1,4 @@
-"""Налаштування клієнта: ~/.config/bonsai-robot/config.json"""
+"""Налаштування клієнта: ~/.config/bonsai-robot/config.json (Windows: %APPDATA%\\bonsai-robot\\config.json)"""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ from pathlib import Path
 
 
 def config_path() -> Path:
-    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    if os.name == "nt" and os.environ.get("APPDATA"):
+        base = Path(os.environ["APPDATA"])
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return base / "bonsai-robot" / "config.json"
 
 
@@ -41,7 +44,8 @@ class Settings:
         # змінні середовища мають пріоритет (зручно для першого запуску)
         s.server_url = os.environ.get("BONSAI_SERVER", s.server_url)
         s.token = os.environ.get("BONSAI_TOKEN", s.token)
-        if not path.is_file():
+        s.first_run = not path.is_file()  # перший запуск — одразу покажемо налаштування
+        if s.first_run:
             s.save()
         return s
 
