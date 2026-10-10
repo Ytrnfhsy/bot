@@ -136,28 +136,33 @@ class RobotWindow(QWidget):
 
     def on_drag(self, delta: QPointF) -> None:
         self.move(self.pos() + delta.toPoint())
-        if self.panel.isVisible():
+        if self.panel.shown:
             self.position_panel()
 
     def save_position(self) -> None:
         self.settings.pos_x, self.settings.pos_y = self.x(), self.y()
         self.settings.save()
 
-    def position_panel(self) -> None:
+    def _panel_target(self) -> QPoint:
+        """Де має стояти панель: ліворуч від робота, якщо є місце, інакше праворуч; «хвостик» — до голови."""
         self.panel.adjustSize()
         screen = QGuiApplication.screenAt(self.geometry().center()) or QGuiApplication.primaryScreen()
         geo: QRect = screen.availableGeometry()
         pw, ph = self.panel.width(), self.panel.height()
-        # ліворуч від робота, якщо є місце, інакше праворуч
-        x = self.x() - pw + 10 if self.x() - pw + 10 >= geo.left() else self.x() + self.width() - 10
+        left_ok = self.x() - pw + 6 >= geo.left()
+        x = self.x() - pw + 6 if left_ok else self.x() + self.width() - 6
         y = self.y() + self.height() - ph
         x = max(geo.left(), min(x, geo.right() - pw))
         y = max(geo.top(), min(y, geo.bottom() - ph))
-        self.panel.move(x, y)
+        head_y = self.y() + int(85 * self.robot.scale_factor)  # рівень обличчя робота
+        self.panel.set_tail("right" if left_ok else "left", head_y - y)
+        return QPoint(x, y)
+
+    def position_panel(self) -> None:
+        self.panel.move_to(self._panel_target())
 
     def show_panel(self) -> None:
-        self.position_panel()
-        self.panel.show_panel()
+        self.panel.show_panel(self._panel_target())
         QTimer.singleShot(0, self.position_panel)
 
     # ---------------- меню / трей ----------------
@@ -227,7 +232,7 @@ class RobotWindow(QWidget):
         self.touch()
         if self.robot.state == "sleeping":
             self.robot.set_state("happy", 1.2)
-        if self.panel.isVisible():
+        if self.panel.shown:
             self.panel.hide_panel()
         else:
             self.show_panel()
@@ -351,7 +356,7 @@ class RobotWindow(QWidget):
         if name == "raise":  # повторний запуск без параметрів — просто показуємо робота
             self.raise_()
         elif name == "toggle":
-            if self.panel.isVisible():
+            if self.panel.shown:
                 self.panel.hide_panel()
             else:
                 self.show_panel()
@@ -594,7 +599,7 @@ class RobotWindow(QWidget):
             talk = min(6.0, 1.0 + len(text) / 120)
             self.robot.set_state("talking", talk, then="happy")
             QTimer.singleShot(int(talk * 1000) + 1800, self._back_to_idle)
-            if not self.panel.isVisible():
+            if not self.panel.shown:
                 self.show_panel()
             else:
                 QTimer.singleShot(80, self.position_panel)
@@ -610,7 +615,7 @@ class RobotWindow(QWidget):
         if (
             self.robot.state == "idle"
             and not self.busy
-            and not self.panel.isVisible()
+            and not self.panel.shown
             and time.monotonic() - self.last_activity > self.settings.sleep_after_sec
         ):
             self.robot.set_state("sleeping")
@@ -631,12 +636,51 @@ def _command_from_argv(argv: list[str]) -> str | None:
     return None
 
 
+def _code_hash() -> str:
+    """Відбиток коду робота — щоб відрізнити запущену стару версію від щойно встановленої."""
+    import hashlib
+    from pathlib import Path
+
+    h = hashlib.sha1()
+    for f in sorted(Path(__file__).parent.glob("*.py")):
+        h.update(f.read_bytes())
+    return h.hexdigest()[:12]
+
+
+CODE_HASH = _code_hash()  # обчислюється при старті процесу й далі не змінюється
+
+
 def _send_to_running(cmd: str) -> bool:
+    """True — команду передано вже запущеному роботу (і тоді цей процес не потрібен).
+
+    Якщо запущений робот — стара версія (після оновлення), просимо його завершитися і стартуємо самі.
+    """
+    import time as _time
+
     from PySide6.QtNetwork import QLocalSocket
 
     sock = QLocalSocket()
     sock.connectToServer(_ipc_name())
     if not sock.waitForConnected(300):
+        return False
+    sock.write(b"ver\n")
+    sock.flush()
+    reply = ""
+    if sock.waitForReadyRead(800):
+        reply = bytes(sock.readLine()).decode("utf-8", "replace").strip()
+    if reply != f"ver {CODE_HASH}":
+        print("[bonsai-robot] запущено стару версію робота — замінюю її новою", flush=True)
+        sock.write(b"quit\n")
+        sock.flush()
+        sock.waitForBytesWritten(1000)
+        sock.disconnectFromServer()
+        for _ in range(40):  # чекаємо, поки старий процес завершиться
+            _time.sleep(0.1)
+            probe = QLocalSocket()
+            probe.connectToServer(_ipc_name())
+            if not probe.waitForConnected(100):
+                break
+            probe.disconnectFromServer()
         return False
     sock.write((cmd.replace("\n", " ") + "\n").encode("utf-8"))
     sock.flush()
@@ -657,7 +701,12 @@ def _listen_for_commands(win: RobotWindow) -> None:
 
         def read() -> None:
             while conn.canReadLine():
-                win.handle_command(bytes(conn.readLine()).decode("utf-8", "replace"))
+                line = bytes(conn.readLine()).decode("utf-8", "replace").strip()
+                if line == "ver":  # новий запуск питає версію: якщо відрізняється — попросить нас завершитися
+                    conn.write(f"ver {CODE_HASH}\n".encode())
+                    conn.flush()
+                else:
+                    win.handle_command(line)
 
         conn.readyRead.connect(read)
         conn.disconnected.connect(conn.deleteLater)
