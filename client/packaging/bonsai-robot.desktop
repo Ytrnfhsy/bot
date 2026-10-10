@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Bonsai Robot
+Comment=Робот-помічник на базі Bonsai Agent
+Exec=@EXEC@
+Icon=bonsai-robot
+Terminal=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
+StartupNotify=false

@@ -1,0 +1,75 @@
+# Qwen3.6-35B-A3B (MoE, ~3B активних параметрів) на RTX 3060 12 ГБ + ≥32 ГБ RAM.
+#
+# Файли поклади поруч із репозиторієм (у ~/bot) або вкажи MODEL_DIR:
+#   модель (~22 ГБ):
+#     curl -L -C - -o ~/bot/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+#       https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+#   зір — розуміння зображень (~0.9 ГБ, необов'язково; без нього модель працює лише з текстом):
+#     curl -L -C - -o ~/bot/mmproj-Qwen3.6-35B-A3B-F16.gguf \
+#       https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf
+#
+# Запуск/зупинка — простіше через ../switch-model.sh qwen | bonsai
+#
+# Порт той самий, що й у Bonsai (127.0.0.1:8085) — одночасно працює лише одна модель.
+
+services:
+  qwen36:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda   # офіційна збірка llama.cpp (CUDA 12, працює з драйвером 580)
+    container_name: qwen36
+    restart: "no"
+    ports:
+      - "127.0.0.1:8085:8080"
+    volumes:
+      - ${MODEL_DIR:-../..}:/models:ro
+    environment:
+      MODEL_FILE: ${MODEL_FILE:-Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}
+      MMPROJ_FILE: ${MMPROJ_FILE:-mmproj-Qwen3.6-35B-A3B-F16.gguf}
+      # Скільки шарів «експертів» тримати у RAM (на CPU), решта — на GPU. Менше = швидше, але більше VRAM.
+      # Порожньо — автоматично: 26 без зору, 30 із зором (візуальний модуль займає ~1 ГБ VRAM).
+      # «out of memory» у лозі → збільш; у nvidia-smi лишається >1.5 ГБ → зменш.
+      N_CPU_MOE: ${N_CPU_MOE:-}
+      # 1 — тримати візуальний модуль на CPU (економить VRAM, але картинки обробляються повільніше)
+      MMPROJ_ON_CPU: ${MMPROJ_ON_CPU:-0}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        VISION=""
+        NCM="$${N_CPU_MOE:-26}"
+        if [ -f "/models/$$MMPROJ_FILE" ]; then
+          VISION="--mmproj /models/$$MMPROJ_FILE"
+          [ "$$MMPROJ_ON_CPU" = "1" ] && VISION="$$VISION --no-mmproj-offload" || NCM="$${N_CPU_MOE:-30}"
+          echo "[qwen36] зір: увімкнено ($$MMPROJ_FILE)"
+        else
+          echo "[qwen36] зір: вимкнено (немає /models/$$MMPROJ_FILE)"
+        fi
+        echo "[qwen36] --n-cpu-moe $$NCM"
+        exec /app/llama-server \
+          -m "/models/$$MODEL_FILE" $$VISION \
+          --alias qwen3.6-35b-a3b \
+          --host 0.0.0.0 --port 8080 \
+          -ngl 99 --n-cpu-moe "$$NCM" \
+          -fa on -c 65536 -ctk q8_0 -ctv q8_0 \
+          -np 1 \
+          --jinja \
+          --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0
+        # Щоб вимкнути «міркування» (швидше, але простіше відповіді), додай у рядок вище:
+        #   --chat-template-kwargs '{"enable_thinking": false}'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Ваги «експертів» (~15–17 ГБ) живуть у RAM — ліміт має бути з запасом (не 11g, як для Bonsai)
+    mem_limit: ${MEM_LIMIT:-26g}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 120s

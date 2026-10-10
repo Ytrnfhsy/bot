@@ -1,0 +1,3 @@
+# Windows-скрипти мають лишатися з CRLF (і .ps1 — з UTF-8 BOM, інакше PowerShell 5.1 псує кирилицю)
+client/windows/*.ps1 text eol=crlf
+client/windows/*.cmd text eol=crlf

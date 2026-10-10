@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]   # гілки з PR перевіряються через pull_request — без дублювання запусків
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  server-tests:
+    timeout-minutes: 25
+    name: Сервер — тести
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "./server[dev]"
+      - run: pytest -q
+        working-directory: server
+
+  robot-linux:
+    timeout-minutes: 25
+    name: Робот — самоперевірка (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 fonts-dejavu-core
+      - run: pip install ./client
+      - name: Самоперевірка
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m bonsai_robot --selftest selftest-linux/report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-linux
+          path: selftest-linux
+
+  robot-windows-install:
+    timeout-minutes: 25
+    name: Робот — інсталятор Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install_windows.ps1 (Windows PowerShell 5.1, як у користувача)
+        shell: powershell
+        run: .\client\windows\install_windows.ps1 -Server ws://127.0.0.1:9/ws -Token test -NoAutostart -NoLaunch -NoDesktopShortcut
+      - name: Перевірка результату встановлення
+        shell: pwsh
+        run: |
+          $prefix = "$env:LOCALAPPDATA\BonsaiRobot"
+          foreach ($f in @("$prefix\venv\Scripts\pythonw.exe", "$prefix\robot.ico",
+                           "$([Environment]::GetFolderPath('Programs'))\Bonsai Robot.lnk",
+                           "$env:APPDATA\bonsai-robot\config.json")) {
+            if (-not (Test-Path $f)) { throw "Немає: $f" } else { Write-Host "OK: $f" }
+          }
+          Get-Content "$env:APPDATA\bonsai-robot\config.json"
+      - name: Самоперевірка встановленого робота
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          & "$env:LOCALAPPDATA\BonsaiRobot\venv\Scripts\python.exe" -m bonsai_robot --selftest selftest-windows-install/report.json
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-windows-install
+          path: selftest-windows-install
+
+  robot-windows-exe:
+    timeout-minutes: 25
+    name: Робот — BonsaiRobot.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ./client pyinstaller
+      - name: Іконка
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m bonsai_robot.icon --ico build/robot.ico
+      - name: PyInstaller
+        run: >
+          pyinstaller --noconfirm --windowed --name BonsaiRobot --icon build/robot.ico
+          --collect-submodules bonsai_robot client/windows/launcher.py
+      - name: Самоперевірка exe
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\BonsaiRobot\BonsaiRobot.exe" -ArgumentList "--selftest", "$PWD\selftest-exe\report.json" -Wait -PassThru
+          if (Test-Path selftest-exe\report.json) { Get-Content selftest-exe\report.json -Encoding utf8 }
+          exit $p.ExitCode
+      - name: Архів
+        shell: pwsh
+        run: Compress-Archive -Path dist\BonsaiRobot -DestinationPath BonsaiRobot-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BonsaiRobot-windows
+          path: BonsaiRobot-windows.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-windows-exe
+          path: selftest-exe
