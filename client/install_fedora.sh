@@ -30,6 +30,10 @@ exec "${VENV}/bin/bonsai-robot" "\$@"
 EOF
 chmod +x "${BIN}/bonsai-robot"
 
+echo "==> Іконка програми (робот)"
+QT_QPA_PLATFORM=offscreen "${VENV}/bin/python" -m bonsai_robot.icon "${HOME}/.local/share/icons"
+gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
+
 sed "s|@EXEC@|${BIN}/bonsai-robot|" "${HERE}/packaging/bonsai-robot.desktop" > "${APPS}/bonsai-robot.desktop"
 cp "${APPS}/bonsai-robot.desktop" "${AUTOSTART}/bonsai-robot.desktop"
 
@@ -40,12 +44,14 @@ Type=Application
 Name=Bonsai Robot — поле вводу
 Comment=Показати/сховати поле вводу задачі
 Exec=${BIN}/bonsai-robot --toggle
-Icon=face-smile-big
+Icon=bonsai-robot
 Terminal=false
 Categories=Utility;
 X-KDE-Shortcuts=Ctrl+Alt+B
 EOF
 update-desktop-database "${APPS}" 2>/dev/null || true
+# KDE: оновити кеш меню, щоб нова іконка з'явилась одразу
+command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
 
 HOTKEY_OK=0
 case "${XDG_CURRENT_DESKTOP:-}" in

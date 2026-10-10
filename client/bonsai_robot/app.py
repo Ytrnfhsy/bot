@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .connection import AgentConnection, normalize_url
+from .icon import app_icon
 from .panel import ChatPanel
 from .robot import RobotWidget
 from .settings import Settings
@@ -181,10 +182,7 @@ class RobotWindow(QWidget):
         self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        pix = QPixmap(self.robot.size())
-        pix.fill(Qt.GlobalColor.transparent)
-        self.robot.render(pix)
-        self.tray = QSystemTrayIcon(QIcon(pix), self)
+        self.tray = QSystemTrayIcon(app_icon(), self)
         self.tray.setToolTip("Bonsai Robot")
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(
@@ -753,6 +751,8 @@ def main() -> None:
         os.environ["QT_QPA_PLATFORM"] = "xcb"
     app = QApplication(sys.argv)
     app.setApplicationName("Bonsai Robot")
+    app.setDesktopFileName("bonsai-robot")  # панель задач KDE/GNOME бере іконку з bonsai-robot.desktop
+    app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
     demo = "--demo" in sys.argv
     cmd = _command_from_argv(sys.argv)

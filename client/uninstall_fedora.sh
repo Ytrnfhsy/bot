@@ -5,5 +5,6 @@ rm -rf "${HOME}/.local/share/bonsai-robot"
 rm -f "${HOME}/.local/bin/bonsai-robot" \
       "${HOME}/.local/share/applications/bonsai-robot.desktop" \
       "${HOME}/.local/share/applications/bonsai-robot-toggle.desktop" \
-      "${HOME}/.config/autostart/bonsai-robot.desktop"
+      "${HOME}/.config/autostart/bonsai-robot.desktop" \
+      "${HOME}"/.local/share/icons/hicolor/*/apps/bonsai-robot.png
 echo "Bonsai Robot видалено."
