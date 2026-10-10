@@ -30,7 +30,9 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFrame,
-    QGraphicsDropShadowEffect,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -60,6 +62,21 @@ QPushButton#deny { background: #FFE1E1; color: #C92A2A; }
 #confirm { background: #FFF6E9; border: 1px solid #FFC98A; border-radius: 12px; }
 QLabel#confirmTitle { color: #B35C00; font-weight: 700; }
 QLabel#confirmText { color: #3A2A10; font-family: monospace; font-size: 11px; }
+#ask { background: #EEF6FF; border: 1px solid #B9DBF5; border-radius: 12px; }
+QLabel#askText { color: #1D3A57; font-weight: 600; }
+QLineEdit#askInput { background: #FFFFFF; border: 1px solid #C9D6E8; border-radius: 8px; padding: 5px 8px; color: #1D2740; }
+QLineEdit#askInput:focus { border: 1px solid #4FD1FF; }
+QPushButton#primary { background: #4FD1FF; color: #0E1426; }
+QPushButton#primary:hover { background: #7BDDFF; }
+QPushButton#secondary { background: #E7EEF8; color: #1D2740; }
+QPushButton#secondary:hover { background: #D5E2F2; }
+QPushButton#danger { background: #FFE1E1; color: #C92A2A; }
+QLabel#historyTitle { color: #1D2740; font-weight: 700; font-size: 14px; }
+QLabel#historyEmpty { color: #5B6B82; padding: 18px 6px; }
+QListWidget#history { background: transparent; border: none; outline: none; font-size: 13px; color: #1D2740; }
+QListWidget#history::item { border-radius: 10px; padding: 7px 8px; margin: 1px 0; }
+QListWidget#history::item:hover { background: #EEF3FA; }
+QListWidget#history::item:selected { background: #DCEFFD; color: #0E1426; }
 """
 
 
@@ -150,6 +167,9 @@ class ChatPanel(QWidget):
     task_submitted = Signal(str)
     image_pasted = Signal(str)
     cancel_requested = Signal()
+    history_open = Signal(int)
+    history_export = Signal(int)
+    history_delete = Signal(int)
     reset_requested = Signal()
     save_requested = Signal()
     chats_requested = Signal()
@@ -177,9 +197,8 @@ class ChatPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(self.MARGIN, 10, self.MARGIN, 10)  # збоку — місце для «хвостика» до робота
         card = QFrame(objectName="card")
-        shadow = QGraphicsDropShadowEffect(blurRadius=24, xOffset=0, yOffset=4)
-        shadow.setColor(Qt.GlobalColor.gray)
-        card.setGraphicsEffect(shadow)
+        # тінь малюємо самі в paintEvent: QGraphicsDropShadowEffect інколи не перемальовував дочірні віджети
+        self.card = card
         outer.addWidget(card)
 
         lay = QVBoxLayout(card)
@@ -206,7 +225,7 @@ class ChatPanel(QWidget):
             btn.setIconSize(QSize(18, 18))
             btn.setFixedSize(28, 28)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.hide_panel)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._on_escape)
         head.addWidget(self.btn_save)
         head.addWidget(self.btn_chats)
         head.addWidget(self.btn_reset)
@@ -249,8 +268,61 @@ class ChatPanel(QWidget):
         lay.addWidget(self.confirm_box)
         self._confirm_queue: list[tuple[str, str]] = []
 
+        # вбудований запит (зберегти? / назва чату / видалити?) — замість окремих вікон
+        self.ask_box = QFrame(objectName="ask")
+        al = QVBoxLayout(self.ask_box)
+        al.setContentsMargins(10, 8, 10, 8)
+        al.setSpacing(6)
+        self.ask_text = QLabel("", objectName="askText")
+        self.ask_text.setWordWrap(True)
+        al.addWidget(self.ask_text)
+        self.ask_input = QLineEdit(objectName="askInput")
+        self.ask_input.returnPressed.connect(lambda: self._ask_answer(self._ask_default))
+        al.addWidget(self.ask_input)
+        self.ask_buttons = QHBoxLayout()
+        al.addLayout(self.ask_buttons)
+        self.ask_box.hide()
+        lay.addWidget(self.ask_box)
+        self._ask_callback = None
+        self._ask_default = ""
+
+        # сторінка «Збережені чати»
+        self.history_page = QFrame()
+        hl = QVBoxLayout(self.history_page)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(6)
+        hl.addWidget(QLabel("Збережені чати", objectName="historyTitle"))
+        self.history_empty = QLabel("Збережених чатів поки немає.\nНатисни іконку дискети або Ctrl+S, щоб зберегти розмову.",
+                                    objectName="historyEmpty")
+        self.history_empty.setWordWrap(True)
+        hl.addWidget(self.history_empty)
+        self.history_list = QListWidget(objectName="history")
+        self.history_list.setMaximumHeight(380)
+        self.history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.history_list.itemDoubleClicked.connect(lambda _: self._history_action("open"))
+        self.history_list.currentItemChanged.connect(lambda *_: self._history_buttons())
+        hl.addWidget(self.history_list)
+        hb = QHBoxLayout()
+        self.btn_h_back = QPushButton("← Назад", objectName="secondary")
+        self.btn_h_open = QPushButton("Відкрити", objectName="primary")
+        self.btn_h_export = QPushButton("Експорт .md", objectName="secondary")
+        self.btn_h_delete = QPushButton("Видалити", objectName="danger")
+        self.btn_h_back.clicked.connect(self.show_chat)
+        self.btn_h_open.clicked.connect(lambda: self._history_action("open"))
+        self.btn_h_export.clicked.connect(lambda: self._history_action("export"))
+        self.btn_h_delete.clicked.connect(lambda: self._history_action("delete"))
+        hb.addWidget(self.btn_h_back)
+        hb.addStretch(1)
+        for b in (self.btn_h_delete, self.btn_h_export, self.btn_h_open):
+            hb.addWidget(b)
+        hl.addLayout(hb)
+        self.history_page.hide()
+        lay.addWidget(self.history_page)
+
         # ввід
-        row = QHBoxLayout()
+        self.input_row = QWidget()
+        row = QHBoxLayout(self.input_row)
+        row.setContentsMargins(0, 0, 0, 0)
         self.input = InputBox()
         self.input.setPlaceholderText("Що зробити? (Enter — надіслати, Shift+Enter — новий рядок, Ctrl+V — вставити скриншот)")
         self.input.setFixedHeight(64)
@@ -266,7 +338,7 @@ class ChatPanel(QWidget):
         btns.addWidget(self.btn_send)
         btns.addWidget(self.btn_stop)
         row.addLayout(btns)
-        lay.addLayout(row)
+        lay.addWidget(self.input_row)
 
         # транскрипт: список (роль, текст)
         self.entries: list[tuple[str, str]] = []
@@ -335,6 +407,14 @@ class ChatPanel(QWidget):
         self.activateWindow()
         self.input.setFocus()
 
+    def _on_escape(self) -> None:
+        if self.cancel_ask():
+            return
+        if self.history_shown:
+            self.show_chat()
+            return
+        self.hide_panel()
+
     def hide_panel(self) -> None:
         if not self.isVisible() or self._hiding:
             return
@@ -356,11 +436,18 @@ class ChatPanel(QWidget):
         return self.isVisible() and not self._hiding
 
     def paintEvent(self, _event) -> None:
-        if not self._tail_side:
-            return
-        # «хвостик» бульбашки: малюємо під карткою, тож видно лише кінчик, що виступає до робота
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # м'яка тінь під карткою: кілька напівпрозорих шарів, що розширюються
+        r = QRectF(self.card.geometry())
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(1, 9):
+            p.setBrush(QColor(30, 45, 70, max(2, 16 - i * 2)))
+            p.drawRoundedRect(r.adjusted(-i, -i + 3, i, i + 3), 18 + i, 18 + i)
+        if not self._tail_side:
+            p.end()
+            return
+        # «хвостик» бульбашки: малюємо під карткою, тож видно лише кінчик, що виступає до робота
         y = max(36, min(self._tail_y, self.height() - 36))
         edge = self.width() - self.MARGIN if self._tail_side == "right" else self.MARGIN
         tip = self.width() - 2 if self._tail_side == "right" else 2
@@ -375,7 +462,127 @@ class ChatPanel(QWidget):
         color = "#2F9E44" if ok else "#C92A2A"
         self.status.setText(f'<span style="color:{color}">●</span> {html.escape(text)}')
         self.status.setToolTip(details or text)
-        self.adjustSize()
+        self._fit()
+
+    def _fit(self) -> None:
+        """Підігнати висоту під вміст. (adjustSize() у Qt обрізає вікно до ⅔ екрана — тоді запити «зникали».)"""
+        self.layout().activate()
+        self.resize(self.width(), self.sizeHint().height())
+
+    # ---------------- вбудовані запити ----------------
+    def ask(self, text: str, buttons: list[tuple[str, str, str]], callback, input_text: str | None = None,
+            default: str = "") -> None:
+        """Запит усередині панелі. buttons: [(ключ, підпис, стиль primary|secondary|danger)].
+
+        callback(ключ, введений_текст). Enter у полі = default, Esc = "cancel".
+        """
+        while self.ask_buttons.count():
+            w = self.ask_buttons.takeAt(0).widget()
+            if w:
+                w.hide()  # прибрати одразу — deleteLater спрацює лише в наступному циклі подій
+                w.setParent(None)
+                w.deleteLater()
+        self.ask_buttons.addStretch(1)
+        for key, label, style in buttons:
+            b = QPushButton(label, objectName=style)
+            b.clicked.connect(lambda _=False, k=key: self._ask_answer(k))
+            self.ask_buttons.addWidget(b)
+        self.ask_text.setText(text)
+        self.ask_input.setVisible(input_text is not None)
+        if input_text is not None:
+            self.ask_input.setText(input_text)
+            self.ask_input.selectAll()
+        self._ask_callback, self._ask_default = callback, default
+        self.ask_box.show()
+        self.ask_box.raise_()
+        self._render()
+        (self.ask_input if input_text is not None else self.ask_box).setFocus()
+        # після перебудови кнопок примусово перемальовуємо (інакше смужка інколи лишалася порожньою)
+        self.ask_box.update()
+        QTimer.singleShot(0, self.repaint)
+        self._fit()
+
+    def _ask_answer(self, key: str) -> None:
+        callback, self._ask_callback = self._ask_callback, None
+        self.ask_box.hide()
+        self._render()
+        self._fit()
+        if self.history_page.isHidden():
+            self.input.setFocus()
+        if callback:
+            callback(key, self.ask_input.text().strip())
+
+    def cancel_ask(self) -> bool:
+        if self.ask_box.isVisible():
+            self._ask_answer("cancel")
+            return True
+        return False
+
+    # ---------------- сторінка історії ----------------
+    def show_history(self) -> None:
+        for w in (self.view, self.activity, self.input_row):
+            w.hide()
+        self.history_page.show()
+        self.history_list.setFocus()
+        self._fit()
+
+    def show_chat(self) -> None:
+        self.history_page.hide()
+        self.input_row.show()
+        self._render()
+        self.set_activity(self.activity.text())
+        self.input.setFocus()
+        self._fit()
+
+    @property
+    def history_shown(self) -> bool:
+        return not self.history_page.isHidden()
+
+    def set_history(self, chats: list[dict]) -> None:
+        import time
+
+        current = self._history_id()
+        self.history_list.clear()
+        for c in chats:
+            when = time.strftime("%d.%m.%Y %H:%M", time.localtime(c["updated_at"]))
+            item = QListWidgetItem(f"{c['title']}\n{when} · повідомлень: {c['count']}")
+            item.setData(Qt.ItemDataRole.UserRole, c["id"])
+            item.setToolTip(c["title"])
+            self.history_list.addItem(item)
+            if c["id"] == current:
+                self.history_list.setCurrentItem(item)
+        if self.history_list.count() and self.history_list.currentRow() < 0:
+            self.history_list.setCurrentRow(0)
+        self.history_empty.setVisible(not chats)
+        self.history_list.setVisible(bool(chats))
+        if chats:  # висота — під кількість чатів (до 380 px), без порожнього місця
+            row_h = self.history_list.sizeHintForRow(0) + 4
+            self.history_list.setFixedHeight(min(380, row_h * len(chats) + 8))
+        self._history_buttons()
+        self._fit()
+
+    def _history_id(self) -> int | None:
+        item = self.history_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _history_buttons(self) -> None:
+        has = self._history_id() is not None
+        for b in (self.btn_h_open, self.btn_h_export, self.btn_h_delete):
+            b.setEnabled(has)
+
+    def _history_action(self, action: str) -> None:
+        cid = self._history_id()
+        if cid is None:
+            return
+        if action == "open":
+            self.history_open.emit(cid)
+        elif action == "export":
+            self.history_export.emit(cid)
+        else:
+            title = self.history_list.currentItem().text().split("\n")[0]
+            self.ask(f"Видалити «{title}»? Це не можна скасувати.",
+                     [("cancel", "Скасувати", "secondary"), ("delete", "Видалити", "danger")],
+                     lambda key, _t: key == "delete" and self.history_delete.emit(cid))
 
     def prefill(self, text: str) -> None:
         """Підставляє текст у поле вводу (курсор у кінці), щоб користувач дописав і натиснув Enter."""
@@ -393,8 +600,8 @@ class ChatPanel(QWidget):
 
     def set_activity(self, text: str) -> None:
         self.activity.setText(text)
-        self.activity.setVisible(bool(text))
-        self.adjustSize()
+        self.activity.setVisible(bool(text) and not self.history_shown)
+        self._fit()
 
     def add_entry(self, role: str, text: str) -> None:
         self.entries.append((role, text))
@@ -424,7 +631,7 @@ class ChatPanel(QWidget):
     def drop_confirms(self) -> None:
         self._confirm_queue.clear()
         self.confirm_box.hide()
-        self.adjustSize()
+        self._fit()
 
     # ---------------- внутрішнє ----------------
     def _show_confirm(self) -> None:
@@ -437,7 +644,7 @@ class ChatPanel(QWidget):
             self.confirm_text.setText(summary)
             self.confirm_box.show()
             self.btn_allow.setFocus()
-        self.adjustSize()
+        self._fit()
 
     def _answer(self, approved: bool) -> None:
         if not self._confirm_queue:
@@ -473,14 +680,16 @@ class ChatPanel(QWidget):
         if self.draft:
             parts.append(self.draft + " ▍")
         self.view.setMarkdown("\n\n".join(parts))
-        visible = bool(parts)
+        visible = bool(parts) and not self.history_shown
         self.view.setVisible(visible)
         if visible:
             doc = self.view.document()
             # ширина тексту = ширина картки мінус відступи й вертикальна прокрутка — щоб не було горизонтальної
             doc.setTextWidth(self.WIDTH - 2 * self.MARGIN - 28 - 18)
             doc_h = int(doc.size().height()) + 12
-            self.view.setFixedHeight(max(40, min(420, doc_h)))
+            # коли відкритий запит/підтвердження — стрічка нижча, щоб усе вмістилося на екрані
+            cap = 240 if (self.ask_box.isVisible() or self.confirm_box.isVisible()) else 420
+            self.view.setFixedHeight(max(40, min(cap, doc_h)))
             sb = self.view.verticalScrollBar()
             sb.setValue(sb.maximum())
-        self.adjustSize()
+        self._fit()

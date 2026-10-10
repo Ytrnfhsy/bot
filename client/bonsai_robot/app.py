@@ -15,17 +15,13 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
-    QFileDialog,
-    QInputDialog,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
-from .chats_dialog import ChatsDialog
 from .connection import AgentConnection, normalize_url
 from .panel import ChatPanel
 from .robot import RobotWidget
@@ -101,10 +97,9 @@ class RobotWindow(QWidget):
         self.dirty = False  # є незбережені зміни
         self._after_save = None  # дія після успішного збереження (очистити / відкрити інший)
         self._export_target: str | None = None
-        self.chats_dialog = ChatsDialog()
-        self.chats_dialog.open_requested.connect(self.open_chat)
-        self.chats_dialog.export_requested.connect(lambda cid: self.export_chat(cid))
-        self.chats_dialog.delete_requested.connect(self._delete_chat)
+        self.panel.history_open.connect(self.open_chat)
+        self.panel.history_export.connect(lambda cid: self.export_chat(cid))
+        self.panel.history_delete.connect(self._delete_chat)
         self.panel.image_pasted.connect(lambda path: self.upload_files([path]))
         self.panel.cancel_requested.connect(self.cancel_task)
         self.panel.reset_requested.connect(self.reset_chat)
@@ -377,16 +372,14 @@ class RobotWindow(QWidget):
         self.panel.drop_confirms()
 
     def reset_chat(self) -> None:
-        if not self._confirm_discard(self._do_reset):
-            return
-        self._do_reset()
+        self._with_unsaved_check(self._do_reset)
 
     def _do_reset(self) -> None:
         self.panel.clear()
         self.chat_id, self.chat_title, self.dirty = None, "", False
         self.conn.send({"type": "reset", "session_id": self.settings.session_id})
 
-    # ---------------- збережені чати ----------------
+    # ---------------- збережені чати (усе — всередині панелі) ----------------
     def _suggested_title(self) -> str:
         if self.chat_title:
             return self.chat_title
@@ -394,40 +387,45 @@ class RobotWindow(QWidget):
         first = " ".join(first.split())
         return first[:60] + ("…" if len(first) > 60 else "")
 
-    def _confirm_discard(self, then) -> bool:
-        """Є незбережена розмова? Запитати. True — можна продовжувати одразу."""
+    def _with_unsaved_check(self, then) -> None:
+        """Є незбережена розмова — спитати в панелі (зберегти / не зберігати / скасувати), потім виконати then."""
         if not self.dirty or not self.panel.entries:
-            return True
-        box = QMessageBox(QMessageBox.Icon.Question, "Незбережена розмова",
-                          "Зберегти поточну розмову перед тим, як продовжити?",
-                          QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
-                          | QMessageBox.StandardButton.Cancel)
-        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
-        answer = box.exec()
-        if answer == QMessageBox.StandardButton.Cancel:
-            return False
-        if answer == QMessageBox.StandardButton.Save:
-            self._after_save = then
-            self._send_save(self._suggested_title())
-            return False  # продовжимо після chat_saved
-        return True
+            then()
+            return
+
+        def answer(key: str, _text: str) -> None:
+            if key == "save":
+                self._after_save = then
+                self._send_save(self._suggested_title())
+            elif key == "discard":
+                then()
+
+        self.show_panel()
+        self.panel.ask(
+            "Зберегти поточну розмову, перш ніж продовжити?",
+            [("cancel", "Скасувати", "secondary"), ("discard", "Не зберігати", "danger"), ("save", "Зберегти", "primary")],
+            answer,
+        )
 
     def save_chat(self) -> None:
         self.touch()
+        self.show_panel()
         if self.busy:
             self.panel.set_activity("⏳ Зачекай, поки я закінчу задачу, — тоді збережу")
             return
         if not self.panel.entries:
             self.panel.set_activity("Розмова порожня — нічого зберігати")
             return
-        dlg = QInputDialog(self)
-        dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
-        dlg.setWindowTitle("Зберегти чат")
-        dlg.setLabelText("Назва:")
-        dlg.setTextValue(self._suggested_title())
-        dlg.resize(420, dlg.height())
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._send_save(dlg.textValue().strip())
+        if self.panel.history_shown:
+            self.panel.show_chat()
+        suggested = self._suggested_title()
+        self.panel.ask(
+            "Назва чату:",
+            [("cancel", "Скасувати", "secondary"), ("save", "Зберегти", "primary")],
+            lambda key, text: key == "save" and self._send_save(text or suggested),
+            input_text=suggested,
+            default="save",
+        )
 
     def _send_save(self, title: str) -> None:
         msg = {"type": "chat_save", "session_id": self.settings.session_id, "title": title}
@@ -438,19 +436,25 @@ class RobotWindow(QWidget):
             self._after_save = None
 
     def show_chats(self) -> None:
+        """Сторінка «Збережені чати» в панелі; повторне натискання — назад до розмови."""
         self.touch()
+        if self.panel.shown and self.panel.history_shown:
+            self.panel.show_chat()
+            QTimer.singleShot(0, self.position_panel)
+            return
+        self.panel.cancel_ask()
+        self.show_panel()
+        self.panel.show_history()
         self.conn.send({"type": "chat_list"})
-        self.chats_dialog.show()
-        self.chats_dialog.raise_()
-        self.chats_dialog.activateWindow()
+        QTimer.singleShot(0, self.position_panel)
 
     def open_chat(self, chat_id: int) -> None:
         if self.busy:
             self.panel.set_activity("⏳ Спершу дочекайся завершення задачі або зупини її (■)")
             return
-        then = lambda: self.conn.send({"type": "chat_open", "id": chat_id, "session_id": self.settings.session_id})  # noqa: E731
-        if self._confirm_discard(then):
-            then()
+        self._with_unsaved_check(
+            lambda: self.conn.send({"type": "chat_open", "id": chat_id, "session_id": self.settings.session_id})
+        )
 
     def export_chat(self, chat_id: int | None) -> None:
         self.touch()
@@ -467,21 +471,45 @@ class RobotWindow(QWidget):
             self.chat_id, self.chat_title = None, ""
             self.dirty = bool(self.panel.entries)
 
-    def _write_export(self, ev: dict) -> None:
+    @staticmethod
+    def export_dir():
         from pathlib import Path
 
         docs = next((d for d in (Path.home() / "Документи", Path.home() / "Documents") if d.is_dir()), Path.home())
+        return docs / "Kru"
+
+    def _write_export(self, ev: dict) -> None:
+        """Експорт без системних вікон: одразу у ~/Документи/Kru/<назва>.md, далі — повідомлення в панелі."""
+        from pathlib import Path
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        folder = self.export_dir()
         name = "".join(ch if ch.isalnum() or ch in " -_." else "_" for ch in ev["title"])[:60].strip() or "чат"
-        path, _ = QFileDialog.getSaveFileName(None, "Експорт розмови", str(docs / f"{name}.md"), "Markdown (*.md)")
-        if not path:
-            return
+        path, n = folder / f"{name}.md", 1
+        while path.exists():
+            n += 1
+            path = folder / f"{name} ({n}).md"
         try:
-            Path(path).write_text(ev["markdown"], encoding="utf-8")
+            folder.mkdir(parents=True, exist_ok=True)
+            path.write_text(ev["markdown"], encoding="utf-8")
         except OSError as e:
-            self.panel.add_entry("error", f"Не вдалося записати {path}: {e}")
+            self.panel.ask(f"⚠ Не вдалося записати {path}: {e}", [("ok", "Гаразд", "primary")], lambda *_: None)
             return
+
+        def answer(key: str, _text: str) -> None:
+            if key == "folder":
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+            elif key == "file":
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
         self.show_panel()
-        self.panel.set_activity(f"📤 Збережено у {path}")
+        self.panel.ask(
+            f"📤 Експортовано: {path.name}\nу {str(folder).replace(str(Path.home()), '~', 1)}",
+            [("folder", "Відкрити теку", "secondary"), ("file", "Відкрити файл", "secondary"), ("ok", "Гаразд", "primary")],
+            answer,
+        )
 
     def _on_chat_event(self, ev: dict) -> None:
         t = ev["type"]
@@ -493,8 +521,11 @@ class RobotWindow(QWidget):
             if then:
                 then()
         elif t == "chat_list":
-            self.chats_dialog.set_chats(ev["chats"])
+            self.panel.set_history(ev["chats"])
+            if self.panel.history_shown:
+                QTimer.singleShot(0, self.position_panel)
         elif t == "chat_opened":
+            self.panel.show_chat()
             self.panel.clear()
             for item in ev["transcript"]:
                 self.panel.add_entry(item["role"], item["text"])
@@ -507,7 +538,7 @@ class RobotWindow(QWidget):
         elif t == "chat_error":
             self._after_save = None
             self.show_panel()
-            self.panel.set_activity(f"⚠ {ev['message']}")
+            self.panel.ask(f"⚠ {ev['message']}", [("ok", "Гаразд", "primary")], lambda *_: None)
 
     def answer_confirm(self, cid: str, approved: bool) -> None:
         self.touch()
