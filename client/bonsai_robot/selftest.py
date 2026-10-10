@@ -139,10 +139,19 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         step(50, lambda: check("autostart", autostart_flow))
 
     def network_check():
-        need(disconnects, "немає жодної події від мережевого модуля (QtWebSockets)")
+        need(disconnects, "немає жодної події від мережевого модуля (QtWebSockets) за 10 с")
         return disconnects[0]
 
-    step(1500, lambda: check("network", network_check))
+    # Windows повторює спробу з'єднання із закритим портом ~2 с, тож чекаємо подію до 10 с, а не фіксовану паузу
+    def wait_network(polls_left: int = 40) -> None:
+        if disconnects or polls_left <= 0:
+            check("network", network_check)
+            run_from(network_index + 1)
+        else:
+            QTimer.singleShot(250, lambda: wait_network(polls_left - 1))
+
+    network_index = len(steps)
+    step(0, lambda: None)  # місце кроку мережі; далі run() передає керування wait_network
 
     def finish() -> None:
         ok = all(r["ok"] for r in results.values())
@@ -164,12 +173,17 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
         def go() -> None:
             log(f"крок {i + 1}/{len(steps)}")
+            if i == network_index:
+                wait_network()  # сам продовжить послідовність, коли прийде подія (або вийде час)
+                return
             try:
                 fn()
             finally:
                 run(i + 1)
 
         QTimer.singleShot(delay, go)
+
+    run_from = run
 
     run()
     QTimer.singleShot(60000, lambda: (results.setdefault("timeout", {"ok": False, "detail": "60 с"}), finish()))
