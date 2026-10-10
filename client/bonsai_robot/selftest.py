@@ -20,6 +20,13 @@ from PySide6.QtWidgets import QApplication
 def run_selftest(app: QApplication, report_path: str) -> int:
     report = Path(report_path).resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
+    # сторож: якщо щось зависне — через 90 с записати стеки всіх потоків і завершити процес
+    import faulthandler
+
+    hang_log = open(report.with_name("selftest-hang.txt"), "w", encoding="utf-8")  # noqa: SIM115
+    faulthandler.dump_traceback_later(90, exit=True, file=hang_log)
+    log = lambda msg: print(f"[selftest] {msg}", flush=True)  # noqa: E731
+    log(f"старт, Qt platform={app.platformName()}")
     # окремий тимчасовий профіль — не чіпаємо справжні налаштування
     tmp = tempfile.mkdtemp(prefix="bonsai-selftest-")
     os.environ["APPDATA"] = tmp
@@ -55,11 +62,13 @@ def run_selftest(app: QApplication, report_path: str) -> int:
     check("ipc_name", lambda: appmod._ipc_name())
     check("export_dir", lambda: str(appmod.RobotWindow.export_dir()))
 
+    log("синхронні перевірки готові; створюю вікно робота")
     settings = Settings.load()
     settings.server_url = "ws://127.0.0.1:9/ws"  # нікого немає — перевіряємо, що мережевий модуль живий
     win = appmod.RobotWindow(settings)
     win.show()
     state["win"] = win
+    log("вікно робота створено")
     disconnects: list[str] = []
     win.conn.disconnected.connect(lambda reason, raw="": disconnects.append(f"{reason} [{raw}]"))
 
@@ -143,6 +152,8 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             print(("✓" if r["ok"] else "✗"), name, "—", r["detail"], flush=True)
         if IS_WINDOWS:
             win.hotkey.unregister()
+        faulthandler.cancel_dump_traceback_later()
+        log("готово" if ok else "є помилки")
         app.exit(0 if ok else 1)
 
     def run(i: int = 0) -> None:
@@ -152,6 +163,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         delay, fn = steps[i]
 
         def go() -> None:
+            log(f"крок {i + 1}/{len(steps)}")
             try:
                 fn()
             finally:
