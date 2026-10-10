@@ -63,8 +63,34 @@ def run_selftest(app: QApplication, report_path: str) -> int:
     check("export_dir", lambda: str(appmod.RobotWindow.export_dir()))
 
     log("синхронні перевірки готові; створюю вікно робота")
+    # локальний TCP-сервер: перевіряємо, що робот справді відкриває WebSocket-з'єднання
+    # (з'єднання із закритим портом на Windows може «висіти» десятки секунд — на це не покладаємось)
+    from PySide6.QtNetwork import QHostAddress, QTcpServer
+
+    handshakes: list[str] = []
+    tcp = QTcpServer()
+    need_listen = tcp.listen(QHostAddress.SpecialAddress.LocalHost, 0)
+    log(f"тестовий сервер: {need_listen}, порт {tcp.serverPort()}")
+
+    def on_tcp() -> None:
+        sock = tcp.nextPendingConnection()
+        if sock is None:
+            return
+        state.setdefault("socks", []).append(sock)
+
+        def read() -> None:
+            head = bytes(sock.readAll()).decode("latin-1", "replace")
+            if "upgrade: websocket" in head.lower():
+                handshakes.append(head.splitlines()[0])
+                sock.write(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                sock.disconnectFromHost()
+
+        sock.readyRead.connect(read)
+
+    tcp.newConnection.connect(on_tcp)
+    state["tcp"] = tcp
     settings = Settings.load()
-    settings.server_url = "ws://127.0.0.1:9/ws"  # нікого немає — перевіряємо, що мережевий модуль живий
+    settings.server_url = f"ws://127.0.0.1:{tcp.serverPort()}/ws"
     win = appmod.RobotWindow(settings)
     win.show()
     state["win"] = win
@@ -139,12 +165,14 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         step(50, lambda: check("autostart", autostart_flow))
 
     def network_check():
-        need(disconnects, "немає жодної події від мережевого модуля (QtWebSockets) за 10 с")
-        return disconnects[0]
+        need(handshakes, "робот не надіслав WebSocket-запит на тестовий сервер за 10 с")
+        need(handshakes[0].startswith("GET /ws"), f"запит: {handshakes[0]}")
+        need(disconnects, "немає події про розрив з'єднання")
+        return {"request": handshakes[0], "disconnect": disconnects[0]}
 
-    # Windows повторює спробу з'єднання із закритим портом ~2 с, тож чекаємо подію до 10 с, а не фіксовану паузу
+    # чекаємо події до 10 с, а не фіксовану паузу
     def wait_network(polls_left: int = 40) -> None:
-        if disconnects or polls_left <= 0:
+        if (handshakes and disconnects) or polls_left <= 0:
             check("network", network_check)
             run_from(network_index + 1)
         else:
