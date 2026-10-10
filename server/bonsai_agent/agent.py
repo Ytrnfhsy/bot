@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -145,6 +146,8 @@ class Agent:
         self.native_tools = config.tool_mode != "json"
         self.vision = config.vision != "off"
         self.ctx.vision_ok = self.vision
+        self.vision_reason = ""  # чому зору немає (для користувача)
+        self._vision_checked = 0.0
         self._session_locks: dict[str, asyncio.Lock] = {}
 
     # ---------------- побудова контексту ----------------
@@ -163,11 +166,14 @@ class Agent:
             name=self.config.agent_name,
             persona=f"\nPersonality: {self.config.persona}" if self.config.persona else "",
             vision=(
-                "- You can SEE images: pictures attached to messages are shown to you directly. To look at an image "
-                "file in the workspace (e.g. uploads/screenshot.png), call view_image. Describe what you actually see; "
-                "read text from screenshots carefully.\n"
+                "- You can SEE images (you are a vision-language model). Pictures attached to a message are already "
+                "in front of you: look at them and answer directly — read text on screenshots yourself, describe what "
+                "you see. NEVER try to open, OCR or analyse an image with run_python/run_shell, and never install "
+                "libraries (PIL, pytesseract, opencv…) for that. To look at an image file in the workspace that is not "
+                "attached (e.g. one you found or created), call view_image.\n"
                 if self.vision
-                else ""
+                else "- You currently CANNOT see images. If the user asks about a picture, say that vision is turned off "
+                "on the server; do not try to read images with scripts or OCR.\n"
             ),
             memories=memories,
         )
@@ -228,6 +234,31 @@ class Agent:
                 found.append(ref)
         return found
 
+    async def refresh_vision(self, force: bool = False) -> bool:
+        """BONSAI_VISION=auto: питаємо сервер моделі, чи він бачить зображення (не частіше ніж раз на 30 с).
+
+        Так зір вмикається сам, щойно модель перезапустили з mmproj, — без перезапуску агента.
+        """
+        if self.config.vision != "auto":
+            return self.vision
+        now = time.monotonic()
+        if not force and now - self._vision_checked < 30:
+            return self.vision
+        self._vision_checked = now
+        probe = getattr(self.llm, "supports_vision", None)
+        if probe is None:
+            return self.vision
+        try:
+            result = await probe()
+        except Exception:  # noqa: BLE001 — сервер недоступний: лишаємо як було
+            return self.vision
+        if result is not None:
+            if result != self.vision:
+                log.info("Зір %s (за даними сервера моделі)", "увімкнено" if result else "вимкнено")
+            self.vision = self.ctx.vision_ok = result
+            self.vision_reason = "" if result else "сервер моделі запущено без зору (немає mmproj)"
+        return self.vision
+
     def _attach_images(self, msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Шляхи → base64 для останніх N повідомлень з картинками; решта — текстова примітка."""
         budget = self.config.max_images_in_context if self.vision else 0
@@ -241,7 +272,11 @@ class Agent:
             loaded, notes = [], []
             for path in paths:
                 if budget <= 0:
-                    why = "переглядалось раніше" if self.vision else "поточна модель не бачить зображень"
+                    why = (
+                        "переглядалось раніше"
+                        if self.vision
+                        else "поточна модель не бачить зображень; скажи про це користувачу і не намагайся читати його скриптами"
+                    )
                     notes.append(f"[зображення {path} — {why}]")
                     continue
                 try:
@@ -251,6 +286,11 @@ class Agent:
             if loaded:
                 budget -= 1
                 m["images"] = loaded
+                shown = ", ".join(p for p in paths)
+                m["content"] = (
+                    f"[Прикріплене зображення: {shown}. Воно вже перед тобою — подивись і проаналізуй його сам, "
+                    f"без скриптів, OCR чи встановлення бібліотек.]\n" + (m.get("content") or "")
+                )
             if notes:
                 m["content"] = (m.get("content") or "") + "\n" + "\n".join(notes)
             out.append(m)
@@ -269,8 +309,14 @@ class Agent:
         async with lock:
             history = self.storage.load_session(session_id)
             user_msg: dict[str, Any] = {"role": "user", "content": user_text}
-            if self.vision and (refs := self._image_refs(user_text)):
-                user_msg["images"] = refs
+            if refs := self._image_refs(user_text):
+                await self.refresh_vision()
+                user_msg["images"] = refs  # шляхи зберігаємо завжди — якщо зір з'явиться, картинку буде видно
+                if self.vision:
+                    await emit({"type": "vision", "state": "attached", "images": refs})
+                else:
+                    await emit({"type": "vision", "state": "unavailable", "images": refs,
+                                "reason": self.vision_reason or "зір вимкнено (BONSAI_VISION=off)"})
             history.append(user_msg)
             try:
                 answer = await self._loop(history, user_text, emit, confirm)
@@ -309,6 +355,7 @@ class Agent:
             if self.ctx.pending_images:
                 paths = list(dict.fromkeys(self.ctx.pending_images))
                 history.append({"role": "user", "content": "[view_image] " + ", ".join(paths), "images": paths})
+                await emit({"type": "vision", "state": "attached", "images": paths})
 
         answer = (
             f"Я зробив {self.config.max_steps} кроків і не встиг завершити задачу. "
@@ -340,6 +387,9 @@ class Agent:
                     raise
                 log.warning("Модель не приймає зображення — вимикаю зір (додай mmproj, щоб увімкнути)")
                 self.vision = self.ctx.vision_ok = False
+                self.vision_reason = "модель відхилила зображення (немає mmproj?)"
+                self._vision_checked = time.monotonic()  # перевіримо знову через 30 с, а не «назавжди»
+                await emit({"type": "vision", "state": "unavailable", "images": [], "reason": self.vision_reason})
                 continue
             except ToolsNotSupported:
                 if self.config.tool_mode == "native":

@@ -110,7 +110,13 @@ class Printer:
             self._end_stream()
             print(f"{RED}Помилка: {ev['message']}{RESET}")
         elif t == "hello":
-            print(f"{DIM}Підключено. Модель: {ev.get('model')}{RESET}")
+            eye = {True: " · 👁 зір увімкнено", False: " · без зору"}.get(ev.get("vision"), "")
+            print(f"{DIM}Підключено. Модель: {ev.get('model')}{eye}{RESET}")
+        elif t == "vision":
+            if ev.get("state") == "attached":
+                print(f"{DIM}👁 зображення: {', '.join(ev.get('images', []))}{RESET}")
+            else:
+                print(f"{YELLOW}⚠ Модель зараз не бачить зображень: {ev.get('reason', '')}{RESET}")
         elif t == "chat_saved":
             print(f"{GREEN}💾 Збережено як #{ev['id']} «{ev['title']}»{RESET}")
         elif t == "chat_list":

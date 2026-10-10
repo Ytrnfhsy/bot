@@ -226,7 +226,9 @@ class Connection:
 
     async def serve(self) -> None:
         cfg = self.agent.config
-        await self.send({"type": "hello", "name": cfg.agent_name, "model": cfg.model, "version": __version__})
+        vision = await self.agent.refresh_vision(force=True)
+        await self.send({"type": "hello", "name": cfg.agent_name, "model": cfg.model, "version": __version__,
+                         "vision": vision})
         try:
             while True:
                 msg = await self.ws.receive_json()

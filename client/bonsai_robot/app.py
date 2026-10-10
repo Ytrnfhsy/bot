@@ -524,6 +524,16 @@ class RobotWindow(QWidget):
     def on_event(self, ev: dict) -> None:  # noqa: C901
         self.touch()
         t = ev.get("type")
+        if t == "vision":
+            if ev.get("state") == "attached":
+                self.panel.set_activity(f"👁 Дивлюся на зображення: {', '.join(ev.get('images', []))}")
+            else:
+                self.panel.add_entry(
+                    "error",
+                    f"Модель зараз не бачить зображень: {ev.get('reason', '')}. "
+                    "Перевір, що поруч із моделлю лежить mmproj-файл, і перезапусти її: deploy/switch-model.sh qwen",
+                )
+            return
         if t.startswith("chat_"):
             self._on_chat_event(ev)
             return
@@ -539,7 +549,8 @@ class RobotWindow(QWidget):
         if t == "hello":
             name = ev.get("name") or "Bonsai"
             model = str(ev.get("model", "")).split("/")[-1]
-            self.panel.set_status(f"{name} · підключено · {model}", True)
+            eye = {True: " · 👁", False: " · без зору"}.get(ev.get("vision"), "")
+            self.panel.set_status(f"{name} · підключено · {model}{eye}", True)
             self.setWindowTitle(name)
             if self.tray:
                 self.tray.setToolTip(name)

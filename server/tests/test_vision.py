@@ -114,8 +114,8 @@ async def test_openai_image_parts_and_vision_error():
     except VisionNotSupported:
         pass
     parts = seen["body"]["messages"][0]["content"]
-    assert parts[0] == {"type": "text", "text": "що тут?"}
-    assert parts[1]["image_url"]["url"] == "data:image/png;base64,QUJD"
+    assert parts[0]["image_url"]["url"] == "data:image/png;base64,QUJD"  # картинка перед текстом
+    assert parts[1] == {"type": "text", "text": "що тут?"}
 
 
 async def test_ollama_images_payload():
@@ -129,3 +129,63 @@ async def test_ollama_images_payload():
     c._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     await c.chat([{"role": "user", "content": "що тут?", "images": [{"mime": "image/png", "data": "QUJD"}]}])
     assert seen["body"]["messages"][0]["images"] == ["QUJD"]
+
+
+class ProbeLLM(FakeLLM):
+    """FakeLLM, що відповідає на перевірку зору як llama-server (/props → modalities.vision)."""
+
+    def __init__(self, script, vision):
+        super().__init__(script)
+        self.vision_flag = vision
+
+    async def supports_vision(self):
+        return self.vision_flag
+
+
+async def test_vision_probe_and_events(cfg):
+    _png(cfg.workspace / "uploads" / "s.png")
+    llm = ProbeLLM([text("Бачу вікно терміналу")], vision=True)
+    agent = Agent(cfg, llm=llm)
+    rec = Recorder()
+    await agent.run("s", "Що на зображенні uploads/s.png?", rec.emit, rec.confirm)
+    assert {"type": "vision", "state": "attached", "images": ["uploads/s.png"]} in rec.events
+    user = llm.calls[0]["messages"][-1]
+    assert user["content"].startswith("[Прикріплене зображення: uploads/s.png. Воно вже перед тобою")
+    assert "NEVER try to open, OCR" in llm.calls[0]["messages"][0]["content"]
+
+
+async def test_vision_unavailable_is_reported_and_recovers(cfg):
+    _png(cfg.workspace / "s.png")
+    llm = ProbeLLM([text("Зір вимкнено"), text("Тепер бачу")], vision=False)
+    agent = Agent(cfg, llm=llm)
+    rec = Recorder()
+    await agent.run("s", "опиши s.png", rec.emit, rec.confirm)
+    ev = next(e for e in rec.events if e["type"] == "vision")
+    assert ev["state"] == "unavailable" and "mmproj" in ev["reason"]
+    assert not _images_in(llm.calls[0]["messages"])
+    assert "CANNOT see images" in llm.calls[0]["messages"][0]["content"]
+    # модель перезапустили з mmproj — агент сам це помічає, без перезапуску
+    llm.vision_flag = True
+    agent._vision_checked = 0
+    await agent.run("s", "а тепер опиши s.png", rec.emit, rec.confirm)
+    assert agent.vision
+    last = llm.calls[1]["messages"][-1]
+    assert last["images"] and last["content"].startswith("[Прикріплене зображення")
+    # картинка з першого повідомлення (коли зору не було) збереглася і тепер теж видна
+    assert len(_images_in(llm.calls[1]["messages"])) == 2
+
+
+async def test_probe_endpoints():
+    def handler(request):
+        if request.url.path == "/props":
+            return httpx.Response(200, json={"modalities": {"vision": True, "audio": False}})
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"capabilities": ["completion", "tools"]})
+        return httpx.Response(404)
+
+    oa = OpenAICompatClient("http://x:8085", "qwen")
+    oa._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    assert await oa.supports_vision() is True
+    ol = OllamaClient("http://x", "qwen3.5:9b")
+    ol._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    assert await ol.supports_vision() is False

@@ -91,6 +91,14 @@ class OllamaClient:
         present = any(m == self.model or m.startswith(self.model + ":") for m in models)
         return {"ok": True, "model": self.model, "model_present": present}
 
+    async def supports_vision(self) -> bool | None:
+        """True/False — чи бачить модель зображення (за /api/show → capabilities); None — невідомо."""
+        r = await self._client.post(f"{self.base_url}/api/show", json={"model": self.model}, timeout=10)
+        if r.status_code != 200:
+            return None
+        caps = r.json().get("capabilities")
+        return "vision" in caps if isinstance(caps, list) else None
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -198,6 +206,15 @@ class OpenAICompatClient:
         # llama-server обслуговує одну модель (id = --alias); запити з іншою назвою він теж приймає
         return {"ok": True, "model": self.model, "model_present": not models or self.model in models, "served": models}
 
+    async def supports_vision(self) -> bool | None:
+        """llama-server: GET /props → modalities.vision (є, якщо запущено з --mmproj); None — невідомо."""
+        root = self.base_url[: -len("/v1")] if self.base_url.endswith("/v1") else self.base_url
+        r = await self._client.get(f"{root}/props", timeout=10)
+        if r.status_code != 200:
+            return None
+        modalities = r.json().get("modalities")
+        return bool(modalities.get("vision")) if isinstance(modalities, dict) else None
+
     @staticmethod
     def convert_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -227,9 +244,12 @@ class OpenAICompatClient:
                 cid = pending_ids.pop(0) if pending_ids else f"call_{counter}"
                 out.append({"role": "tool", "tool_call_id": cid, "content": m.get("content", "")})
             elif m.get("images"):
-                parts: list[dict[str, Any]] = [{"type": "text", "text": m.get("content", "")}]
-                for img in m["images"]:
-                    parts.append({"type": "image_url", "image_url": {"url": f"data:{img['mime']};base64,{img['data']}"}})
+                # спершу картинки, потім текст — так їх найкраще сприймають VL-моделі (Qwen-VL тощо)
+                parts: list[dict[str, Any]] = [
+                    {"type": "image_url", "image_url": {"url": f"data:{img['mime']};base64,{img['data']}"}}
+                    for img in m["images"]
+                ]
+                parts.append({"type": "text", "text": m.get("content", "")})
                 out.append({"role": role, "content": parts})
             else:
                 out.append({"role": role, "content": m.get("content", "")})
