@@ -20,16 +20,20 @@ SMALL = 32  # до цього розміру включно — лише гол�
 FULL_BOX = QRectF(14, 0, 172, 212)  # увесь робот разом з антеною й тінню
 HEAD_BOX = QRectF(24, 2, 152, 130)  # голова з антеною й «вушками»
 FACE_BOX = QRectF(26, 34, 148, 96)  # лише голова, без антени — для найменших розмірів
+# таксик: голова з вухами / лише мордочка
+DOG_HEAD_BOX = QRectF(40, 26, 120, 112)
+DOG_FACE_BOX = QRectF(50, 28, 100, 92)
 
 
-def _posed_robot():
-    from .robot import STATE_COLORS, RobotWidget
+def _posed_robot(character: str = "robot"):
+    from .characters import make_character
+    from .robot import STATE_COLORS
 
-    w = RobotWidget(1.0)
+    w = make_character(character, 1.0)
     w._timer.stop()  # статичний кадр: без анімації
     w.state = "idle"
     w._color = QColor(STATE_COLORS["idle"])
-    w._hover = True  # рум'янець і усмішка
+    w._hover = character == "robot"  # рум'янець і усмішка (таксик при наведенні піднімає лапку — не треба)
     w._wave = 0.0
     w._blink = 0.0
     w._gaze.setX(0.0)
@@ -38,9 +42,12 @@ def _posed_robot():
     return w
 
 
-def render_icon(size: int) -> QPixmap:
-    box = FACE_BOX if size <= 24 else HEAD_BOX if size <= SMALL else FULL_BOX
-    w = _posed_robot()
+def render_icon(size: int, character: str = "robot") -> QPixmap:
+    if character == "dog":
+        box = DOG_FACE_BOX if size <= 24 else DOG_HEAD_BOX if size <= SMALL else FULL_BOX
+    else:
+        box = FACE_BOX if size <= 24 else HEAD_BOX if size <= SMALL else FULL_BOX
+    w = _posed_robot(character)
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -57,10 +64,10 @@ def render_icon(size: int) -> QPixmap:
     return pm
 
 
-def app_icon() -> QIcon:
+def app_icon(character: str = "robot") -> QIcon:
     icon = QIcon()
     for size in SIZES:
-        icon.addPixmap(render_icon(size))
+        icon.addPixmap(render_icon(size, character))
     return icon
 
 

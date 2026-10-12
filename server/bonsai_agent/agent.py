@@ -17,6 +17,7 @@ from .llm import ChatResult, OllamaClient, OpenAICompatClient, ToolsNotSupported
 from .storage import Storage
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
+from .users import ADMIN_ONLY_TOOLS, OWNER, User, workspace_for
 
 log = logging.getLogger("bonsai.agent")
 
@@ -142,26 +143,39 @@ class Agent:
         self.llm = llm or create_llm(config)
         self.storage = storage or Storage(config.db_path)
         self.registry = registry or build_registry()
-        self.ctx = ToolContext(config=config, storage=self.storage)
         self.native_tools = config.tool_mode != "json"
         self.vision = config.vision != "off"
-        self.ctx.vision_ok = self.vision
         self.vision_reason = ""  # чому зору немає (для користувача)
         self._vision_checked = 0.0
         self._session_locks: dict[str, asyncio.Lock] = {}
 
+    def make_context(self, user: User | None = None) -> ToolContext:
+        """Контекст задачі конкретного користувача: його тека, пам'ять і дозволені інструменти."""
+        user = user or User(OWNER, "admin")
+        ws = workspace_for(self.config, user)
+        ws.mkdir(parents=True, exist_ok=True)
+        return ToolContext(
+            config=self.config,
+            storage=self.storage,
+            owner=user.name,
+            workspace=ws,
+            allow_outside=self.config.allow_outside_workspace and user.is_admin,
+            denied_tools=frozenset() if user.is_admin else ADMIN_ONLY_TOOLS,
+            vision_ok=self.vision,
+        )
+
     # ---------------- побудова контексту ----------------
-    def _system_prompt(self, user_text: str) -> str:
+    def _system_prompt(self, user_text: str, ctx: ToolContext) -> str:
         memories = ""
         try:
-            items = self.storage.search_memories(user_text, limit=6)
+            items = self.storage.search_memories(user_text, limit=6, owner=ctx.owner)
         except Exception:  # noqa: BLE001
             items = []
         if items:
             memories = "\nRelevant long-term memories (may be useful):\n" + format_memories(items) + "\n"
         prompt = SYSTEM_PROMPT.format(
             now=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z (%A)"),
-            workspace=self.config.workspace,
+            workspace=ctx.workspace,
             language=self.config.language,
             name=self.config.agent_name,
             persona=f"\nPersonality: {self.config.persona}" if self.config.persona else "",
@@ -178,7 +192,7 @@ class Agent:
             memories=memories,
         )
         if not self.native_tools:
-            prompt += JSON_PROTOCOL.format(catalog=self.registry.text_catalog())
+            prompt += JSON_PROTOCOL.format(catalog=self.registry.text_catalog(ctx.denied_tools))
         return prompt
 
     def _trim_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -222,12 +236,12 @@ class Agent:
         return out
 
     # ---------------- зображення ----------------
-    def _image_refs(self, text: str) -> list[str]:
+    def _image_refs(self, text: str, ctx: ToolContext) -> list[str]:
         """Наявні в workspace картинки, згадані в тексті задачі."""
         found = []
         for ref in find_image_refs(text):
             try:
-                p = self.ctx.resolve_path(ref)
+                p = ctx.resolve_path(ref)
             except ToolError:
                 continue
             if p.is_file() and is_image(p):
@@ -255,11 +269,11 @@ class Agent:
         if result is not None:
             if result != self.vision:
                 log.info("Зір %s (за даними сервера моделі)", "увімкнено" if result else "вимкнено")
-            self.vision = self.ctx.vision_ok = result
+            self.vision = result
             self.vision_reason = "" if result else "сервер моделі запущено без зору (немає mmproj)"
         return self.vision
 
-    def _attach_images(self, msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _attach_images(self, msgs: list[dict[str, Any]], ctx: ToolContext) -> list[dict[str, Any]]:
         """Шляхи → base64 для останніх N повідомлень з картинками; решта — текстова примітка."""
         budget = self.config.max_images_in_context if self.vision else 0
         out: list[dict[str, Any]] = []
@@ -280,7 +294,7 @@ class Agent:
                     notes.append(f"[зображення {path} — {why}]")
                     continue
                 try:
-                    loaded.append(load_image(self.ctx.resolve_path(path)))
+                    loaded.append(load_image(ctx.resolve_path(path)))
                 except Exception as e:  # noqa: BLE001
                     notes.append(f"[зображення {path} не вдалося відкрити: {e}]")
             if loaded:
@@ -304,13 +318,16 @@ class Agent:
         user_text: str,
         emit: EmitFunc,
         confirm: ConfirmFunc,
+        user: User | None = None,
     ) -> str:
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        ctx = self.make_context(user)
+        lock = self._session_locks.setdefault(f"{ctx.owner}:{session_id}", asyncio.Lock())
         async with lock:
-            history = self.storage.load_session(session_id)
+            history = self.storage.load_session(session_id, ctx.owner)
             user_msg: dict[str, Any] = {"role": "user", "content": user_text}
-            if refs := self._image_refs(user_text):
+            if refs := self._image_refs(user_text, ctx):
                 await self.refresh_vision()
+                ctx.vision_ok = self.vision
                 user_msg["images"] = refs  # шляхи зберігаємо завжди — якщо зір з'явиться, картинку буде видно
                 if self.vision:
                     await emit({"type": "vision", "state": "attached", "images": refs})
@@ -318,18 +335,29 @@ class Agent:
                     await emit({"type": "vision", "state": "unavailable", "images": refs,
                                 "reason": self.vision_reason or "зір вимкнено (BONSAI_VISION=off)"})
             history.append(user_msg)
+
+            def persist() -> None:
+                # чат зберігається одразу й після кожного кроку — аварійне вимкнення не губить розмову
+                self.storage.save_session(session_id, history, ctx.owner)
+
+            persist()
             try:
-                answer = await self._loop(history, user_text, emit, confirm)
+                return await self._loop(history, user_text, emit, confirm, ctx, persist)
             finally:
-                self.storage.save_session(session_id, self._trim_history(history))
-            return answer
+                persist()
 
     async def _loop(
-        self, history: list[dict[str, Any]], user_text: str, emit: EmitFunc, confirm: ConfirmFunc
+        self,
+        history: list[dict[str, Any]],
+        user_text: str,
+        emit: EmitFunc,
+        confirm: ConfirmFunc,
+        ctx: ToolContext,
+        persist: Callable[[], None] = lambda: None,
     ) -> str:
         for step in range(1, self.config.max_steps + 1):
             await emit({"type": "status", "state": "thinking", "step": step})
-            result = await self._call_llm(history, user_text, emit)
+            result = await self._call_llm(history, user_text, emit, ctx)
 
             calls = self._extract_calls(result)
             if not calls:
@@ -344,18 +372,19 @@ class Agent:
             else:
                 history.append({"role": "assistant", "content": result.content})
 
-            self.ctx.pending_images.clear()
+            ctx.pending_images.clear()
             for name, args in calls:
-                output = await self._execute(name, args, emit, confirm)
+                output = await self._execute(name, args, emit, confirm, ctx)
                 if self.native_tools:
                     history.append({"role": "tool", "tool_name": name, "content": output})
                 else:
                     history.append({"role": "user", "content": f"TOOL RESULT ({name}):\n{output}"})
             # картинки від view_image — окремим повідомленням після всіх результатів інструментів
-            if self.ctx.pending_images:
-                paths = list(dict.fromkeys(self.ctx.pending_images))
+            if ctx.pending_images:
+                paths = list(dict.fromkeys(ctx.pending_images))
                 history.append({"role": "user", "content": "[view_image] " + ", ".join(paths), "images": paths})
                 await emit({"type": "vision", "state": "attached", "images": paths})
+            persist()
 
         answer = (
             f"Я зробив {self.config.max_steps} кроків і не встиг завершити задачу. "
@@ -366,7 +395,9 @@ class Agent:
         await emit({"type": "status", "state": "idle"})
         return answer
 
-    async def _call_llm(self, history: list[dict[str, Any]], user_text: str, emit: EmitFunc) -> ChatResult:
+    async def _call_llm(
+        self, history: list[dict[str, Any]], user_text: str, emit: EmitFunc, ctx: ToolContext
+    ) -> ChatResult:
         async def on_token(kind: str, text: str) -> None:
             if kind == "thinking":
                 await emit({"type": "thinking", "text": text})
@@ -376,17 +407,19 @@ class Agent:
         while True:
             trimmed = self._trim_history(history)
             msgs = trimmed if self.native_tools else self._to_json_protocol(trimmed)
-            msgs = self._attach_images(msgs)
-            messages = [{"role": "system", "content": self._system_prompt(user_text)}, *msgs]
+            msgs = self._attach_images(msgs, ctx)
+            messages = [{"role": "system", "content": self._system_prompt(user_text, ctx)}, *msgs]
             try:
                 return await self.llm.chat(
-                    messages, tools=self.registry.schemas() if self.native_tools else None, on_token=on_token
+                    messages,
+                    tools=self.registry.schemas(ctx.denied_tools) if self.native_tools else None,
+                    on_token=on_token,
                 )
             except VisionNotSupported:
                 if not self.vision:
                     raise
                 log.warning("Модель не приймає зображення — вимикаю зір (додай mmproj, щоб увімкнути)")
-                self.vision = self.ctx.vision_ok = False
+                self.vision = ctx.vision_ok = False
                 self.vision_reason = "модель відхилила зображення (немає mmproj?)"
                 self._vision_checked = time.monotonic()  # перевіримо знову через 30 с, а не «назавжди»
                 await emit({"type": "vision", "state": "unavailable", "images": [], "reason": self.vision_reason})
@@ -413,9 +446,11 @@ class Agent:
             return [parsed]
         return []
 
-    async def _execute(self, name: str, args: dict[str, Any], emit: EmitFunc, confirm: ConfirmFunc) -> str:
+    async def _execute(
+        self, name: str, args: dict[str, Any], emit: EmitFunc, confirm: ConfirmFunc, ctx: ToolContext
+    ) -> str:
         call_id = uuid.uuid4().hex[:8]
-        tool = self.registry.get(name)
+        tool = self.registry.get(name) if name not in ctx.denied_tools else None
         summary = tool.describe(args) if tool else f"{name}({args})"
         await emit({"type": "tool_call", "id": call_id, "name": name, "args": args, "summary": summary})
 
@@ -429,7 +464,7 @@ class Agent:
 
         await emit({"type": "status", "state": "working", "tool": name})
         try:
-            output = await self.registry.call(self.ctx, name, args)
+            output = await self.registry.call(ctx, name, args)
             ok = True
         except ToolError as e:
             output, ok = f"ПОМИЛКА: {e}", False
@@ -442,51 +477,41 @@ class Agent:
         await emit({"type": "tool_result", "id": call_id, "name": name, "ok": ok, "preview": output[:500]})
         return output
 
-    def reset_session(self, session_id: str) -> None:
-        self.storage.clear_session(session_id)
+    def reset_session(self, session_id: str, owner: str = OWNER) -> None:
+        self.storage.clear_session(session_id, owner)
 
-    # ---------------- збережені чати ----------------
-    def save_chat(self, session_id: str, title: str | None = None, chat_id: int | None = None) -> dict[str, Any]:
-        from .chats import default_title
+    # ---------------- чати (зберігаються автоматично) ----------------
+    def list_chats(self, owner: str = OWNER) -> list[dict[str, Any]]:
+        return self.storage.list_chats(owner)
 
-        messages = self.storage.load_session(session_id)
-        if not messages:
-            raise ValueError("Розмова порожня — нічого зберігати")
-        title = (title or "").strip() or default_title(messages)
-        new_id = self.storage.save_chat(title, messages, chat_id)
-        return {"id": new_id, "title": title}
-
-    def list_chats(self) -> list[dict[str, Any]]:
-        return self.storage.list_chats()
-
-    def open_chat(self, chat_id: int, session_id: str) -> dict[str, Any]:
-        """Відновлює збережений чат як поточну розмову (можна продовжувати)."""
+    def open_chat(self, session_id: str, owner: str = OWNER) -> dict[str, Any]:
+        """Чат для показу; клієнт далі просто пише в нього (session_id = id чату)."""
         from .chats import transcript
 
-        chat = self.storage.load_chat(chat_id)
+        chat = self.storage.load_chat(session_id, owner)
         if chat is None:
-            raise ValueError(f"Чат #{chat_id} не знайдено")
-        self.storage.save_session(session_id, chat["messages"])
+            raise ValueError("Чат не знайдено — можливо, його видалили")
         return {"id": chat["id"], "title": chat["title"], "transcript": transcript(chat["messages"])}
 
-    def delete_chat(self, chat_id: int) -> bool:
-        return self.storage.delete_chat(chat_id)
+    def rename_chat(self, session_id: str, title: str, owner: str = OWNER) -> dict[str, Any]:
+        title = " ".join(str(title or "").split())[:120]
+        if not title:
+            raise ValueError("Назва не може бути порожньою")
+        if not self.storage.rename_chat(session_id, title, owner):
+            raise ValueError("У цьому чаті ще немає повідомлень")
+        return {"id": session_id, "title": title}
 
-    def export_chat(self, session_id: str | None = None, chat_id: int | None = None) -> dict[str, str]:
-        """Markdown поточної розмови (session_id) або збереженого чату (chat_id)."""
-        from .chats import default_title, to_markdown
+    def delete_chat(self, session_id: str, owner: str = OWNER) -> bool:
+        return self.storage.clear_session(session_id, owner)
 
-        if chat_id is not None:
-            chat = self.storage.load_chat(chat_id)
-            if chat is None:
-                raise ValueError(f"Чат #{chat_id} не знайдено")
-            title, messages, when = chat["title"], chat["messages"], chat["updated_at"]
-        else:
-            messages = self.storage.load_session(session_id or "default")
-            if not messages:
-                raise ValueError("Розмова порожня — нічого експортувати")
-            title, when = default_title(messages), None
-        return {"title": title, "markdown": to_markdown(title, messages, self.config.agent_name, when)}
+    def export_chat(self, session_id: str, owner: str = OWNER) -> dict[str, str]:
+        from .chats import to_markdown
+
+        chat = self.storage.load_chat(session_id, owner)
+        if chat is None or not chat["messages"]:
+            raise ValueError("Розмова порожня — нічого експортувати")
+        title = chat["title"]
+        return {"title": title, "markdown": to_markdown(title, chat["messages"], self.config.agent_name, chat["updated_at"])}
 
     async def close(self) -> None:
         await self.llm.close()

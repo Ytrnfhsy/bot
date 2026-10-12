@@ -14,7 +14,8 @@ async def view_image(ctx: ToolContext, path: str) -> str:
         raise ToolError(f"Файл не знайдено: {path}")
     if not is_image(p):
         raise ToolError(f"Це не зображення. Підтримуються: {', '.join(sorted(IMAGE_EXT))}")
-    rel = p.relative_to(ctx.config.workspace.resolve()).as_posix() if not ctx.config.allow_outside_workspace else str(p)
+    ws = ctx.workspace.resolve()
+    rel = p.relative_to(ws).as_posix() if ws in p.parents else str(p)
     ctx.pending_images.append(rel)
     return f"Зображення {rel} додано до розмови наступним повідомленням — роздивись його й продовжуй задачу."
 

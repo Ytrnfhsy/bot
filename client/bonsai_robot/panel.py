@@ -98,18 +98,17 @@ def make_icon(kind: str, size: int = 18) -> QIcon:
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
-    if kind == "save":  # дискета
-        body = QPainterPath()
-        body.moveTo(5, 4)
-        body.lineTo(16, 4)
-        body.lineTo(20, 8)
-        body.lineTo(20, 20)
-        body.lineTo(4, 20)
-        body.lineTo(4, 5)
-        body.closeSubpath()
-        p.drawPath(body)
-        p.drawRect(QRectF(8, 4, 7, 5))
-        p.drawRoundedRect(QRectF(7, 13, 10, 7), 1, 1)
+    if kind == "new":  # аркуш з олівцем — новий чат
+        p.drawPolyline(QPolygonF([QPointF(12, 4), QPointF(5.5, 4), QPointF(4, 5.5), QPointF(4, 18.5),
+                                  QPointF(5.5, 20), QPointF(18.5, 20), QPointF(20, 18.5), QPointF(20, 12)]))
+        pencil = QPainterPath()
+        pencil.moveTo(18, 3.5)
+        pencil.lineTo(20.5, 6)
+        pencil.lineTo(12.5, 14)
+        pencil.lineTo(9.5, 14.5)
+        pencil.lineTo(10, 11.5)
+        pencil.closeSubpath()
+        p.drawPath(pencil)
     elif kind == "chats":  # тека
         path = QPainterPath()
         path.moveTo(3, 7)
@@ -125,9 +124,6 @@ def make_icon(kind: str, size: int = 18) -> QIcon:
         path.quadTo(3, 5, 3, 6.5)
         p.drawPath(path)
         p.drawLine(QPointF(3, 11), QPointF(21, 11))
-    elif kind == "reset":  # кругова стрілка
-        p.drawArc(QRectF(5, 5, 14, 14), 60 * 16, 290 * 16)
-        p.drawPolyline(QPolygonF([QPointF(15.5, 3.5), QPointF(16.5, 6.8), QPointF(13.2, 7.8)]))
     elif kind == "close":
         p.drawLine(QPointF(7, 7), QPointF(17, 17))
         p.drawLine(QPointF(17, 7), QPointF(7, 17))
@@ -167,11 +163,11 @@ class ChatPanel(QWidget):
     task_submitted = Signal(str)
     image_pasted = Signal(str)
     cancel_requested = Signal()
-    history_open = Signal(int)
-    history_export = Signal(int)
-    history_delete = Signal(int)
-    reset_requested = Signal()
-    save_requested = Signal()
+    history_open = Signal(str)
+    history_export = Signal(str)
+    history_delete = Signal(str)
+    history_rename = Signal(str, str)  # (id, поточна назва)
+    new_chat_requested = Signal()
     chats_requested = Signal()
     confirm_answered = Signal(str, bool)
     closed = Signal()
@@ -210,25 +206,21 @@ class ChatPanel(QWidget):
         self.status = QLabel("● не підключено", objectName="status")
         self.status.setWordWrap(True)
         head.addWidget(self.status, 1)
-        self.btn_save = QPushButton(objectName="flat", toolTip="Зберегти чат (Ctrl+S)")
-        self.btn_save.clicked.connect(self.save_requested)
-        self.btn_chats = QPushButton(objectName="flat", toolTip="Збережені чати")
+        self.btn_new = QPushButton(objectName="flat", toolTip="Новий чат (Ctrl+N) — поточний уже збережено")
+        self.btn_new.clicked.connect(self.new_chat_requested)
+        self.btn_chats = QPushButton(objectName="flat", toolTip="Усі чати")
         self.btn_chats.clicked.connect(self.chats_requested)
-        self.btn_reset = QPushButton(objectName="flat", toolTip="Нова розмова")
-        self.btn_reset.clicked.connect(self.reset_requested)
-        QShortcut(QKeySequence.StandardKey.Save, self, activated=self.save_requested.emit)
+        QShortcut(QKeySequence.StandardKey.New, self, activated=self.new_chat_requested.emit)
         self.btn_close = QPushButton(objectName="flat", toolTip="Сховати (Esc)")
         self.btn_close.clicked.connect(self.hide_panel)
-        for btn, kind in ((self.btn_save, "save"), (self.btn_chats, "chats"),
-                          (self.btn_reset, "reset"), (self.btn_close, "close")):
+        for btn, kind in ((self.btn_new, "new"), (self.btn_chats, "chats"), (self.btn_close, "close")):
             btn.setIcon(make_icon(kind))
             btn.setIconSize(QSize(18, 18))
             btn.setFixedSize(28, 28)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._on_escape)
-        head.addWidget(self.btn_save)
+        head.addWidget(self.btn_new)
         head.addWidget(self.btn_chats)
-        head.addWidget(self.btn_reset)
         head.addWidget(self.btn_close)
         lay.addLayout(head)
 
@@ -286,13 +278,13 @@ class ChatPanel(QWidget):
         self._ask_callback = None
         self._ask_default = ""
 
-        # сторінка «Збережені чати»
+        # сторінка «Чати» (усі розмови зберігаються автоматично)
         self.history_page = QFrame()
         hl = QVBoxLayout(self.history_page)
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(6)
-        hl.addWidget(QLabel("Збережені чати", objectName="historyTitle"))
-        self.history_empty = QLabel("Збережених чатів поки немає.\nНатисни іконку дискети або Ctrl+S, щоб зберегти розмову.",
+        hl.addWidget(QLabel("Чати", objectName="historyTitle"))
+        self.history_empty = QLabel("Чатів поки немає.\nКожна розмова з'явиться тут автоматично.",
                                     objectName="historyEmpty")
         self.history_empty.setWordWrap(True)
         hl.addWidget(self.history_empty)
@@ -303,17 +295,19 @@ class ChatPanel(QWidget):
         self.history_list.currentItemChanged.connect(lambda *_: self._history_buttons())
         hl.addWidget(self.history_list)
         hb = QHBoxLayout()
-        self.btn_h_back = QPushButton("← Назад", objectName="secondary")
+        self.btn_h_back = QPushButton("←", objectName="secondary", toolTip="Назад до розмови (Esc)")
         self.btn_h_open = QPushButton("Відкрити", objectName="primary")
-        self.btn_h_export = QPushButton("Експорт .md", objectName="secondary")
+        self.btn_h_rename = QPushButton("Назва…", objectName="secondary", toolTip="Перейменувати чат")
+        self.btn_h_export = QPushButton(".md", objectName="secondary", toolTip="Експорт у Markdown")
         self.btn_h_delete = QPushButton("Видалити", objectName="danger")
         self.btn_h_back.clicked.connect(self.show_chat)
         self.btn_h_open.clicked.connect(lambda: self._history_action("open"))
+        self.btn_h_rename.clicked.connect(lambda: self._history_action("rename"))
         self.btn_h_export.clicked.connect(lambda: self._history_action("export"))
         self.btn_h_delete.clicked.connect(lambda: self._history_action("delete"))
         hb.addWidget(self.btn_h_back)
         hb.addStretch(1)
-        for b in (self.btn_h_delete, self.btn_h_export, self.btn_h_open):
+        for b in (self.btn_h_delete, self.btn_h_rename, self.btn_h_export, self.btn_h_open):
             hb.addWidget(b)
         hl.addLayout(hb)
         self.history_page.hide()
@@ -538,16 +532,19 @@ class ChatPanel(QWidget):
     def history_shown(self) -> bool:
         return not self.history_page.isHidden()
 
-    def set_history(self, chats: list[dict]) -> None:
+    def set_history(self, chats: list[dict], active: str | None = None) -> None:
+        """active — id чату, відкритого зараз (позначається ●)."""
         import time
 
         current = self._history_id()
         self.history_list.clear()
         for c in chats:
             when = time.strftime("%d.%m.%Y %H:%M", time.localtime(c["updated_at"]))
-            item = QListWidgetItem(f"{c['title']}\n{when} · повідомлень: {c['count']}")
+            mark = "● " if c["id"] == active else ""
+            item = QListWidgetItem(f"{mark}{c['title']}\n{when} · повідомлень: {c['count']}")
             item.setData(Qt.ItemDataRole.UserRole, c["id"])
-            item.setToolTip(c["title"])
+            item.setData(Qt.ItemDataRole.UserRole + 1, c["title"])
+            item.setToolTip(c["title"] + ("\n(поточна розмова)" if mark else ""))
             self.history_list.addItem(item)
             if c["id"] == current:
                 self.history_list.setCurrentItem(item)
@@ -561,13 +558,13 @@ class ChatPanel(QWidget):
         self._history_buttons()
         self._fit()
 
-    def _history_id(self) -> int | None:
+    def _history_id(self) -> str | None:
         item = self.history_list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
     def _history_buttons(self) -> None:
         has = self._history_id() is not None
-        for b in (self.btn_h_open, self.btn_h_export, self.btn_h_delete):
+        for b in (self.btn_h_open, self.btn_h_rename, self.btn_h_export, self.btn_h_delete):
             b.setEnabled(has)
 
     def _history_action(self, action: str) -> None:
@@ -578,8 +575,10 @@ class ChatPanel(QWidget):
             self.history_open.emit(cid)
         elif action == "export":
             self.history_export.emit(cid)
+        elif action == "rename":
+            self.history_rename.emit(cid, self.history_list.currentItem().data(Qt.ItemDataRole.UserRole + 1))
         else:
-            title = self.history_list.currentItem().text().split("\n")[0]
+            title = self.history_list.currentItem().data(Qt.ItemDataRole.UserRole + 1)
             self.ask(f"Видалити «{title}»? Це не можна скасувати.",
                      [("cancel", "Скасувати", "secondary"), ("delete", "Видалити", "danger")],
                      lambda key, _t: key == "delete" and self.history_delete.emit(cid))

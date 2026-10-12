@@ -6,15 +6,15 @@
   {"type": "task", "text": "...", "session_id": "default"}
   {"type": "confirm_response", "id": "<confirm id>", "approved": true}
   {"type": "cancel"}
-  {"type": "reset", "session_id": "default"}
-  {"type": "upload", "id": "...", "name": "звіт.pdf", "data": "<base64>"}  — збереже у workspace/uploads/
-  {"type": "chat_save", "session_id", "title"?, "id"?}  — зберегти поточну розмову (id — оновити існуючий)
-  {"type": "chat_list"} | {"type": "chat_open", "id", "session_id"} | {"type": "chat_delete", "id"}
-  {"type": "chat_export", "session_id" | "id"}  — Markdown поточної або збереженої розмови
+  {"type": "reset", "session_id": "default"}  — видалити розмову
+  {"type": "upload", "id": "...", "name": "звіт.pdf", "data": "<base64>"}  — збереже у <тека користувача>/uploads/
+  Чати зберігаються автоматично (session_id — це id чату; новий чат = новий session_id від клієнта):
+  {"type": "chat_list"} | {"type": "chat_open", "id"} | {"type": "chat_delete", "id"}
+  {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
   {"type": "ping"}
 
 Сервер → клієнт:
-  {"type": "hello", "name": "Kru", "model": ..., "version": ...}
+  {"type": "hello", "name": "Kru", "model": ..., "version": ..., "user": "owner", "role": "admin"}
   {"type": "status", "state": "thinking|working|waiting_confirm|idle", ...}
   {"type": "thinking", "text": "..."}         — потік міркувань моделі
   {"type": "token", "text": "..."}            — потік тексту відповіді (чернетка)
@@ -23,7 +23,7 @@
   {"type": "confirm_request", "id", "tool", "summary"}
   {"type": "final", "text": "..."}
   {"type": "uploaded", "id", "name", "path", "size"} | {"type": "upload_error", "id", "name", "message"}
-  {"type": "chat_saved", "id", "title"} | {"type": "chat_list", "chats": [{id, title, count, created_at, updated_at}]}
+  {"type": "chat_renamed", "id", "title"} | {"type": "chat_list", "chats": [{id, title, count, created_at, updated_at}]}
   {"type": "chat_opened", "id", "title", "transcript": [{role, text}]} | {"type": "chat_export", "title", "markdown"}
   {"type": "chat_error", "message"}
   {"type": "error", "message": "..."}
@@ -35,7 +35,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import hmac
 import re
 import logging
 import uuid
@@ -49,16 +48,11 @@ from pydantic import BaseModel
 from . import __version__
 from .agent import Agent
 from .config import Config
+from .users import User, UserStore, workspace_for
 
 log = logging.getLogger("bonsai.server")
 
 MAX_UPLOAD = 25 * 1024 * 1024  # файли, перетягнуті на робота
-
-
-def _check_token(cfg: Config, supplied: str | None) -> bool:
-    if not cfg.token:
-        return True
-    return supplied is not None and hmac.compare_digest(cfg.token, supplied)
 
 
 class TaskRequest(BaseModel):
@@ -68,6 +62,7 @@ class TaskRequest(BaseModel):
 
 def create_app(config: Config | None = None, agent: Agent | None = None) -> FastAPI:
     cfg = config or Config.from_env()
+    users = UserStore(cfg)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -80,8 +75,8 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
                 log.warning("LLM-сервер віддає %s, а BONSAI_MODEL=%s (перевір --alias)", health.get("served"), cfg.model)
             else:
                 log.warning("Модель %s не знайдена в Ollama. Виконай: ollama pull %s", cfg.model, cfg.model)
-        if not cfg.token:
-            log.warning("BONSAI_TOKEN не задано — сервер доступний без авторизації!")
+        if not cfg.token and not users.list():
+            log.warning("BONSAI_TOKEN не задано і користувачів немає — сервер доступний без авторизації!")
         yield
         await app.state.agent.close()
 
@@ -96,7 +91,8 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
     async def api_task(req: TaskRequest, request: Request) -> dict[str, Any]:
         """Неінтерактивний запуск: небезпечні дії відхиляються (якщо не BONSAI_AUTO_APPROVE)."""
         auth = request.headers.get("authorization", "")
-        if not _check_token(cfg, auth.removeprefix("Bearer ").strip() or None):
+        user = users.authenticate(auth.removeprefix("Bearer ").strip() or None)
+        if user is None:
             raise HTTPException(status_code=401, detail="Невірний токен")
         ag: Agent = request.app.state.agent
         events: list[dict[str, Any]] = []
@@ -108,18 +104,19 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
         async def deny(*_: Any) -> bool:
             return False
 
-        answer = await ag.run(req.session_id, req.text, emit, deny)
+        answer = await ag.run(req.session_id, req.text, emit, deny, user)
         return {"answer": answer, "events": events}
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
         token = ws.query_params.get("token") or ws.headers.get("x-bonsai-token")
         await ws.accept()
-        if not _check_token(cfg, token):
+        user = users.authenticate(token)
+        if user is None:
             # приймаємо і одразу закриваємо з кодом 4401 — клієнт відрізнить «невірний токен» від інших 403
             await ws.close(code=4401, reason="unauthorized")
             return
-        await Connection(ws, ws.app.state.agent).serve()
+        await Connection(ws, ws.app.state.agent, user).serve()
 
     return app
 
@@ -127,10 +124,12 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
 class Connection:
     """Одне WebSocket-підключення: одна активна задача, підтвердження через futures."""
 
-    def __init__(self, ws: WebSocket, agent: Agent) -> None:
+    def __init__(self, ws: WebSocket, agent: Agent, user: User | None = None) -> None:
         self.ws = ws
         self.agent = agent
+        self.user = user or User("owner", "admin")
         self.task: asyncio.Task | None = None
+        self._task_session = ""
         self.pending: dict[str, asyncio.Future[bool]] = {}
         self._send_lock = asyncio.Lock()
         self.closed = False
@@ -158,7 +157,7 @@ class Connection:
 
     async def _run_task(self, text: str, session_id: str) -> None:
         try:
-            await self.agent.run(session_id, text, self.send, self.confirm)
+            await self.agent.run(session_id, text, self.send, self.confirm, self.user)
         except asyncio.CancelledError:
             await self.send({"type": "final", "text": "⏹ Задачу скасовано."})
             await self.send({"type": "status", "state": "idle"})
@@ -180,7 +179,7 @@ class Connection:
         if len(data) > MAX_UPLOAD:
             await self.send({"type": "upload_error", "id": uid, "name": name, "message": "файл більший за 25 МБ"})
             return
-        ws_dir = self.agent.config.workspace
+        ws_dir = workspace_for(self.agent.config, self.user)
         target = ws_dir / "uploads" / name
         stem, suffix, n = target.stem, target.suffix, 1
         while target.exists():
@@ -197,25 +196,26 @@ class Connection:
         await self.send({"type": "uploaded", "id": uid, "name": name, "path": rel, "size": len(data)})
 
     async def _chats(self, kind: str, msg: dict[str, Any]) -> None:
-        """Збережені чати: зберегти / список / відкрити / видалити / експорт у Markdown."""
-        ag, session = self.agent, str(msg.get("session_id") or "default")
-        chat_id = int(msg["id"]) if msg.get("id") not in (None, "") else None
+        """Чати (зберігаються автоматично): список / відкрити / перейменувати / видалити / експорт."""
+        ag, owner = self.agent, self.user.name
+        chat_id = str(msg.get("id") or msg.get("session_id") or "")
+        busy = self.task is not None and not self.task.done()
         try:
-            if kind == "chat_save":
-                if self.task and not self.task.done():
-                    raise ValueError("Зачекай, поки я закінчу задачу, — тоді збережу")
-                saved = ag.save_chat(session, msg.get("title"), chat_id)
-                await self.send({"type": "chat_saved", **saved})
+            if kind in {"chat_rename", "chat_save"}:  # chat_save — від старих клієнтів: лише назва
+                title = msg.get("title")
+                if kind == "chat_save" and not title:
+                    raise ValueError("Чати тепер зберігаються автоматично")
+                await self.send({"type": "chat_renamed", **ag.rename_chat(chat_id, title, owner)})
             elif kind == "chat_open":
-                if self.task and not self.task.done():
-                    raise ValueError("Спершу зупини поточну задачу")
-                await self.send({"type": "chat_opened", **ag.open_chat(chat_id, session)})
+                await self.send({"type": "chat_opened", **ag.open_chat(chat_id, owner)})
             elif kind == "chat_delete":
-                ag.delete_chat(chat_id)
+                if busy and chat_id == self._task_session:
+                    raise ValueError("Спершу зупини задачу в цьому чаті")
+                ag.delete_chat(chat_id, owner)
             elif kind == "chat_export":
-                await self.send({"type": "chat_export", **ag.export_chat(session, chat_id)})
-            if kind in {"chat_list", "chat_delete", "chat_save"}:
-                await self.send({"type": "chat_list", "chats": ag.list_chats()})
+                await self.send({"type": "chat_export", **ag.export_chat(chat_id, owner)})
+            if kind in {"chat_list", "chat_delete", "chat_rename", "chat_save"}:
+                await self.send({"type": "chat_list", "chats": ag.list_chats(owner)})
         except (ValueError, TypeError, KeyError) as e:
             await self.send({"type": "chat_error", "message": str(e)})
 
@@ -228,7 +228,7 @@ class Connection:
         cfg = self.agent.config
         vision = await self.agent.refresh_vision(force=True)
         await self.send({"type": "hello", "name": cfg.agent_name, "model": cfg.model, "version": __version__,
-                         "vision": vision})
+                         "vision": vision, "user": self.user.name, "role": self.user.role})
         try:
             while True:
                 msg = await self.ws.receive_json()
@@ -240,7 +240,8 @@ class Connection:
                     if self.task and not self.task.done():
                         await self.send({"type": "error", "message": "Я ще працюю над попередньою задачею. Скасуй її або зачекай."})
                         continue
-                    self.task = asyncio.create_task(self._run_task(text, str(msg.get("session_id") or "default")))
+                    self._task_session = str(msg.get("session_id") or "default")
+                    self.task = asyncio.create_task(self._run_task(text, self._task_session))
                 elif kind == "confirm_response":
                     fut = self.pending.get(str(msg.get("id")))
                     if fut and not fut.done():
@@ -250,9 +251,9 @@ class Connection:
                     if self.task and not self.task.done():
                         self.task.cancel()
                 elif kind == "reset":
-                    self.agent.reset_session(str(msg.get("session_id") or "default"))
+                    self.agent.reset_session(str(msg.get("session_id") or "default"), self.user.name)
                     await self.send({"type": "final", "text": "🧹 Розмову очищено."})
-                elif kind in {"chat_save", "chat_list", "chat_open", "chat_delete", "chat_export"}:
+                elif kind in {"chat_save", "chat_rename", "chat_list", "chat_open", "chat_delete", "chat_export"}:
                     await self._chats(kind, msg)
                 elif kind == "upload":
                     await self._save_upload(msg)

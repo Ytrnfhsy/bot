@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from .agent import strip_think
+from .storage import default_title  # noqa: F401 — частина API модуля
 
 
 def _tool_line(tc: dict[str, Any]) -> str:
@@ -37,14 +38,6 @@ def transcript(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
             if text and not m.get("tool_calls"):
                 out.append({"role": "assistant", "text": text})
     return out
-
-
-def default_title(messages: list[dict[str, Any]]) -> str:
-    for m in messages:
-        if m.get("role") == "user" and m.get("content"):
-            first = " ".join(m["content"].split())
-            return first[:60] + ("…" if len(first) > 60 else "")
-    return "Розмова " + datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
 def to_markdown(title: str, messages: list[dict[str, Any]], agent_name: str = "Kru", when: float | None = None) -> str:

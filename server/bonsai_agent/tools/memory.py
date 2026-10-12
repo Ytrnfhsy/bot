@@ -19,17 +19,17 @@ def format_memories(items: list[dict]) -> str:
 async def remember(ctx: ToolContext, content: str, tags: str = "") -> str:
     if not content.strip():
         raise ToolError("Порожній запис")
-    mid = await asyncio.to_thread(ctx.storage.add_memory, content, tags)
+    mid = await asyncio.to_thread(ctx.storage.add_memory, content, tags, ctx.owner)
     return f"Запам'ятовано (#{mid})"
 
 
 async def recall(ctx: ToolContext, query: str = "", limit: int = 8) -> str:
-    items = await asyncio.to_thread(ctx.storage.search_memories, query, max(1, min(int(limit), 30)))
+    items = await asyncio.to_thread(ctx.storage.search_memories, query, max(1, min(int(limit), 30)), ctx.owner)
     return format_memories(items) if items else "У пам'яті нічого не знайдено"
 
 
 async def forget(ctx: ToolContext, memory_id: int) -> str:
-    ok = await asyncio.to_thread(ctx.storage.delete_memory, int(memory_id))
+    ok = await asyncio.to_thread(ctx.storage.delete_memory, int(memory_id), ctx.owner)
     return f"Запис #{memory_id} видалено" if ok else f"Запис #{memory_id} не знайдено"
 
 

@@ -130,7 +130,7 @@ def _grep(ctx: ToolContext, regex: str, path: str, glob: str) -> str:
             with open(f, encoding="utf-8", errors="strict") as fh:
                 for no, line in enumerate(fh, 1):
                     if rx.search(line):
-                        hits.append(f"{os.path.relpath(f, ctx.config.workspace)}:{no}: {line.rstrip()[:300]}")
+                        hits.append(f"{os.path.relpath(f, ctx.workspace)}:{no}: {line.rstrip()[:300]}")
                         if len(hits) >= 300:
                             break
         except (UnicodeDecodeError, OSError):

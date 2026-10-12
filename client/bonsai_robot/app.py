@@ -7,10 +7,11 @@ import sys
 import time
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QIcon, QPixmap
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -23,11 +24,11 @@ from PySide6.QtWidgets import (
 )
 
 from .connection import AgentConnection, normalize_url
+from .characters import CHARACTERS, make_character
 from .icon import app_icon
 from .winplatform import IS_WINDOWS, WinHotkey, autostart_enabled, set_autostart
 from .panel import ChatPanel
-from .robot import RobotWidget
-from .settings import Settings
+from .settings import Settings, new_session_id
 
 
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
@@ -44,11 +45,16 @@ class SettingsDialog(QDialog):
         self.token = QLineEdit(s.token)
         self.token.setEchoMode(QLineEdit.EchoMode.Password)
         self.scale = QDoubleSpinBox(minimum=0.5, maximum=2.0, singleStep=0.1, value=s.scale)
+        self.character = QComboBox()
+        for key, (title, _cls) in CHARACTERS.items():
+            self.character.addItem(title, key)
+        self.character.setCurrentIndex(max(0, self.character.findData(s.character)))
         self.thinking = QCheckBox("Показувати хід думок моделі")
         self.thinking.setChecked(s.show_thinking)
         form.addRow("Сервер (WebSocket):", self.url)
         form.addRow("Токен:", self.token)
-        form.addRow("Розмір робота:", self.scale)
+        form.addRow("Персонаж:", self.character)
+        form.addRow("Розмір:", self.scale)
         form.addRow("", self.thinking)
         self.autostart = None
         if IS_WINDOWS:
@@ -74,7 +80,7 @@ class RobotWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("Bonsai Robot")
 
-        self.robot = RobotWidget(settings.scale, self)
+        self.robot = make_character(settings.character, settings.scale, self)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.robot)
@@ -87,29 +93,19 @@ class RobotWindow(QWidget):
         self.thinking_buf = ""
 
         # сигнали
-        self.robot.clicked.connect(self.on_robot_clicked)
-        self.robot.double_clicked.connect(self.repeat_last_task)
-        self.robot.petted.connect(self.on_petted)
-        self.robot.files_dropped.connect(self.upload_files)
-        self.robot.text_dropped.connect(self.on_text_dropped)
-        self.robot.drag_moved.connect(self.on_drag)
-        self.robot.drag_finished.connect(self.save_position)
-        self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
+        self._connect_character()
         self.panel.task_submitted.connect(self.send_task)
-        self.panel.save_requested.connect(self.save_chat)
         self.panel.chats_requested.connect(self.show_chats)
-        # збережені чати
-        self.chat_id: int | None = None  # поточна розмова вже збережена під цим id
+        # чати зберігає сервер автоматично; settings.session_id — id поточного чату
         self.chat_title = ""
-        self.dirty = False  # є незбережені зміни
-        self._after_save = None  # дія після успішного збереження (очистити / відкрити інший)
-        self._export_target: str | None = None
+        self._restoring = False  # після підключення підтягуємо поточний чат у панель
         self.panel.history_open.connect(self.open_chat)
         self.panel.history_export.connect(lambda cid: self.export_chat(cid))
         self.panel.history_delete.connect(self._delete_chat)
+        self.panel.history_rename.connect(self.rename_chat)
+        self.panel.new_chat_requested.connect(self.new_chat)
         self.panel.image_pasted.connect(lambda path: self.upload_files([path]))
         self.panel.cancel_requested.connect(self.cancel_task)
-        self.panel.reset_requested.connect(self.reset_chat)
         self.panel.confirm_answered.connect(self.answer_confirm)
         self.conn.event.connect(self.on_event)
         self.conn.connected.connect(self.on_connected)
@@ -175,9 +171,9 @@ class RobotWindow(QWidget):
     def _build_menu(self) -> None:
         self.menu = QMenu()
         self.menu.addAction("💬 Відкрити чат", self.show_panel)
-        self.menu.addAction("⟲ Нова розмова", self.reset_chat)
-        self.menu.addAction("💾 Зберегти чат…", self.save_chat)
-        self.menu.addAction("📂 Збережені чати…", self.show_chats)
+        self.menu.addAction("📝 Новий чат", self.new_chat)
+        self.menu.addAction("📂 Усі чати…", self.show_chats)
+        self.menu.addAction("✏ Перейменувати чат…", lambda: self.rename_chat(None, self.chat_title))
         self.menu.addAction("📤 Експорт розмови в Markdown…", lambda: self.export_chat(None))
         self.menu.addAction("■ Зупинити задачу", self.cancel_task)
         self.menu.addSeparator()
@@ -188,11 +184,40 @@ class RobotWindow(QWidget):
         self.menu.addSeparator()
         self.menu.addAction("✕ Вийти", QApplication.quit)
 
+    def _connect_character(self) -> None:
+        self.robot.clicked.connect(self.on_robot_clicked)
+        self.robot.double_clicked.connect(self.repeat_last_task)
+        self.robot.petted.connect(self.on_petted)
+        self.robot.files_dropped.connect(self.upload_files)
+        self.robot.text_dropped.connect(self.on_text_dropped)
+        self.robot.drag_moved.connect(self.on_drag)
+        self.robot.drag_finished.connect(self.save_position)
+        self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
+
+    def set_character(self, name: str) -> None:
+        """Перемкнути персонажа на льоту: стан і позиція зберігаються."""
+        if name not in CHARACTERS:
+            return
+        old = self.robot
+        self.robot = make_character(name, self.settings.scale, self)
+        self.robot.set_state(old.state)
+        self.layout().replaceWidget(old, self.robot)
+        old._timer.stop()
+        old.deleteLater()
+        self._connect_character()
+        self.robot.set_state("happy", 1.2, then=old.state if old.state != "happy" else "idle")
+        self.robot.show()
+        icon = app_icon(name)
+        QApplication.instance().setWindowIcon(icon)
+        self.setWindowIcon(icon)
+        if self.tray:
+            self.tray.setIcon(icon)
+
     def _build_tray(self) -> None:
         self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        self.tray = QSystemTrayIcon(app_icon(), self)
+        self.tray = QSystemTrayIcon(app_icon(self.settings.character), self)
         self.tray.setToolTip("Bonsai Robot")
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(
@@ -220,6 +245,10 @@ class RobotWindow(QWidget):
         s.show_thinking = dlg.thinking.isChecked()
         if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
             set_autostart(dlg.autostart.isChecked())
+        character = dlg.character.currentData()
+        if character != s.character:
+            s.character = character
+            self.set_character(character)
         if abs(dlg.scale.value() - s.scale) > 1e-3:
             s.scale = dlg.scale.value()
             self.robot.scale_factor = s.scale
@@ -249,7 +278,6 @@ class RobotWindow(QWidget):
             self.robot.set_state("sad", 2.5, then="offline")
             return
         self.panel.add_entry("user", text)
-        self.dirty = True
         if text != self.settings.last_task:
             self.settings.last_task = text
             self.settings.save()
@@ -381,72 +409,29 @@ class RobotWindow(QWidget):
         self.conn.send({"type": "cancel"})
         self.panel.drop_confirms()
 
-    def reset_chat(self) -> None:
-        self._with_unsaved_check(self._do_reset)
-
-    def _do_reset(self) -> None:
-        self.panel.clear()
-        self.chat_id, self.chat_title, self.dirty = None, "", False
-        self.conn.send({"type": "reset", "session_id": self.settings.session_id})
-
-    # ---------------- збережені чати (усе — всередині панелі) ----------------
-    def _suggested_title(self) -> str:
-        if self.chat_title:
-            return self.chat_title
-        first = next((text for role, text in self.panel.entries if role == "user"), "")
-        first = " ".join(first.split())
-        return first[:60] + ("…" if len(first) > 60 else "")
-
-    def _with_unsaved_check(self, then) -> None:
-        """Є незбережена розмова — спитати в панелі (зберегти / не зберігати / скасувати), потім виконати then."""
-        if not self.dirty or not self.panel.entries:
-            then()
-            return
-
-        def answer(key: str, _text: str) -> None:
-            if key == "save":
-                self._after_save = then
-                self._send_save(self._suggested_title())
-            elif key == "discard":
-                then()
-
-        self.show_panel()
-        self.panel.ask(
-            "Зберегти поточну розмову, перш ніж продовжити?",
-            [("cancel", "Скасувати", "secondary"), ("discard", "Не зберігати", "danger"), ("save", "Зберегти", "primary")],
-            answer,
-        )
-
-    def save_chat(self) -> None:
+    def new_chat(self) -> None:
+        """Новий чат; попередній уже збережено на сервері (його видно в «Усі чати»)."""
         self.touch()
         self.show_panel()
         if self.busy:
-            self.panel.set_activity("⏳ Зачекай, поки я закінчу задачу, — тоді збережу")
+            self.panel.set_activity("⏳ Спершу дочекайся завершення задачі або зупини її (■)")
             return
-        if not self.panel.entries:
-            self.panel.set_activity("Розмова порожня — нічого зберігати")
-            return
+        had_messages = bool(self.panel.entries)
+        self._switch_chat(new_session_id(), "")
+        self.panel.clear()
         if self.panel.history_shown:
             self.panel.show_chat()
-        suggested = self._suggested_title()
-        self.panel.ask(
-            "Назва чату:",
-            [("cancel", "Скасувати", "secondary"), ("save", "Зберегти", "primary")],
-            lambda key, text: key == "save" and self._send_save(text or suggested),
-            input_text=suggested,
-            default="save",
-        )
+        if had_messages:
+            self.panel.set_activity("📝 Новий чат. Попередній збережено — він у «Усі чати»")
 
-    def _send_save(self, title: str) -> None:
-        msg = {"type": "chat_save", "session_id": self.settings.session_id, "title": title}
-        if self.chat_id is not None:
-            msg["id"] = self.chat_id  # уже збережений чат — оновлюємо
-        if not self.conn.send(msg):
-            self.panel.add_entry("error", "Немає з'єднання з сервером — зберегти не вдалося.")
-            self._after_save = None
+    def _switch_chat(self, chat_id: str, title: str) -> None:
+        self.settings.session_id = chat_id
+        self.settings.save()
+        self.chat_title = title
 
+    # ---------------- чати (усе — всередині панелі) ----------------
     def show_chats(self) -> None:
-        """Сторінка «Збережені чати» в панелі; повторне натискання — назад до розмови."""
+        """Сторінка «Чати» в панелі; повторне натискання — назад до розмови."""
         self.touch()
         if self.panel.shown and self.panel.history_shown:
             self.panel.show_chat()
@@ -458,28 +443,38 @@ class RobotWindow(QWidget):
         self.conn.send({"type": "chat_list"})
         QTimer.singleShot(0, self.position_panel)
 
-    def open_chat(self, chat_id: int) -> None:
+    def open_chat(self, chat_id: str) -> None:
         if self.busy:
             self.panel.set_activity("⏳ Спершу дочекайся завершення задачі або зупини її (■)")
             return
-        self._with_unsaved_check(
-            lambda: self.conn.send({"type": "chat_open", "id": chat_id, "session_id": self.settings.session_id})
+        self.conn.send({"type": "chat_open", "id": chat_id})
+
+    def rename_chat(self, chat_id: str | None, current: str) -> None:
+        """Перейменувати чат (None — поточний)."""
+        self.touch()
+        self.show_panel()
+        target = chat_id or self.settings.session_id
+        if chat_id is None and not self.panel.entries:
+            self.panel.set_activity("У цьому чаті ще немає повідомлень")
+            return
+        self.panel.ask(
+            "Назва чату:",
+            [("cancel", "Скасувати", "secondary"), ("save", "Зберегти", "primary")],
+            lambda key, text: key == "save" and bool(text.strip()) and self.conn.send(
+                {"type": "chat_rename", "id": target, "title": text.strip()}),
+            input_text=current or "",
+            default="save",
         )
 
-    def export_chat(self, chat_id: int | None) -> None:
+    def export_chat(self, chat_id: str | None) -> None:
         self.touch()
-        msg = {"type": "chat_export", "session_id": self.settings.session_id}
-        if chat_id is not None:
-            msg["id"] = chat_id
-        elif self.chat_id is not None and not self.dirty:
-            msg["id"] = self.chat_id  # зберігаємо назву збереженого чату
-        self.conn.send(msg)
+        self.conn.send({"type": "chat_export", "id": chat_id or self.settings.session_id})
 
-    def _delete_chat(self, chat_id: int) -> None:
+    def _delete_chat(self, chat_id: str) -> None:
         self.conn.send({"type": "chat_delete", "id": chat_id})
-        if chat_id == self.chat_id:
-            self.chat_id, self.chat_title = None, ""
-            self.dirty = bool(self.panel.entries)
+        if chat_id == self.settings.session_id:  # видалили відкритий чат — починаємо новий
+            self._switch_chat(new_session_id(), "")
+            self.panel.clear()
 
     @staticmethod
     def export_dir():
@@ -526,30 +521,34 @@ class RobotWindow(QWidget):
 
     def _on_chat_event(self, ev: dict) -> None:
         t = ev["type"]
-        if t == "chat_saved":
-            self.chat_id, self.chat_title, self.dirty = ev["id"], ev["title"], False
-            self.panel.set_activity(f"💾 Збережено «{ev['title']}»")
-            self.robot.set_state("happy", 1.2)
-            then, self._after_save = self._after_save, None
-            if then:
-                then()
+        restoring, self._restoring = self._restoring, False
+        if t == "chat_renamed":
+            if ev["id"] == self.settings.session_id:
+                self.chat_title = ev["title"]
+            self.panel.set_activity(f"✏ Назва: «{ev['title']}»")
         elif t == "chat_list":
-            self.panel.set_history(ev["chats"])
+            self.panel.set_history(ev["chats"], self.settings.session_id)
+            current = next((c for c in ev["chats"] if c["id"] == self.settings.session_id), None)
+            if current:
+                self.chat_title = current["title"]
             if self.panel.history_shown:
                 QTimer.singleShot(0, self.position_panel)
         elif t == "chat_opened":
-            self.panel.show_chat()
+            self._switch_chat(ev["id"], ev["title"])
             self.panel.clear()
             for item in ev["transcript"]:
                 self.panel.add_entry(item["role"], item["text"])
-            self.chat_id, self.chat_title, self.dirty = ev["id"], ev["title"], False
+            if restoring:
+                return  # тихо відновили поточний чат після запуску
+            self.panel.show_chat()
             self.show_panel()
             self.panel.set_activity(f"📂 «{ev['title']}» — можна продовжувати розмову")
             QTimer.singleShot(100, self.position_panel)
         elif t == "chat_export":
             self._write_export(ev)
         elif t == "chat_error":
-            self._after_save = None
+            if restoring:
+                return  # поточний чат ще порожній — нічого відновлювати
             self.show_panel()
             self.panel.ask(f"⚠ {ev['message']}", [("ok", "Гаразд", "primary")], lambda *_: None)
 
@@ -599,7 +598,12 @@ class RobotWindow(QWidget):
             name = ev.get("name") or "Bonsai"
             model = str(ev.get("model", "")).split("/")[-1]
             eye = {True: " · 👁", False: " · без зору"}.get(ev.get("vision"), "")
-            self.panel.set_status(f"{name} · підключено · {model}{eye}", True)
+            user = f" · {ev['user']}" if ev.get("user") and ev.get("user") != "owner" else ""
+            self.panel.set_status(f"{name} · підключено · {model}{eye}{user}", True)
+            if not self.panel.entries and not self.busy:
+                # показати розмову, на якій зупинились (наприклад, після перезапуску ПК)
+                self._restoring = True
+                self.conn.send({"type": "chat_open", "id": self.settings.session_id})
             self.setWindowTitle(name)
             if self.tray:
                 self.tray.setToolTip(name)
@@ -791,6 +795,11 @@ def main() -> None:
             return
 
     settings = Settings.load()
+    if "--character" in sys.argv:  # лише на цей запуск, напр. --demo --character dog
+        args = sys.argv[sys.argv.index("--character") + 1 :]
+        if args and args[0] in CHARACTERS:
+            settings.character = args[0]
+    app.setWindowIcon(app_icon(settings.character))
     win = RobotWindow(settings, demo=demo)
     win.show()
     if demo:

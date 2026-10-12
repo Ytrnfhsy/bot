@@ -17,12 +17,18 @@ def config_path() -> Path:
     return base / "bonsai-robot" / "config.json"
 
 
+def new_session_id() -> str:
+    """id нового чату (сервер зберігає кожен чат автоматично)."""
+    return "robot-" + uuid.uuid4().hex[:12]
+
+
 @dataclass
 class Settings:
     server_url: str = "ws://127.0.0.1:8765/ws"
     token: str = ""
-    session_id: str = field(default_factory=lambda: "robot-" + uuid.uuid4().hex[:8])
+    session_id: str = field(default_factory=lambda: new_session_id())  # поточний чат
     scale: float = 1.0
+    character: str = "robot"  # robot | dog
     pos_x: int | None = None
     pos_y: int | None = None
     sleep_after_sec: int = 180

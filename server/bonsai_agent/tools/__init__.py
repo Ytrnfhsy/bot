@@ -17,20 +17,31 @@ class ToolError(Exception):
 
 @dataclass
 class ToolContext:
+    """Контекст однієї задачі: хто її дав, у якій теці працювати, які інструменти дозволено."""
+
     config: Config
     storage: Storage
+    owner: str = "owner"  # чия пам'ять і чати
+    workspace: Path | None = None  # None — BONSAI_WORKSPACE
+    allow_outside: bool | None = None  # None — BONSAI_ALLOW_OUTSIDE_WORKSPACE
+    denied_tools: frozenset[str] = frozenset()  # недоступні цьому користувачу
     vision_ok: bool = True  # чи може поточна модель бачити зображення
     pending_images: list[str] = field(default_factory=list)  # картинки, які view_image просить показати моделі
 
+    def __post_init__(self) -> None:
+        if self.workspace is None:
+            self.workspace = self.config.workspace
+        if self.allow_outside is None:
+            self.allow_outside = self.config.allow_outside_workspace
+
     def resolve_path(self, path: str) -> Path:
         """Шлях відносно робочої директорії; заборона виходу за її межі (якщо не дозволено)."""
-        ws = self.config.workspace.resolve()
+        ws = self.workspace.resolve()
         p = Path(path).expanduser()
         full = (p if p.is_absolute() else ws / p).resolve()
-        if not self.config.allow_outside_workspace and full != ws and ws not in full.parents:
+        if not self.allow_outside and full != ws and ws not in full.parents:
             raise ToolError(
-                f"Шлях {path!r} поза робочою директорією {ws}. "
-                "Використовуй відносні шляхи (або увімкни BONSAI_ALLOW_OUTSIDE_WORKSPACE)."
+                f"Шлях {path!r} поза робочою директорією {ws}. Використовуй відносні шляхи."
             )
         return full
 
@@ -77,22 +88,27 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self.tools.get(name)
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [t.schema() for t in self.tools.values()]
+    def schemas(self, denied: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+        return [t.schema() for t in self.tools.values() if t.name not in denied]
 
-    def text_catalog(self) -> str:
+    def text_catalog(self, denied: frozenset[str] = frozenset()) -> str:
         """Опис інструментів для JSON-режиму (коли нативні tool calls недоступні)."""
         import json
 
         lines = []
         for t in self.tools.values():
+            if t.name in denied:
+                continue
             lines.append(f"- {t.name}: {t.description}\n  parameters: {json.dumps(t.parameters, ensure_ascii=False)}")
         return "\n".join(lines)
 
     async def call(self, ctx: ToolContext, name: str, args: dict[str, Any]) -> str:
         tool = self.tools.get(name)
+        allowed = ", ".join(n for n in self.tools if n not in ctx.denied_tools)
         if tool is None:
-            raise ToolError(f"Невідомий інструмент {name!r}. Доступні: {', '.join(self.tools)}")
+            raise ToolError(f"Невідомий інструмент {name!r}. Доступні: {allowed}")
+        if name in ctx.denied_tools:
+            raise ToolError(f"Інструмент {name!r} недоступний цьому користувачу. Доступні: {allowed}")
         sig = inspect.signature(tool.func)
         accepted = {k: v for k, v in args.items() if k in sig.parameters}
         missing = [

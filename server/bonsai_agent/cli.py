@@ -21,41 +21,53 @@ DIM, BOLD, CYAN, YELLOW, GREEN, RED, RESET = (
 _current: asyncio.Task | None = None  # задача, яку скасовує Ctrl+C
 
 HELP = (
-    f"{DIM}Команди: /reset — нова розмова, /save [назва] — зберегти чат, /chats — збережені чати,\n"
-    f"/open N — відкрити чат №N, /delete N — видалити, /export [файл.md] — експорт у Markdown,\n"
-    f"/exit — вийти, Ctrl+C — скасувати поточну задачу{RESET}"
+    f"{DIM}Усі чати зберігаються автоматично. Команди: /new — новий чат, /chats — список чатів,\n"
+    f"/open N — відкрити чат №N зі списку, /rename назва — перейменувати поточний, /delete N — видалити,\n"
+    f"/export [файл.md] — експорт у Markdown, /exit — вийти, Ctrl+C — скасувати поточну задачу{RESET}"
 )
 
 
-def parse_chat_command(text: str, session: str) -> tuple[dict[str, Any], str | None] | None:
-    """/save, /chats, /open, /delete, /export → (повідомлення протоколу, шлях для експорту)."""
+def new_session_id() -> str:
+    return "cli-" + time.strftime("%Y%m%d-%H%M%S")
+
+
+def parse_chat_command(text: str, printer: "Printer") -> tuple[dict[str, Any], str | None] | None:
+    """/chats, /open, /rename, /delete, /export → (повідомлення протоколу, шлях для експорту).
+
+    N — номер зі списку /chats або сам id чату.
+    """
     cmd, _, arg = text.partition(" ")
     arg = arg.strip()
-    if cmd == "/save":
-        return {"type": "chat_save", "session_id": session, "title": arg or None}, None
+
+    def chat_id(ref: str) -> str:
+        if ref.isdigit() and 1 <= int(ref) <= len(printer.listed):
+            return printer.listed[int(ref) - 1]
+        return ref
+
     if cmd == "/chats":
         return {"type": "chat_list"}, None
-    if cmd in {"/open", "/delete"} and arg.isdigit():
-        kind = "chat_open" if cmd == "/open" else "chat_delete"
-        return {"type": kind, "id": int(arg), "session_id": session}, None
+    if cmd in {"/open", "/delete"} and arg:
+        return {"type": "chat_open" if cmd == "/open" else "chat_delete", "id": chat_id(arg)}, None
+    if cmd in {"/rename", "/save"} and arg:
+        return {"type": "chat_rename", "id": printer.session, "title": arg}, None
     if cmd == "/export":
-        return {"type": "chat_export", "session_id": session}, arg or None
+        return {"type": "chat_export", "id": printer.session}, arg or None
     return None
 
 
 def run_chat_command_locally(agent: Any, msg: dict[str, Any]) -> list[dict[str, Any]]:
     """Те саме, що робить сервер на chat_* повідомлення, але без мережі (для локального режиму)."""
-    kind, session, cid = msg["type"], msg.get("session_id", "cli"), msg.get("id")
+    kind, cid = msg["type"], str(msg.get("id") or "")
     try:
         events: list[dict[str, Any]] = []
-        if kind == "chat_save":
-            events.append({"type": "chat_saved", **agent.save_chat(session, msg.get("title"))})
+        if kind == "chat_rename":
+            events.append({"type": "chat_renamed", **agent.rename_chat(cid, msg.get("title"))})
         elif kind == "chat_open":
-            events.append({"type": "chat_opened", **agent.open_chat(cid, session)})
+            events.append({"type": "chat_opened", **agent.open_chat(cid)})
         elif kind == "chat_delete":
             agent.delete_chat(cid)
         elif kind == "chat_export":
-            events.append({"type": "chat_export", **agent.export_chat(session)})
+            events.append({"type": "chat_export", **agent.export_chat(cid)})
         if kind in {"chat_list", "chat_delete"}:
             events.append({"type": "chat_list", "chats": agent.list_chats()})
         return events
@@ -66,7 +78,9 @@ def run_chat_command_locally(agent: Any, msg: dict[str, Any]) -> list[dict[str, 
 class Printer:
     """Друкує події агента в термінал."""
 
-    def __init__(self, show_thinking: bool) -> None:
+    def __init__(self, show_thinking: bool, session: str) -> None:
+        self.session = session  # поточний чат
+        self.listed: list[str] = []  # id чатів з останнього /chats (для /open N)
         self.export_path: str | None = None  # куди записати наступний chat_export
         self.show_thinking = show_thinking
         self.streaming = False
@@ -111,21 +125,25 @@ class Printer:
             print(f"{RED}Помилка: {ev['message']}{RESET}")
         elif t == "hello":
             eye = {True: " · 👁 зір увімкнено", False: " · без зору"}.get(ev.get("vision"), "")
-            print(f"{DIM}Підключено. Модель: {ev.get('model')}{eye}{RESET}")
+            who = f" · користувач {ev['user']}" if ev.get("user") else ""
+            print(f"{DIM}Підключено. Модель: {ev.get('model')}{eye}{who}{RESET}")
         elif t == "vision":
             if ev.get("state") == "attached":
                 print(f"{DIM}👁 зображення: {', '.join(ev.get('images', []))}{RESET}")
             else:
                 print(f"{YELLOW}⚠ Модель зараз не бачить зображень: {ev.get('reason', '')}{RESET}")
-        elif t == "chat_saved":
-            print(f"{GREEN}💾 Збережено як #{ev['id']} «{ev['title']}»{RESET}")
+        elif t == "chat_renamed":
+            print(f"{GREEN}✏️ Назва: «{ev['title']}»{RESET}")
         elif t == "chat_list":
+            self.listed = [c["id"] for c in ev["chats"]]
             if not ev["chats"]:
-                print(f"{DIM}Збережених чатів немає{RESET}")
-            for c in ev["chats"]:
+                print(f"{DIM}Чатів ще немає{RESET}")
+            for n, c in enumerate(ev["chats"], 1):
                 when = time.strftime("%Y-%m-%d %H:%M", time.localtime(c["updated_at"]))
-                print(f"  {BOLD}#{c['id']}{RESET} {c['title']} {DIM}· {c['count']} повідомл. · {when}{RESET}")
+                mark = " ◀ поточний" if c["id"] == self.session else ""
+                print(f"  {BOLD}{n}.{RESET} {c['title']} {DIM}· {c['count']} повідомл. · {when}{mark}{RESET}")
         elif t == "chat_opened":
+            self.session = ev["id"]
             print(f"{GREEN}📂 Відкрито «{ev['title']}» — можна продовжувати розмову{RESET}")
             for item in ev["transcript"][-6:]:
                 who = {"user": "ти", "assistant": "🤖", "tool": "  "}[item["role"]]
@@ -154,7 +172,7 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
     from .agent import Agent
 
     agent = Agent(cfg)
-    printer = Printer(args.thinking)
+    printer = Printer(args.thinking, args.session or new_session_id())
 
     async def emit(ev: dict[str, Any]) -> None:
         printer(ev)
@@ -172,7 +190,7 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
 
     try:
         if once:
-            await agent.run(args.session, once, emit, confirm)
+            await agent.run(printer.session, once, emit, confirm)
             return
         print(f"{BOLD}Bonsai Agent{RESET} — модель {cfg.model}, workspace {cfg.workspace}\n{HELP}")
         while True:
@@ -184,17 +202,17 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
                 continue
             if text in {"/exit", "/quit"}:
                 break
-            if text == "/reset":
-                agent.reset_session(args.session)
-                print(f"{DIM}Розмову очищено{RESET}")
+            if text in {"/new", "/reset"}:
+                printer.session = new_session_id()
+                print(f"{DIM}Новий чат (попередній збережено){RESET}")
                 continue
-            if parsed := parse_chat_command(text, args.session):
+            if parsed := parse_chat_command(text, printer):
                 msg, printer.export_path = parsed
                 for ev in run_chat_command_locally(agent, msg):
                     printer(ev)
                 continue
             global _current
-            _current = asyncio.create_task(agent.run(args.session, text, emit, confirm))
+            _current = asyncio.create_task(agent.run(printer.session, text, emit, confirm))
             try:
                 await asyncio.wait({_current})
                 _current.result()
@@ -232,7 +250,7 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
         url = url.rstrip("/") + "/ws"
     if token:
         url += ("&" if "?" in url else "?") + f"token={token}"
-    printer = Printer(args.thinking)
+    printer = Printer(args.thinking, args.session or new_session_id())
     async with websockets.connect(url, max_size=None, ping_interval=20, open_timeout=15) as ws:
         done = asyncio.Event()
         # перше повідомлення — hello; при невірному токені сервер тут закриє з'єднання (4401)
@@ -260,7 +278,7 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
             async def run_one(text: str) -> None:
                 global _current
                 done.clear()
-                await ws.send(json.dumps({"type": "task", "text": text, "session_id": args.session}))
+                await ws.send(json.dumps({"type": "task", "text": text, "session_id": printer.session}))
                 _current = asyncio.create_task(done.wait())
                 await asyncio.wait({_current})
                 if _current.cancelled():
@@ -283,10 +301,11 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
                     continue
                 if text in {"/exit", "/quit"}:
                     break
-                if text == "/reset":
-                    await ws.send(json.dumps({"type": "reset", "session_id": args.session}))
+                if text in {"/new", "/reset"}:
+                    printer.session = new_session_id()
+                    print(f"{DIM}Новий чат (попередній збережено){RESET}")
                     continue
-                if parsed := parse_chat_command(text, args.session):
+                if parsed := parse_chat_command(text, printer):
                     msg, printer.export_path = parsed
                     await ws.send(json.dumps(msg, ensure_ascii=False))
                     await asyncio.sleep(0.3)  # відповідь надрукує reader
@@ -325,6 +344,39 @@ def _run_interruptible(coro_factory) -> None:
         loop.close()
 
 
+def _user_command(cfg: Config, args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    from .users import OWNER, UserStore
+
+    store = UserStore(cfg)
+    if args.user_cmd == "add":
+        try:
+            token = store.add(args.name, "admin" if args.admin else "user")
+        except ValueError as e:
+            raise SystemExit(f"{RED}{e}{RESET}") from None
+        name = args.name.strip().lower()
+        print(f"{GREEN}Користувач {name} готовий ({'admin' if args.admin else 'user'}).{RESET}")
+        print(f"Токен (показується лише зараз — збережи його):\n\n  {BOLD}{token}{RESET}\n")
+        print(f"{DIM}Вкажи його в налаштуваннях робота (поле «Токен») на будь-якому ПК користувача.{RESET}")
+        if not cfg.token:
+            print(f"{YELLOW}BONSAI_TOKEN не задано: тепер без токена сервер не пускає. "
+                  f"Власнику ({OWNER}) задай BONSAI_TOKEN або створи собі користувача з --admin.{RESET}")
+    elif args.user_cmd == "list":
+        if cfg.token:
+            print(f"  {BOLD}{OWNER}{RESET} · admin · токен із BONSAI_TOKEN")
+        for u in store.list():
+            when = time.strftime("%Y-%m-%d", time.localtime(u.get("created_at", 0)))
+            print(f"  {BOLD}{u['name']}{RESET} · {u.get('role', 'user')} · з {when}")
+        if not cfg.token and not store.list():
+            print(f"{DIM}Користувачів немає — сервер працює для одного власника без токена.{RESET}")
+    elif args.user_cmd == "revoke":
+        ok = store.revoke(args.name)
+        print(f"{GREEN}Користувача {args.name} видалено{RESET}" if ok else f"{YELLOW}Немає користувача {args.name}{RESET}")
+        if ok:
+            print(f"{DIM}Його чати й пам'ять лишаються в базі; тека — {cfg.users_workspace / args.name}{RESET}")
+    else:
+        parser.print_help()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="bonsai", description="Bonsai Agent — агент на базі Ollama")
     sub = parser.add_subparsers(dest="cmd")
@@ -339,13 +391,28 @@ def main(argv: list[str] | None = None) -> None:
             p.add_argument("text", nargs="+", help="текст задачі")
         p.add_argument("--server", help="ws://host:8765/ws — підключитися до віддаленого сервера")
         p.add_argument("--token", default=os.environ.get("BONSAI_TOKEN", ""))
-        p.add_argument("--session", default="cli")
+        p.add_argument("--session", help="id чату, щоб продовжити його (типово — новий чат)")
         p.add_argument("--thinking", action="store_true", help="показувати міркування моделі")
         p.add_argument("--yes", action="store_true", help="авто-підтвердження небезпечних дій (лише локально)")
 
     sub.add_parser("health", help="перевірити Ollama і модель")
 
+    p_user = sub.add_parser("user", help="користувачі: у кожного свої чати, пам'ять і тека")
+    user_sub = p_user.add_subparsers(dest="user_cmd")
+    p_add = user_sub.add_parser("add", help="створити користувача або видати йому новий токен")
+    p_add.add_argument("name")
+    p_add.add_argument("--admin", action="store_true", help="повний доступ (shell, Python, усі файли)")
+    user_sub.add_parser("list", help="список користувачів")
+    p_rev = user_sub.add_parser("revoke", help="видалити користувача (токен перестане працювати)")
+    p_rev.add_argument("name")
+
     args = parser.parse_args(argv)
+    if args.cmd == "user":
+        # ті самі налаштування, що й у сервісу bonsai-agent (DATA_DIR, BONSAI_TOKEN)
+        from .config import _load_dotenv
+        from pathlib import Path
+
+        _load_dotenv(Path.home() / ".config" / "bonsai-agent.env")
     cfg = Config.from_env()
 
     if args.cmd == "serve":
@@ -364,6 +431,8 @@ def main(argv: list[str] | None = None) -> None:
             _run_interruptible(lambda: _remote_chat(args.server, args.token, args, once))
         else:
             _run_interruptible(lambda: _local_chat(cfg, args, once))
+    elif args.cmd == "user":
+        _user_command(cfg, args, p_user)
     elif args.cmd == "health":
         from .llm import create_llm
 
