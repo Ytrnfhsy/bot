@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from . import Tool, ToolContext, ToolError, truncate
 
 USER_AGENT = (
-    "Mozilla/5.0 (X11; Fedora; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0 BonsaiAgent/0.1"
+    "Mozilla/5.0 (X11; Fedora; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0 KruAgent/0.1"
 )
 
 

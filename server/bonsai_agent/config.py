@@ -1,4 +1,4 @@
-"""Конфігурація агента: змінні середовища з префіксом BONSAI_ (та необов'язковий .env файл)."""
+"""Конфігурація агента: змінні середовища KRU_* (старі BONSAI_* теж працюють) та необов'язковий .env файл."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_MODEL = "hf.co/prism-ml/Ternary-Bonsai-27B-gguf"
+DEFAULT_MODEL = "qwen3.6-35b-a3b"  # --alias у deploy/qwen36/docker-compose.yml
 
 
 def _load_dotenv(path: Path) -> None:
@@ -22,8 +22,15 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _get(name: str) -> str | None:
+    """KRU_<name>; для сумісності зі старими налаштуваннями — BONSAI_<name>."""
+    value = os.environ.get(f"KRU_{name}")
+    return value if value is not None else os.environ.get(f"BONSAI_{name}")
+
+
 def _env(name: str, default: str) -> str:
-    return os.environ.get(f"BONSAI_{name}", default)
+    value = _get(name)
+    return default if value is None else value
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -31,23 +38,23 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_opt_bool(name: str) -> bool | None:
-    value = os.environ.get(f"BONSAI_{name}")
+    value = _get(name)
     if value is None or value.strip() == "" or value.lower() == "auto":
         return None
     return value.lower() in {"1", "true", "yes", "on"}
 
 
 def _env_opt_float(name: str) -> float | None:
-    value = os.environ.get(f"BONSAI_{name}", "").strip()
+    value = (_get(name) or "").strip()
     return None if value in {"", "auto"} else float(value)
 
 
 @dataclass
 class Config:
-    # LLM: "ollama" (типово) або "openai" — OpenAI-сумісний сервер
-    # (напр. llama-server з форку PrismML llama.cpp, якщо Ollama не вміє ternary-формат)
-    backend: str = "ollama"
-    llm_url: str = "http://127.0.0.1:8080"
+    # LLM: "openai" (типово) — OpenAI-сумісний сервер: llama-server з Qwen3.6 (deploy/qwen36);
+    # "ollama" — якщо модель запущено в Ollama
+    backend: str = "openai"
+    llm_url: str = "http://127.0.0.1:8085"
     api_key: str = ""
     ollama_url: str = "http://127.0.0.1:11434"
     model: str = DEFAULT_MODEL
@@ -59,12 +66,13 @@ class Config:
     # None — не передавати: діють налаштування сервера моделі (напр. --temp у llama-server)
     temperature: float | None = None
     keep_alive: str = "30m"
-    request_timeout: float = 600.0
+    request_timeout: float = 1200.0  # з міркуваннями відповідь може йти довго
 
     # Агент
-    max_steps: int = 25
-    max_history_chars: int = 48000
-    max_tool_output_chars: int = 12000
+    max_steps: int = 30
+    # контекст Qwen3.6 у compose — 65536 токенів: ~120k символів історії + промпт і результати інструментів
+    max_history_chars: int = 120000
+    max_tool_output_chars: int = 20000
     # Зір (розуміння зображень): auto — пробувати, і вимкнути, якщо модель не вміє; on; off
     vision: str = "auto"
     max_images_in_context: int = 3  # скільки останніх повідомлень із картинками передавати моделі
@@ -73,16 +81,17 @@ class Config:
     persona: str = ""  # характер/стиль, напр. "привітний, з легким гумором"
 
     # Інструменти
-    workspace: Path = field(default_factory=lambda: Path.home() / "bonsai-workspace")
+    workspace: Path = field(default_factory=lambda: Path.home() / "kru-workspace")
     allow_outside_workspace: bool = False  # лише для адміністраторів
     # робочі теки інших користувачів: <USERS_WORKSPACE>/<ім'я>/
-    users_workspace: Path = field(default_factory=lambda: Path.home() / "bonsai-users")
+    users_workspace: Path = field(default_factory=lambda: Path.home() / "kru-users")
     auto_approve: bool = False
     shell_timeout: int = 120
     python_timeout: int = 120
     searxng_url: str = ""
 
     # Дані / сервер
+    # стара назва теки лишається, щоб не загубити наявні чати й пам'ять
     data_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "bonsai-agent")
     host: str = "0.0.0.0"
     port: int = 8765
@@ -131,9 +140,9 @@ class Config:
         if not cfg.ollama_url.startswith(("http://", "https://")):
             cfg.ollama_url = "http://" + cfg.ollama_url
         if cfg.backend not in {"ollama", "openai"}:
-            raise ValueError(f"BONSAI_BACKEND має бути ollama|openai, отримано {cfg.backend!r}")
+            raise ValueError(f"KRU_BACKEND має бути ollama|openai, отримано {cfg.backend!r}")
         if cfg.tool_mode not in {"auto", "native", "json"}:
-            raise ValueError(f"BONSAI_TOOL_MODE має бути auto|native|json, отримано {cfg.tool_mode!r}")
+            raise ValueError(f"KRU_TOOL_MODE має бути auto|native|json, отримано {cfg.tool_mode!r}")
         return cfg
 
     def ensure_dirs(self) -> None:

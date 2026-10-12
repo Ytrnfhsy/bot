@@ -37,7 +37,7 @@ IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 class SettingsDialog(QDialog):
     def __init__(self, s: Settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Налаштування Bonsai Robot")
+        self.setWindowTitle("Налаштування Kru")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         form = QFormLayout()
         self.url = QLineEdit(s.server_url)
@@ -78,7 +78,7 @@ class RobotWindow(QWidget):
         )
         self.settings = settings
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowTitle("Bonsai Robot")
+        self.setWindowTitle("Kru")
 
         self.robot = make_character(settings.character, settings.scale, self)
         lay = QVBoxLayout(self)
@@ -217,7 +217,7 @@ class RobotWindow(QWidget):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self.tray = QSystemTrayIcon(app_icon(self.settings.character), self)
-        self.tray.setToolTip("Bonsai Robot")
+        self.tray.setToolTip("Kru")
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(
             lambda r: self.toggle_visible() if r == QSystemTrayIcon.ActivationReason.Trigger else None
@@ -378,7 +378,7 @@ class RobotWindow(QWidget):
 
     # ---------------- гаряча клавіша / команди ----------------
     def handle_command(self, cmd: str) -> None:
-        """Команди від `bonsai-robot --toggle | --show | --ask ТЕКСТ` (другий запуск)."""
+        """Команди від `kru-robot --toggle | --show | --ask ТЕКСТ` (другий запуск)."""
         name, _, arg = cmd.strip().partition(" ")
         if not self.isVisible():
             self.toggle_visible()
@@ -591,7 +591,7 @@ class RobotWindow(QWidget):
                 self.panel.add_entry(
                     "error",
                     f"Модель зараз не бачить зображень: {ev.get('reason', '')}. "
-                    "Перевір, що поруч із моделлю лежить mmproj-файл, і перезапусти її: deploy/switch-model.sh qwen",
+                    "Перевір, що поруч із моделлю лежить mmproj-файл, і перезапусти її: deploy/model.sh start",
                 )
             return
         if t.startswith("chat_"):
@@ -607,7 +607,7 @@ class RobotWindow(QWidget):
             self.robot.set_state("sad", 2.0)
             return
         if t == "hello":
-            name = ev.get("name") or "Bonsai"
+            name = ev.get("name") or "Kru"
             model = str(ev.get("model", "")).split("/")[-1]
             eye = {True: " · 👁", False: " · без зору"}.get(ev.get("vision"), "")
             user = f" · {ev['user']}" if ev.get("user") and ev.get("user") != "owner" else ""
@@ -616,7 +616,7 @@ class RobotWindow(QWidget):
                 self.panel.add_entry(
                     "error",
                     "Сервер агента старої версії: чати не відкриватимуться. Онови його: "
-                    "cd ~/bot && git pull && systemctl --user restart bonsai-agent",
+                    "cd ~/bot && ./update.sh",
                 )
             elif not self.panel.entries and not self.busy:
                 # показати розмову, на якій зупинились (наприклад, після перезапуску ПК)
@@ -692,7 +692,7 @@ def _ipc_name() -> str:
     import re as _re
 
     user = _re.sub(r"[^\w.-]", "_", getpass.getuser() or "user")  # os.getuid() немає на Windows
-    return f"bonsai-robot-{user}"
+    return f"bonsai-robot-{user}"  # історична назва: так нова версія знаходить і замінює стару
 
 
 def _command_from_argv(argv: list[str]) -> str | None:
@@ -741,7 +741,7 @@ def _send_to_running(cmd: str) -> bool:
     if sock.waitForReadyRead(800):
         reply = bytes(sock.readLine()).decode("utf-8", "replace").strip()
     if reply != f"ver {CODE_HASH}":
-        print("[bonsai-robot] запущено стару версію робота — замінюю її новою", flush=True)
+        print("[kru-robot] запущено стару версію робота — замінюю її новою", flush=True)
         sock.write(b"quit\n")
         sock.flush()
         sock.waitForBytesWritten(1000)
@@ -793,8 +793,8 @@ def main() -> None:
     if os.environ.get("WAYLAND_DISPLAY") and "QT_QPA_PLATFORM" not in os.environ:
         os.environ["QT_QPA_PLATFORM"] = "xcb"
     app = QApplication(sys.argv)
-    app.setApplicationName("Bonsai Robot")
-    app.setDesktopFileName("bonsai-robot")  # панель задач KDE/GNOME бере іконку з bonsai-robot.desktop
+    app.setApplicationName("Kru")
+    app.setDesktopFileName("kru-robot")  # панель задач KDE/GNOME бере іконку з kru-robot.desktop
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
     if "--selftest" in sys.argv:  # перевірка на чистій системі (CI): вікно, панель, клавіша, автозапуск
@@ -848,8 +848,8 @@ DEMO_STATES = [
 def _demo(win: RobotWindow, only: str | None = None) -> None:
     """Перегляд анімацій без сервера.
 
-    bonsai-robot --demo            — усі стани по колу, по 4 с кожен
-    bonsai-robot --demo thinking   — один стан, щоб роздивитися
+    kru-robot --demo            — усі стани по колу, по 4 с кожен
+    kru-robot --demo thinking   — один стан, щоб роздивитися
     """
     names = dict(DEMO_STATES)
     states = [(only, names.get(only, only))] if only else DEMO_STATES

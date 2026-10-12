@@ -18,7 +18,8 @@ MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
 VK_B = 0x42
 HOTKEY_ID = 0xB0B
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-RUN_VALUE = "BonsaiRobot"
+RUN_VALUE = "Kru"
+OLD_RUN_VALUES = ("BonsaiRobot",)  # назви зі старих версій — прибираємо, щоб не було двох автозапусків
 
 
 class WinHotkey(QAbstractNativeEventFilter):
@@ -82,8 +83,13 @@ def autostart_enabled() -> bool:
 
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            winreg.QueryValueEx(key, RUN_VALUE)
-            return True
+            for name in (RUN_VALUE, *OLD_RUN_VALUES):
+                try:
+                    winreg.QueryValueEx(key, name)
+                    return True
+                except OSError:
+                    continue
+            return False
     except OSError:
         return False
 
@@ -94,6 +100,11 @@ def set_autostart(enabled: bool) -> None:
     import winreg
 
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+        for old in OLD_RUN_VALUES:
+            try:
+                winreg.DeleteValue(key, old)
+            except OSError:
+                pass
         if enabled:
             winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, autostart_command())
         else:

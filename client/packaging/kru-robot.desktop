@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Bonsai Robot
-Comment=Робот-помічник на базі Bonsai Agent
+Name=Kru
+Comment=Персонаж-помічник: агент Kru поверх усіх вікон
 Exec=@EXEC@
-Icon=bonsai-robot
+Icon=kru-robot
 Terminal=false
 Categories=Utility;
 X-GNOME-Autostart-enabled=true

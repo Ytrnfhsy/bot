@@ -19,7 +19,7 @@ from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncat
 from .tools.memory import format_memories
 from .users import ADMIN_ONLY_TOOLS, OWNER, User, workspace_for
 
-log = logging.getLogger("bonsai.agent")
+log = logging.getLogger("kru.agent")
 
 EmitFunc = Callable[[dict[str, Any]], Awaitable[None]]
 ConfirmFunc = Callable[[str, str, dict[str, Any]], Awaitable[bool]]  # (tool, summary, args) -> approved
@@ -249,7 +249,7 @@ class Agent:
         return found
 
     async def refresh_vision(self, force: bool = False) -> bool:
-        """BONSAI_VISION=auto: питаємо сервер моделі, чи він бачить зображення (не частіше ніж раз на 30 с).
+        """KRU_VISION=auto: питаємо сервер моделі, чи він бачить зображення (не частіше ніж раз на 30 с).
 
         Так зір вмикається сам, щойно модель перезапустили з mmproj, — без перезапуску агента.
         """
@@ -333,7 +333,7 @@ class Agent:
                     await emit({"type": "vision", "state": "attached", "images": refs})
                 else:
                     await emit({"type": "vision", "state": "unavailable", "images": refs,
-                                "reason": self.vision_reason or "зір вимкнено (BONSAI_VISION=off)"})
+                                "reason": self.vision_reason or "зір вимкнено (KRU_VISION=off)"})
             history.append(user_msg)
 
             def persist() -> None:

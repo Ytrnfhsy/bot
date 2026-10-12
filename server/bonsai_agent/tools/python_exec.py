@@ -11,7 +11,7 @@ from .shell import run_process
 
 
 async def run_python(ctx: ToolContext, code: str, timeout: int = 0) -> str:
-    tmp_dir = ctx.workspace / ".bonsai_tmp"
+    tmp_dir = ctx.workspace / ".kru_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", suffix=".py", dir=tmp_dir, delete=False, encoding="utf-8") as f:
         f.write(code)

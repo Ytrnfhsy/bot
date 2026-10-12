@@ -8,15 +8,13 @@
 #     curl -L -C - -o ~/bot/mmproj-Qwen3.6-35B-A3B-F16.gguf \
 #       https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf
 #
-# Запуск/зупинка — простіше через ../switch-model.sh qwen | bonsai
-#
-# Порт той самий, що й у Bonsai (127.0.0.1:8085) — одночасно працює лише одна модель.
+# Запуск/зупинка — простіше через ../model.sh start | stop | status (127.0.0.1:8085).
 
 services:
   qwen36:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda   # офіційна збірка llama.cpp (CUDA 12, працює з драйвером 580)
     container_name: qwen36
-    restart: "no"
+    restart: unless-stopped   # після перезавантаження сервера модель піднімається сама
     ports:
       - "127.0.0.1:8085:8080"
     volumes:
@@ -61,7 +59,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    # Ваги «експертів» (~15–17 ГБ) живуть у RAM — ліміт має бути з запасом (не 11g, як для Bonsai)
+    # Ваги «експертів» (~15–17 ГБ) живуть у RAM — ліміт має бути з запасом
     mem_limit: ${MEM_LIMIT:-26g}
     read_only: true
     tmpfs: [/tmp]

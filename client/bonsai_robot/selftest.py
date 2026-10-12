@@ -1,6 +1,6 @@
 """Самоперевірка робота на чистій системі (запускається в CI на Windows і Linux).
 
-bonsai-robot --selftest report.json   → JSON-звіт + знімки екрана поруч, код виходу 0 — усе гаразд.
+kru-robot --selftest report.json   → JSON-звіт + знімки екрана поруч, код виходу 0 — усе гаразд.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
     log = lambda msg: print(f"[selftest] {msg}", flush=True)  # noqa: E731
     log(f"старт, Qt platform={app.platformName()}")
     # окремий тимчасовий профіль — не чіпаємо справжні налаштування
-    tmp = tempfile.mkdtemp(prefix="bonsai-selftest-")
+    tmp = tempfile.mkdtemp(prefix="kru-selftest-")
     os.environ["APPDATA"] = tmp
     os.environ["XDG_CONFIG_HOME"] = tmp
 

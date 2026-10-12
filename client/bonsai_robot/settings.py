@@ -1,4 +1,7 @@
-"""Налаштування клієнта: ~/.config/bonsai-robot/config.json (Windows: %APPDATA%\\bonsai-robot\\config.json)"""
+"""Налаштування клієнта: ~/.config/bonsai-robot/config.json (Windows: %APPDATA%\\bonsai-robot\\config.json).
+
+Назва теки історична — так налаштування (сервер, токен) лишаються після перейменування на Kru.
+"""
 
 from __future__ import annotations
 

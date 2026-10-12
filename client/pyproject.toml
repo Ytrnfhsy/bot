@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bonsai-robot"
 version = "0.1.0"
-description = "Десктоп-оболонка Bonsai Agent: анімований робот поверх усіх вікон"
+description = "Десктоп-оболонка агента Kru: анімований персонаж поверх усіх вікон"
 requires-python = ">=3.10"
 dependencies = ["PySide6>=6.6"]
 
 [project.gui-scripts]
-bonsai-robot = "bonsai_robot.app:main"
+kru-robot = "bonsai_robot.app:main"
+bonsai-robot = "bonsai_robot.app:main"  # стара назва — для вже встановлених ярликів і автозапуску
 
 [tool.setuptools.packages.find]
 include = ["bonsai_robot*"]

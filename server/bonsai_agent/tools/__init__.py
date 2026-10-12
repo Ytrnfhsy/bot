@@ -22,8 +22,8 @@ class ToolContext:
     config: Config
     storage: Storage
     owner: str = "owner"  # чия пам'ять і чати
-    workspace: Path | None = None  # None — BONSAI_WORKSPACE
-    allow_outside: bool | None = None  # None — BONSAI_ALLOW_OUTSIDE_WORKSPACE
+    workspace: Path | None = None  # None — KRU_WORKSPACE
+    allow_outside: bool | None = None  # None — KRU_ALLOW_OUTSIDE_WORKSPACE
     denied_tools: frozenset[str] = frozenset()  # недоступні цьому користувачу
     vision_ok: bool = True  # чи може поточна модель бачити зображення
     pending_images: list[str] = field(default_factory=list)  # картинки, які view_image просить показати моделі

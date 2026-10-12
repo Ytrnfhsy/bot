@@ -1,11 +1,11 @@
 [Unit]
-Description=Bonsai Agent server (Ollama + tools)
+Description=Kru agent server (Qwen3.6 + tools)
 After=network-online.target
 
 [Service]
 Type=simple
 EnvironmentFile=@ENV_FILE@
-ExecStart=@VENV@/bin/bonsai serve
+ExecStart=@VENV@/bin/kru serve
 Restart=on-failure
 RestartSec=5
 

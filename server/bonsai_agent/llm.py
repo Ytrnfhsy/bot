@@ -172,7 +172,7 @@ class OllamaClient:
 
 
 class OpenAICompatClient:
-    """Клієнт OpenAI-сумісного API (llama-server з форку PrismML llama.cpp, vLLM, LM Studio…).
+    """Клієнт OpenAI-сумісного API (llama-server з llama.cpp, vLLM, LM Studio…).
 
     Історія агента зберігається у форматі Ollama; тут вона конвертується у формат OpenAI.
     """

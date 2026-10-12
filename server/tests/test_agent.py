@@ -106,15 +106,15 @@ async def test_python_tool_runs_after_approval(cfg):
 async def test_file_tools(cfg):
     llm = FakeLLM([
         call("write_file", path="notes/a.txt", content="привіт\nсвіт\n"),
-        call("edit_file", path="notes/a.txt", old_text="світ", new_text="Bonsai"),
+        call("edit_file", path="notes/a.txt", old_text="світ", new_text="Kru"),
         call("read_file", path="notes/a.txt"),
         text("готово"),
     ])
     agent = Agent(cfg, llm=llm)
     rec = Recorder()
     await agent.run("s", "файл", rec.emit, rec.confirm)
-    assert (cfg.workspace / "notes/a.txt").read_text() == "привіт\nBonsai\n"
-    assert "Bonsai" in llm.calls[3]["messages"][-1]["content"]
+    assert (cfg.workspace / "notes/a.txt").read_text() == "привіт\nKru\n"
+    assert "Kru" in llm.calls[3]["messages"][-1]["content"]
 
 
 async def test_fallback_to_json_mode(cfg):
@@ -191,7 +191,7 @@ async def test_openai_compat_stream():
     chunks = [
         {"choices": [{"delta": {"reasoning_content": "думаю"}}]},
         {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "web_", "arguments": '{"que'}}]}}]},
-        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "search", "arguments": 'ry": "bonsai"}'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "search", "arguments": 'ry": "kru"}'}}]}}]},
     ]
     seen = {}
 
@@ -200,7 +200,7 @@ async def test_openai_compat_stream():
         sse = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
         return httpx.Response(200, text=sse)
 
-    c = OpenAICompatClient("http://x:8080", "bonsai")
+    c = OpenAICompatClient("http://x:8080", "qwen")
     c._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     history = [
         {"role": "user", "content": "q"},
@@ -208,25 +208,33 @@ async def test_openai_compat_stream():
         {"role": "tool", "tool_name": "recall", "content": "нічого"},
     ]
     r = await c.chat(history, tools=[{"type": "function"}])
-    assert r.tool_calls == [{"function": {"name": "web_search", "arguments": {"query": "bonsai"}}}]
+    assert r.tool_calls == [{"function": {"name": "web_search", "arguments": {"query": "kru"}}}]
     assert r.thinking == "думаю"
     msgs = seen["body"]["messages"]
     assert msgs[1]["tool_calls"][0]["id"] == msgs[2]["tool_call_id"]
     assert json.loads(msgs[1]["tool_calls"][0]["function"]["arguments"]) == {"query": "a"}
-    # без явного BONSAI_TEMPERATURE діють --temp/--top-p/--top-k самого llama-server
+    # без явного KRU_TEMPERATURE діють --temp/--top-p/--top-k самого llama-server
     assert "temperature" not in seen["body"]
 
 
-def test_llama_server_preset(monkeypatch):
+def test_env_example_is_qwen_and_old_prefix_works(monkeypatch):
+    import os
     from pathlib import Path
 
     from bonsai_agent.config import Config
 
-    for k in list(__import__("os").environ):
-        if k.startswith("BONSAI_"):
+    for k in list(os.environ):
+        if k.startswith(("BONSAI_", "KRU_")):
             monkeypatch.delenv(k)
-    cfg = Config.from_env(Path(__file__).parent.parent / ".env.llama-server")
-    assert (cfg.backend, cfg.llm_url, cfg.model, cfg.temperature) == ("openai", "http://127.0.0.1:8085", "bonsai-2-27b", None)
+    cfg = Config.from_env(Path(__file__).parent.parent / ".env.example")
+    assert (cfg.backend, cfg.llm_url, cfg.model, cfg.temperature) == ("openai", "http://127.0.0.1:8085", "qwen3.6-35b-a3b", None)
+    assert cfg.max_history_chars == 120000
+    # старі налаштування BONSAI_* (вже встановлені сервери) працюють, а KRU_* має перевагу
+    monkeypatch.delenv("KRU_PORT")  # .env.example вище вже заповнив оточення
+    monkeypatch.setenv("BONSAI_PORT", "9000")
+    assert Config.from_env(Path("/nonexistent")).port == 9000
+    monkeypatch.setenv("KRU_PORT", "9100")
+    assert Config.from_env(Path("/nonexistent")).port == 9100
 
 
 # ---------------- веб-пошук ----------------

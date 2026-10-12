@@ -1,11 +1,11 @@
 ﻿<#
-  Встановлення робота Kru (Bonsai Robot) на Windows 10/11.
+  Встановлення персонажа Kru на Windows 10/11.
 
   Найпростіше: двічі клацни install_windows.cmd.
   Або з PowerShell (можна одразу вказати сервер і токен):
     powershell -ExecutionPolicy Bypass -File install_windows.ps1 -Server ws://100.x.y.z:8765/ws -Token ТОКЕН
 
-  Що робить: за потреби ставить Python (winget), створює окреме середовище в %LOCALAPPDATA%\BonsaiRobot,
+  Що робить: за потреби ставить Python (winget), створює окреме середовище в %LOCALAPPDATA%\BonsaiRobot (назва теки історична),
   ставить робота, малює іконку, додає ярлики в меню «Пуск» і на робочий стіл, вмикає автозапуск і запускає робота.
 #>
 param(
@@ -85,9 +85,12 @@ function New-RobotShortcut([string]$path) {
     $lnk.Description = "Kru — робот-помічник"
     $lnk.Save()
 }
-New-RobotShortcut (Join-Path ([Environment]::GetFolderPath("Programs")) "Bonsai Robot.lnk")
+foreach ($dir in @([Environment]::GetFolderPath("Programs"), [Environment]::GetFolderPath("Desktop"))) {
+    Remove-Item (Join-Path $dir "Bonsai Robot.lnk") -ErrorAction SilentlyContinue  # стара назва
+}
+New-RobotShortcut (Join-Path ([Environment]::GetFolderPath("Programs")) "Kru.lnk")
 if (-not $NoDesktopShortcut) {
-    New-RobotShortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "Bonsai Robot.lnk")
+    New-RobotShortcut (Join-Path ([Environment]::GetFolderPath("Desktop")) "Kru.lnk")
 }
 
 if ($Server) {

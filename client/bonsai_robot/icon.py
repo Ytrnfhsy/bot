@@ -73,10 +73,10 @@ def app_icon(character: str = "robot") -> QIcon:
 
 def install(icons_root: Path) -> None:
     for size in SIZES:
-        target = icons_root / "hicolor" / f"{size}x{size}" / "apps" / "bonsai-robot.png"
+        target = icons_root / "hicolor" / f"{size}x{size}" / "apps" / "kru-robot.png"
         target.parent.mkdir(parents=True, exist_ok=True)
         render_icon(size).save(str(target), "PNG")
-    print(f"Іконки встановлено в {icons_root}/hicolor/*/apps/bonsai-robot.png")
+    print(f"Іконки встановлено в {icons_root}/hicolor/*/apps/kru-robot.png")
 
 
 def write_ico(path: Path, sizes: tuple[int, ...] = (16, 20, 24, 32, 40, 48, 64, 128, 256)) -> None:
