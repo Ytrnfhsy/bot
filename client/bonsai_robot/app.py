@@ -264,6 +264,7 @@ class RobotWindow(QWidget):
 
     def on_robot_clicked(self) -> None:
         self.touch()
+        self.conn.reconnect_now()
         if self.robot.state == "sleeping":
             self.robot.set_state("happy", 1.2)
         if self.panel.shown:
@@ -274,8 +275,12 @@ class RobotWindow(QWidget):
     def send_task(self, text: str) -> None:
         self.touch()
         if not self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id}):
-            self.panel.add_entry("error", "Немає з'єднання з сервером — перевір налаштування (ПКМ по роботу → Налаштування).")
-            self.robot.set_state("sad", 2.5, then="offline")
+            # немає з'єднання: пробуємо підключитися зараз і надішлемо задачу, щойно вийде
+            self._pending_task = text
+            self.conn.reconnect_now()
+            self.panel.add_entry("user", text)
+            self.panel.set_activity("⏳ Підключаюся до сервера… надішлю, щойно з'єднаюсь")
+            QTimer.singleShot(15000, self._pending_timeout)
             return
         self.panel.add_entry("user", text)
         if text != self.settings.last_task:
@@ -284,6 +289,13 @@ class RobotWindow(QWidget):
         self.busy = True
         self.panel.set_busy(True)
         self.robot.set_state("thinking")
+
+    def _pending_timeout(self) -> None:
+        if getattr(self, "_pending_task", None):
+            self._pending_task = None
+            self.panel.add_entry("error", "Не вдалося підключитися до сервера — перевір налаштування "
+                                          "(ПКМ по роботу → Налаштування) і чи запущено NetBird.")
+            self.robot.set_state("sad", 2.5, then="offline")
 
     def repeat_last_task(self) -> None:
         """Подвійний клік: повторити останню задачу."""
@@ -560,6 +572,14 @@ class RobotWindow(QWidget):
     # ---------------- події сервера ----------------
     def on_connected(self) -> None:
         self.robot.set_state("happy", 1.5)
+        text, self._pending_task = getattr(self, "_pending_task", None), None
+        if text and self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id}):
+            if text != self.settings.last_task:
+                self.settings.last_task = text
+                self.settings.save()
+            self.busy = True
+            self.panel.set_busy(True)
+            self.robot.set_state("thinking")
 
     def on_disconnected(self, reason: str, raw: str = "") -> None:
         self.panel.set_status(f"немає з'єднання: {reason}", False, details=f"{self.conn.url}\n{raw}")
