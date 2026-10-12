@@ -600,7 +600,13 @@ class RobotWindow(QWidget):
             eye = {True: " · 👁", False: " · без зору"}.get(ev.get("vision"), "")
             user = f" · {ev['user']}" if ev.get("user") and ev.get("user") != "owner" else ""
             self.panel.set_status(f"{name} · підключено · {model}{eye}{user}", True)
-            if not self.panel.entries and not self.busy:
+            if "user" not in ev:  # сервер ще старої версії — чати працюватимуть неправильно
+                self.panel.add_entry(
+                    "error",
+                    "Сервер агента старої версії: чати не відкриватимуться. Онови його: "
+                    "cd ~/bot && git pull && systemctl --user restart bonsai-agent",
+                )
+            elif not self.panel.entries and not self.busy:
                 # показати розмову, на якій зупинились (наприклад, після перезапуску ПК)
                 self._restoring = True
                 self.conn.send({"type": "chat_open", "id": self.settings.session_id})
