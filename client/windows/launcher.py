@@ -1,4 +1,4 @@
-"""Точка входу для PyInstaller (BonsaiRobot.exe)."""
+"""Точка входу для PyInstaller (Kru.exe)."""
 
 from bonsai_robot.app import main
 

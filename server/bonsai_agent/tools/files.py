@@ -36,7 +36,7 @@ def _office_to_text(p) -> str:
     return "\n".join(paragraphs)
 
 
-_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".bonsai_tmp"}
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".kru_tmp", ".bonsai_tmp"}
 
 
 async def read_file(ctx: ToolContext, path: str, start_line: int = 1, max_lines: int = 400) -> str:

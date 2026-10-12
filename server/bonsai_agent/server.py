@@ -50,7 +50,7 @@ from .agent import Agent
 from .config import Config
 from .users import User, UserStore, workspace_for
 
-log = logging.getLogger("bonsai.server")
+log = logging.getLogger("kru.server")
 
 MAX_UPLOAD = 25 * 1024 * 1024  # файли, перетягнуті на робота
 
@@ -72,15 +72,15 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
             log.warning("LLM-сервер недоступний: %s", health.get("error"))
         elif not health.get("model_present"):
             if cfg.backend == "openai":
-                log.warning("LLM-сервер віддає %s, а BONSAI_MODEL=%s (перевір --alias)", health.get("served"), cfg.model)
+                log.warning("LLM-сервер віддає %s, а KRU_MODEL=%s (перевір --alias)", health.get("served"), cfg.model)
             else:
                 log.warning("Модель %s не знайдена в Ollama. Виконай: ollama pull %s", cfg.model, cfg.model)
         if not cfg.token and not users.list():
-            log.warning("BONSAI_TOKEN не задано і користувачів немає — сервер доступний без авторизації!")
+            log.warning("KRU_TOKEN не задано і користувачів немає — сервер доступний без авторизації!")
         yield
         await app.state.agent.close()
 
-    app = FastAPI(title="Bonsai Agent", version=__version__, lifespan=lifespan)
+    app = FastAPI(title="Kru", version=__version__, lifespan=lifespan)
 
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
@@ -89,7 +89,7 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
 
     @app.post("/api/task")
     async def api_task(req: TaskRequest, request: Request) -> dict[str, Any]:
-        """Неінтерактивний запуск: небезпечні дії відхиляються (якщо не BONSAI_AUTO_APPROVE)."""
+        """Неінтерактивний запуск: небезпечні дії відхиляються (якщо не KRU_AUTO_APPROVE)."""
         auth = request.headers.get("authorization", "")
         user = users.authenticate(auth.removeprefix("Bearer ").strip() or None)
         if user is None:
@@ -109,7 +109,7 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
-        token = ws.query_params.get("token") or ws.headers.get("x-bonsai-token")
+        token = ws.query_params.get("token") or ws.headers.get("x-kru-token") or ws.headers.get("x-bonsai-token")
         await ws.accept()
         user = users.authenticate(token)
         if user is None:

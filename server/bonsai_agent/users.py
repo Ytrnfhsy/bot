@@ -1,7 +1,7 @@
 """Користувачі агента: кожен токен — окремий користувач зі своєю пам'яттю, чатами та робочою текою.
 
 Файл <DATA_DIR>/users.json зберігає лише SHA-256 токенів, не самі токени.
-BONSAI_TOKEN (якщо задано) — це адміністратор «owner»; так старі налаштування працюють як раніше.
+KRU_TOKEN (якщо задано) — це адміністратор «owner»; так старі налаштування працюють як раніше.
 Ролі: admin — усі інструменти; user — без run_shell/run_python і лише у своїй теці.
 """
 
@@ -64,7 +64,7 @@ class UserStore:
 
     # ---------- автентифікація ----------
     def authenticate(self, token: str | None) -> User | None:
-        """Токен → користувач. Файл читається щоразу, тож `bonsai user add` діє без перезапуску."""
+        """Токен → користувач. Файл читається щоразу, тож `kru user add` діє без перезапуску."""
         users = self._load()
         if not self.config.token and not users:
             return User(OWNER, "admin")  # авторизацію не налаштовано — як раніше, один власник
@@ -90,7 +90,7 @@ class UserStore:
         if role not in ROLES:
             raise ValueError(f"Роль має бути: {', '.join(ROLES)}")
         if name == OWNER and self.config.token:
-            raise ValueError("«owner» — це власник із BONSAI_TOKEN; обери інше ім'я")
+            raise ValueError("«owner» — це власник із KRU_TOKEN; обери інше ім'я")
         token = secrets.token_urlsafe(24)
         users = [u for u in self._load() if u.get("name") != name]
         users.append({"name": name, "role": role, "token_sha256": _hash(token), "created_at": time.time()})
@@ -107,7 +107,7 @@ class UserStore:
 
 
 def workspace_for(config: Config, user: User) -> Path:
-    """Власник працює в BONSAI_WORKSPACE (як і раніше), інші — кожен у своїй теці."""
+    """Власник працює в KRU_WORKSPACE (як і раніше), інші — кожен у своїй теці."""
     if user.name == OWNER:
         return config.workspace
     return config.users_workspace / user.name

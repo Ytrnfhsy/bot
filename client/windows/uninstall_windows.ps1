@@ -1,5 +1,5 @@
 ﻿<#
-  Видалення робота Kru (Bonsai Robot) з Windows. Налаштування в %APPDATA%\bonsai-robot залишаються.
+  Видалення персонажа Kru з Windows. Налаштування в %APPDATA%\bonsai-robot залишаються.
 #>
 $ErrorActionPreference = "Continue"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
@@ -11,10 +11,12 @@ if (Test-Path $PyW) {
     Start-Process -FilePath $PyW -ArgumentList "-m", "bonsai_robot", "--quit" -Wait
     & $Py -c "from bonsai_robot.winplatform import set_autostart; set_autostart(False)"
 }
-Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "BonsaiRobot" -ErrorAction SilentlyContinue
+foreach ($name in @("Kru", "BonsaiRobot")) {
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $name -ErrorAction SilentlyContinue
+}
 foreach ($dir in @([Environment]::GetFolderPath("Programs"), [Environment]::GetFolderPath("Desktop"))) {
-    Remove-Item (Join-Path $dir "Bonsai Robot.lnk") -ErrorAction SilentlyContinue
+    foreach ($lnk in @("Kru.lnk", "Bonsai Robot.lnk")) { Remove-Item (Join-Path $dir $lnk) -ErrorAction SilentlyContinue }
 }
 Start-Sleep -Seconds 1
 Remove-Item $Prefix -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host "Bonsai Robot видалено."
+Write-Host "Kru видалено."

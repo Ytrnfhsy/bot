@@ -59,7 +59,7 @@ jobs:
         run: |
           $prefix = "$env:LOCALAPPDATA\BonsaiRobot"
           foreach ($f in @("$prefix\venv\Scripts\pythonw.exe", "$prefix\robot.ico",
-                           "$([Environment]::GetFolderPath('Programs'))\Bonsai Robot.lnk",
+                           "$([Environment]::GetFolderPath('Programs'))\Kru.lnk",
                            "$env:APPDATA\bonsai-robot\config.json")) {
             if (-not (Test-Path $f)) { throw "Немає: $f" } else { Write-Host "OK: $f" }
           }
@@ -78,7 +78,7 @@ jobs:
 
   robot-windows-exe:
     timeout-minutes: 25
-    name: Робот — BonsaiRobot.exe
+    name: Робот — Kru.exe
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,22 +92,22 @@ jobs:
         run: python -m bonsai_robot.icon --ico build/robot.ico
       - name: PyInstaller
         run: >
-          pyinstaller --noconfirm --windowed --name BonsaiRobot --icon build/robot.ico
+          pyinstaller --noconfirm --windowed --name Kru --icon build/robot.ico
           --collect-submodules bonsai_robot client/windows/launcher.py
       - name: Самоперевірка exe
         timeout-minutes: 3
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath "dist\BonsaiRobot\BonsaiRobot.exe" -ArgumentList "--selftest", "$PWD\selftest-exe\report.json" -Wait -PassThru
+          $p = Start-Process -FilePath "dist\Kru\Kru.exe" -ArgumentList "--selftest", "$PWD\selftest-exe\report.json" -Wait -PassThru
           if (Test-Path selftest-exe\report.json) { Get-Content selftest-exe\report.json -Encoding utf8 }
           exit $p.ExitCode
       - name: Архів
         shell: pwsh
-        run: Compress-Archive -Path dist\BonsaiRobot -DestinationPath BonsaiRobot-windows.zip
+        run: Compress-Archive -Path dist\Kru -DestinationPath Kru-windows.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: BonsaiRobot-windows
-          path: BonsaiRobot-windows.zip
+          name: Kru-windows
+          path: Kru-windows.zip
       - uses: actions/upload-artifact@v4
         if: always()
         with:

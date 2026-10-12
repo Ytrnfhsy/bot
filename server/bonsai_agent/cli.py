@@ -1,4 +1,4 @@
-"""Командний рядок: bonsai serve | chat | ask | health."""
+"""Командний рядок: kru serve | chat | ask | health."""
 
 from __future__ import annotations
 
@@ -192,7 +192,7 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
         if once:
             await agent.run(printer.session, once, emit, confirm)
             return
-        print(f"{BOLD}Bonsai Agent{RESET} — модель {cfg.model}, workspace {cfg.workspace}\n{HELP}")
+        print(f"{BOLD}Kru{RESET} — модель {cfg.model}, workspace {cfg.workspace}\n{HELP}")
         while True:
             try:
                 text = (await asyncio.to_thread(input, f"{BOLD}ти › {RESET}")).strip()
@@ -232,7 +232,7 @@ async def _remote_chat(url: str, token: str, args: argparse.Namespace, once: str
         await _remote_session(url, token, args, once)
     except websockets.ConnectionClosed as e:
         code = e.rcvd.code if e.rcvd else None
-        reason = "невірний токен (перевір --token / BONSAI_TOKEN)" if code == 4401 else f"з'єднання закрито ({e})"
+        reason = "невірний токен (перевір --token / KRU_TOKEN)" if code == 4401 else f"з'єднання закрито ({e})"
         print(f"{RED}Сервер відхилив підключення: {reason}{RESET}")
     except websockets.InvalidStatus as e:
         hint = " — адреса має закінчуватися на /ws" if e.response.status_code in (403, 404) else ""
@@ -291,7 +291,7 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
             if once:
                 await run_one(once)
                 return
-            print(f"{BOLD}Bonsai Agent{RESET} (віддалено: {url.split('?')[0]})\n{HELP}")
+            print(f"{BOLD}Kru{RESET} (віддалено: {url.split('?')[0]})\n{HELP}")
             while True:
                 try:
                     text = (await asyncio.to_thread(input, f"{BOLD}ти › {RESET}")).strip()
@@ -358,11 +358,11 @@ def _user_command(cfg: Config, args: argparse.Namespace, parser: argparse.Argume
         print(f"Токен (показується лише зараз — збережи його):\n\n  {BOLD}{token}{RESET}\n")
         print(f"{DIM}Вкажи його в налаштуваннях робота (поле «Токен») на будь-якому ПК користувача.{RESET}")
         if not cfg.token:
-            print(f"{YELLOW}BONSAI_TOKEN не задано: тепер без токена сервер не пускає. "
-                  f"Власнику ({OWNER}) задай BONSAI_TOKEN або створи собі користувача з --admin.{RESET}")
+            print(f"{YELLOW}KRU_TOKEN не задано: тепер без токена сервер не пускає. "
+                  f"Власнику ({OWNER}) задай KRU_TOKEN або створи собі користувача з --admin.{RESET}")
     elif args.user_cmd == "list":
         if cfg.token:
-            print(f"  {BOLD}{OWNER}{RESET} · admin · токен із BONSAI_TOKEN")
+            print(f"  {BOLD}{OWNER}{RESET} · admin · токен із KRU_TOKEN")
         for u in store.list():
             when = time.strftime("%Y-%m-%d", time.localtime(u.get("created_at", 0)))
             print(f"  {BOLD}{u['name']}{RESET} · {u.get('role', 'user')} · з {when}")
@@ -378,7 +378,7 @@ def _user_command(cfg: Config, args: argparse.Namespace, parser: argparse.Argume
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="bonsai", description="Bonsai Agent — агент на базі Ollama")
+    parser = argparse.ArgumentParser(prog="kru", description="Kru — агент на Qwen3.6 з інструментами")
     sub = parser.add_subparsers(dest="cmd")
 
     p_serve = sub.add_parser("serve", help="запустити сервер (WebSocket/HTTP)")
@@ -390,12 +390,12 @@ def main(argv: list[str] | None = None) -> None:
         if name == "ask":
             p.add_argument("text", nargs="+", help="текст задачі")
         p.add_argument("--server", help="ws://host:8765/ws — підключитися до віддаленого сервера")
-        p.add_argument("--token", default=os.environ.get("BONSAI_TOKEN", ""))
+        p.add_argument("--token", default=os.environ.get("KRU_TOKEN", os.environ.get("BONSAI_TOKEN", "")))
         p.add_argument("--session", help="id чату, щоб продовжити його (типово — новий чат)")
         p.add_argument("--thinking", action="store_true", help="показувати міркування моделі")
         p.add_argument("--yes", action="store_true", help="авто-підтвердження небезпечних дій (лише локально)")
 
-    sub.add_parser("health", help="перевірити Ollama і модель")
+    sub.add_parser("health", help="перевірити, чи доступна модель")
 
     p_user = sub.add_parser("user", help="користувачі: у кожного свої чати, пам'ять і тека")
     user_sub = p_user.add_subparsers(dest="user_cmd")
@@ -408,7 +408,7 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     if args.cmd == "user":
-        # ті самі налаштування, що й у сервісу bonsai-agent (DATA_DIR, BONSAI_TOKEN)
+        # ті самі налаштування, що й у сервісу (DATA_DIR, KRU_TOKEN)
         from .config import _load_dotenv
         from pathlib import Path
 
