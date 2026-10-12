@@ -560,7 +560,10 @@ class ChatPanel(QWidget):
 
     def _history_id(self) -> str | None:
         item = self.history_list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item else None
+        if item is None:
+            return None
+        cid = item.data(Qt.ItemDataRole.UserRole)
+        return None if cid is None else str(cid)  # сигнали несуть str — число загубилося б
 
     def _history_buttons(self) -> None:
         has = self._history_id() is not None
