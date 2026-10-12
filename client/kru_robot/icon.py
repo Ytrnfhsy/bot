@@ -1,8 +1,8 @@
 """Іконка програми — той самий милий робот, намальований тим самим кодом, що й на екрані.
 
-python -m bonsai_robot.icon ~/.local/share/icons   — згенерувати PNG у hicolor (робить інсталятор)
-python -m bonsai_robot.icon --preview icons.png    — аркуш з усіма розмірами (для перевірки)
-python -m bonsai_robot.icon --ico robot.ico        — іконка Windows (усі розміри в одному .ico)
+python -m kru_robot.icon ~/.local/share/icons   — згенерувати PNG у hicolor (робить інсталятор)
+python -m kru_robot.icon --preview icons.png    — аркуш з усіма розмірами (для перевірки)
+python -m kru_robot.icon --ico robot.ico        — іконка Windows (усі розміри в одному .ico)
 """
 
 from __future__ import annotations

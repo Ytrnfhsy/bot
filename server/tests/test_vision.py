@@ -7,9 +7,9 @@ import json
 import httpx
 from PIL import Image
 
-from bonsai_agent.agent import Agent
-from bonsai_agent.images import MAX_SIDE, find_image_refs, load_image
-from bonsai_agent.llm import OllamaClient, OpenAICompatClient, VisionNotSupported
+from kru_agent.agent import Agent
+from kru_agent.images import MAX_SIDE, find_image_refs, load_image
+from kru_agent.llm import OllamaClient, OpenAICompatClient, VisionNotSupported
 
 from .conftest import FakeLLM, call, text
 from .test_agent import Recorder

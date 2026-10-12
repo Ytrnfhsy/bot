@@ -1,4 +1,4 @@
-"""Конфігурація агента: змінні середовища KRU_* (старі BONSAI_* теж працюють) та необов'язковий .env файл."""
+"""Конфігурація агента: змінні середовища KRU_* та необов'язковий .env файл."""
 
 from __future__ import annotations
 
@@ -23,9 +23,7 @@ def _load_dotenv(path: Path) -> None:
 
 
 def _get(name: str) -> str | None:
-    """KRU_<name>; для сумісності зі старими налаштуваннями — BONSAI_<name>."""
-    value = os.environ.get(f"KRU_{name}")
-    return value if value is not None else os.environ.get(f"BONSAI_{name}")
+    return os.environ.get(f"KRU_{name}")
 
 
 def _env(name: str, default: str) -> str:
@@ -91,15 +89,14 @@ class Config:
     searxng_url: str = ""
 
     # Дані / сервер
-    # стара назва теки лишається, щоб не загубити наявні чати й пам'ять
-    data_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "bonsai-agent")
+    data_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "kru")
     host: str = "0.0.0.0"
     port: int = 8765
     token: str = ""
 
     @property
     def db_path(self) -> Path:
-        return self.data_dir / "bonsai.sqlite3"
+        return self.data_dir / "kru.sqlite3"
 
     @classmethod
     def from_env(cls, dotenv: Path | None = None) -> "Config":

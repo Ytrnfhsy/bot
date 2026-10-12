@@ -1,7 +1,4 @@
-"""Налаштування клієнта: ~/.config/bonsai-robot/config.json (Windows: %APPDATA%\\bonsai-robot\\config.json).
-
-Назва теки історична — так налаштування (сервер, токен) лишаються після перейменування на Kru.
-"""
+"""Налаштування клієнта: ~/.config/kru-robot/config.json (Windows: %APPDATA%\\kru-robot\\config.json)."""
 
 from __future__ import annotations
 
@@ -12,12 +9,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
-def config_path() -> Path:
+def _config_base() -> Path:
     if os.name == "nt" and os.environ.get("APPDATA"):
-        base = Path(os.environ["APPDATA"])
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "bonsai-robot" / "config.json"
+        return Path(os.environ["APPDATA"])
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+
+def config_path() -> Path:
+    return _config_base() / "kru-robot" / "config.json"
 
 
 def new_session_id() -> str:
@@ -51,8 +50,8 @@ class Settings:
             except (ValueError, OSError):
                 pass
         # змінні середовища мають пріоритет (зручно для першого запуску)
-        s.server_url = os.environ.get("BONSAI_SERVER", s.server_url)
-        s.token = os.environ.get("BONSAI_TOKEN", s.token)
+        s.server_url = os.environ.get("KRU_SERVER", s.server_url)
+        s.token = os.environ.get("KRU_TOKEN", s.token)
         s.first_run = not path.is_file()  # перший запуск — одразу покажемо налаштування
         if s.first_run:
             s.save()

@@ -32,14 +32,14 @@ def explain_error(raw: str) -> str:
     """Переклад технічних помилок Qt у зрозумілі підказки."""
     low = raw.lower()
     if "403" in low or "4401" in low or "unauthorized" in low:
-        return "сервер відхилив підключення — перевір токен (BONSAI_TOKEN)"
+        return "сервер відхилив підключення — перевір токен (KRU_TOKEN)"
     if "200 (ok)" in low or "status code: 200" in low:
         return ("за цією адресою не агент, а звичайний веб-сервер (схоже, llama-server) — "
-                "вкажи порт агента: ws://ХОСТ:8765/ws і перевір, що запущено bonsai serve")
+                "вкажи порт агента: ws://ХОСТ:8765/ws і перевір, що запущено kru serve")
     if "404" in low:
         return "невірна адреса — має закінчуватися на /ws"
     if "refused" in low:
-        return "сервер не відповідає на цьому порту — чи запущено bonsai serve і чи збігається порт?"
+        return "сервер не відповідає на цьому порту — чи запущено kru serve і чи збігається порт?"
     if "host not found" in low or "not found" in low:
         return "хост не знайдено — перевір адресу (NetBird запущено?)"
     if "timed out" in low or "timeout" in low:

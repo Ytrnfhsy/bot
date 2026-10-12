@@ -130,11 +130,11 @@ deploy/model.sh start
 
 ```bash
 cd server && ./install_server.sh
-journalctl --user -u bonsai-agent -f
+journalctl --user -u kru -f
 ```
 
-Конфіг лежить у `~/.config/bonsai-agent.env`, там же згенерований токен. Усі параметри описані в
-[`server/.env.example`](server/.env.example) (змінні `KRU_*`; старі `BONSAI_*` теж працюють).
+Конфіг лежить у `~/.config/kru.env`, там же згенерований токен. Усі параметри описані в
+[`server/.env.example`](server/.env.example) (змінні `KRU_*`).
 
 Вручну, для розробки:
 
@@ -186,7 +186,7 @@ kru-robot
 треба нативний Wayland, запусти так: `QT_QPA_PLATFORM=wayland kru-robot`. Але тоді «поверх усіх вікон»
 залежить від композитора.
 
-Налаштування клієнта зберігаються в `~/.config/bonsai-robot/config.json`. Їх також можна змінити через
+Налаштування клієнта зберігаються в `~/.config/kru-robot/config.json`. Їх також можна змінити через
 ПКМ по роботу → Налаштування.
 
 ### Підключення через NetBird
@@ -204,8 +204,8 @@ kru-robot
 
 | Повідомлення | Що перевірити |
 |---|---|
-| сервер відхилив підключення — перевір токен | токен у клієнті ≠ `KRU_TOKEN` у `~/.config/bonsai-agent.env` на сервері |
-| сервер не відповідає на цьому порту | чи запущено агента (`systemctl --user status bonsai-agent`), чи правильний порт |
+| сервер відхилив підключення — перевір токен | токен у клієнті ≠ `KRU_TOKEN` у `~/.config/kru.env` на сервері |
+| сервер не відповідає на цьому порту | чи запущено агента (`systemctl --user status kru`), чи правильний порт |
 | хост не знайдено / час очікування вичерпано | чи підключено NetBird на обох машинах, адреса, файрвол |
 | помилка TLS | у адресі `wss://` замість `ws://` |
 
@@ -222,7 +222,7 @@ kru-robot
 
 Скрипт сам:
 - поставить Python 3.12 через winget, якщо його немає;
-- створить окреме середовище в `%LOCALAPPDATA%\BonsaiRobot` (назва теки історична);
+- створить окреме середовище в `%LOCALAPPDATA%\Kru`;
 - намалює іконку;
 - додасть ярлики в «Пуск» і на робочий стіл;
 - увімкне автозапуск і запустить робота.
@@ -241,7 +241,7 @@ powershell -ExecutionPolicy Bypass -File client\windows\install_windows.ps1 -Ser
 На Windows:
 - **Ctrl+Alt+B** працює з будь-якої програми (реєструється через Windows API, без окремого процесу);
 - автозапуск — галочка «Запускати разом із Windows» у налаштуваннях;
-- налаштування лежать у `%APPDATA%\bonsai-robot\config.json`, експорт чатів — у `Документи\Kru`.
+- налаштування лежать у `%APPDATA%\kru-robot\config.json`, експорт чатів — у `Документи\Kru`.
 
 CI на кожен push запускає `--selftest` робота на справжній Windows-машині. Самоперевірка охоплює вікно, анімацію
 панелі, вбудовані запити, історію, гарячу клавішу, автозапуск і мережевий модуль. Знімки екрана зберігаються в
@@ -263,7 +263,7 @@ kru chat --session ID                               # продовжити ко�
 ## 4. API
 
 **WebSocket** `ws://host:8765/ws?token=…` обмінюється JSON-повідомленнями. Повний опис протоколу є в
-[`server/bonsai_agent/server.py`](server/bonsai_agent/server.py).
+[`server/kru_agent/server.py`](server/kru_agent/server.py).
 
 ```jsonc
 // клієнт → сервер
@@ -290,15 +290,7 @@ cd ~/bot && ./update.sh
 ```
 
 Скрипт підтягне зміни, перевстановить те, що встановлено на цій машині (сервер і/або робота),
-перезапустить сервіс `bonsai-agent` і робота.
-У старих установках він заодно переведе все на нові назви: команди `kru` / `kru-robot`, змінні `KRU_*`,
-ярлики «Kru» й гарячу клавішу.
-
-> Назви `bonsai-*` у шляхах (`~/.config/bonsai-agent.env`, `~/.local/share/bonsai-agent`, сервіс `bonsai-agent`,
-> `~/.config/bonsai-robot`) і в назвах Python-пакетів — історичні. Їх не перейменовано навмисно, щоб наявні
-> чати, пам'ять, токени й налаштування лишилися на місці. На Windows — ще раз `client\windows\install_windows.cmd`
-(або свіжий `Kru.exe` з артефактів CI).
-
+перезапустить сервіс `kru` і персонажа.
 ## Розробка
 
 ```bash
@@ -309,14 +301,14 @@ cd server && pip install -e '.[dev]' && pytest
 пам'ять, пісочницю шляхів, парсинг стрімів Ollama та OpenAI і WebSocket-протокол із підтвердженнями.
 
 ```
-server/bonsai_agent/
+server/kru_agent/
   agent.py      цикл агента, системний промпт, JSON-fallback
   llm.py        клієнти Ollama і OpenAI-сумісного API (стрімінг, tools, thinking)
   server.py     FastAPI + WebSocket
   cli.py        kru serve | chat | ask | health
   storage.py    SQLite: пам'ять (FTS5) і сесії
   tools/        web, files, shell, python_exec, memory, system
-client/bonsai_robot/
+client/kru_robot/
   robot.py      малювання робота й анімації (QPainter)
   panel.py      спливаюча панель: ввід, стрічка, підтвердження
   app.py        вікно поверх усіх, меню, трей, обробка подій
@@ -325,5 +317,5 @@ client/bonsai_robot/
 
 ### Як додати свій інструмент
 
-Створи модуль у `server/bonsai_agent/tools/` зі списком `TOOLS = [Tool(name=…, description=…,
+Створи модуль у `server/kru_agent/tools/` зі списком `TOOLS = [Tool(name=…, description=…,
 parameters={JSON Schema}, func=async_fn, dangerous=False)]` і додай модуль у `build_registry()`.

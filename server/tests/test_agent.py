@@ -5,10 +5,10 @@ import json
 import httpx
 import pytest
 
-from bonsai_agent.agent import Agent, parse_json_tool_call, strip_think
-from bonsai_agent.llm import OllamaClient, OpenAICompatClient, ToolsNotSupported
-from bonsai_agent.storage import Storage
-from bonsai_agent.tools import ToolContext, ToolError
+from kru_agent.agent import Agent, parse_json_tool_call, strip_think
+from kru_agent.llm import OllamaClient, OpenAICompatClient, ToolsNotSupported
+from kru_agent.storage import Storage
+from kru_agent.tools import ToolContext, ToolError
 
 from .conftest import FakeLLM, call, text
 
@@ -217,29 +217,24 @@ async def test_openai_compat_stream():
     assert "temperature" not in seen["body"]
 
 
-def test_env_example_is_qwen_and_old_prefix_works(monkeypatch):
+def test_env_example_is_qwen(monkeypatch):
     import os
     from pathlib import Path
 
-    from bonsai_agent.config import Config
+    from kru_agent.config import Config
 
     for k in list(os.environ):
-        if k.startswith(("BONSAI_", "KRU_")):
+        if k.startswith("KRU_"):
             monkeypatch.delenv(k)
     cfg = Config.from_env(Path(__file__).parent.parent / ".env.example")
     assert (cfg.backend, cfg.llm_url, cfg.model, cfg.temperature) == ("openai", "http://127.0.0.1:8085", "qwen3.6-35b-a3b", None)
     assert cfg.max_history_chars == 120000
-    # старі налаштування BONSAI_* (вже встановлені сервери) працюють, а KRU_* має перевагу
-    monkeypatch.delenv("KRU_PORT")  # .env.example вище вже заповнив оточення
-    monkeypatch.setenv("BONSAI_PORT", "9000")
-    assert Config.from_env(Path("/nonexistent")).port == 9000
-    monkeypatch.setenv("KRU_PORT", "9100")
-    assert Config.from_env(Path("/nonexistent")).port == 9100
+    assert cfg.db_path.name == "kru.sqlite3" and cfg.data_dir.name == "kru"
 
 
 # ---------------- веб-пошук ----------------
 async def test_web_search_no_results_falls_back_to_text(cfg, monkeypatch):
-    from bonsai_agent.tools import web
+    from kru_agent.tools import web
 
     calls = []
 
@@ -257,7 +252,7 @@ async def test_web_search_no_results_falls_back_to_text(cfg, monkeypatch):
 
 
 async def test_web_search_empty_is_not_error(cfg, monkeypatch):
-    from bonsai_agent.tools import web
+    from kru_agent.tools import web
 
     monkeypatch.setattr(web, "_ddgs_search", lambda *a: (_ for _ in ()).throw(Exception("No results found.")))
     ctx = ToolContext(cfg, Storage(cfg.db_path))
@@ -266,7 +261,7 @@ async def test_web_search_empty_is_not_error(cfg, monkeypatch):
 
 
 async def test_web_search_real_failure_raises(cfg, monkeypatch):
-    from bonsai_agent.tools import web
+    from kru_agent.tools import web
 
     monkeypatch.setattr(web, "_ddgs_search", lambda *a: (_ for _ in ()).throw(ConnectionError("network down")))
     ctx = ToolContext(cfg, Storage(cfg.db_path))
@@ -275,7 +270,7 @@ async def test_web_search_real_failure_raises(cfg, monkeypatch):
 
 
 def test_tool_describe_compact():
-    from bonsai_agent.tools import build_registry
+    from kru_agent.tools import build_registry
 
     d = build_registry().get("web_search").describe({"query": "NetBird news", "kind": "news"})
     assert d == "query=NetBird news, kind=news"
@@ -284,7 +279,7 @@ def test_tool_describe_compact():
 async def test_read_docx_and_binary(cfg):
     import zipfile
 
-    from bonsai_agent.tools.files import read_file
+    from kru_agent.tools.files import read_file
 
     ctx = ToolContext(cfg, Storage(cfg.db_path))
     doc = cfg.workspace / "uploads" / "звіт.docx"

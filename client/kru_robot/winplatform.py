@@ -19,7 +19,6 @@ VK_B = 0x42
 HOTKEY_ID = 0xB0B
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "Kru"
-OLD_RUN_VALUES = ("BonsaiRobot",)  # назви зі старих версій — прибираємо, щоб не було двох автозапусків
 
 
 class WinHotkey(QAbstractNativeEventFilter):
@@ -68,12 +67,12 @@ class WinHotkey(QAbstractNativeEventFilter):
 
 
 def autostart_command() -> str:
-    """Команда для автозапуску: зібраний .exe або pythonw -m bonsai_robot (без вікна консолі)."""
+    """Команда для автозапуску: зібраний .exe або pythonw -m kru_robot (без вікна консолі)."""
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}"'
     exe = Path(sys.executable)
     pythonw = exe.with_name("pythonw.exe")
-    return f'"{pythonw if pythonw.exists() else exe}" -m bonsai_robot'
+    return f'"{pythonw if pythonw.exists() else exe}" -m kru_robot'
 
 
 def autostart_enabled() -> bool:
@@ -83,13 +82,8 @@ def autostart_enabled() -> bool:
 
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            for name in (RUN_VALUE, *OLD_RUN_VALUES):
-                try:
-                    winreg.QueryValueEx(key, name)
-                    return True
-                except OSError:
-                    continue
-            return False
+            winreg.QueryValueEx(key, RUN_VALUE)
+            return True
     except OSError:
         return False
 
@@ -100,11 +94,6 @@ def set_autostart(enabled: bool) -> None:
     import winreg
 
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-        for old in OLD_RUN_VALUES:
-            try:
-                winreg.DeleteValue(key, old)
-            except OSError:
-                pass
         if enabled:
             winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, autostart_command())
         else:

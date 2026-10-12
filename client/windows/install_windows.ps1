@@ -5,7 +5,7 @@
   Або з PowerShell (можна одразу вказати сервер і токен):
     powershell -ExecutionPolicy Bypass -File install_windows.ps1 -Server ws://100.x.y.z:8765/ws -Token ТОКЕН
 
-  Що робить: за потреби ставить Python (winget), створює окреме середовище в %LOCALAPPDATA%\BonsaiRobot (назва теки історична),
+  Що робить: за потреби ставить Python (winget), створює окреме середовище в %LOCALAPPDATA%\Kru,
   ставить робота, малює іконку, додає ярлики в меню «Пуск» і на робочий стіл, вмикає автозапуск і запускає робота.
 #>
 param(
@@ -20,7 +20,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 $Here   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Client = Split-Path -Parent $Here
-$Prefix = Join-Path $env:LOCALAPPDATA "BonsaiRobot"
+$Prefix = Join-Path $env:LOCALAPPDATA "Kru"
 $Venv   = Join-Path $Prefix "venv"
 $Py     = Join-Path $Venv "Scripts\python.exe"
 $PyW    = Join-Path $Venv "Scripts\pythonw.exe"
@@ -59,7 +59,7 @@ Write-Host "    $python"
 # якщо робот уже працює — закриваємо, щоб оновлення не блокувалося зайнятими файлами
 if (Test-Path $PyW) {
     Write-Host "==> Закриваю запущеного робота (якщо працює)..."
-    Start-Process -FilePath $PyW -ArgumentList "-m", "bonsai_robot", "--quit" -Wait -ErrorAction SilentlyContinue
+    Start-Process -FilePath $PyW -ArgumentList "-m", "kru_robot", "--quit" -Wait -ErrorAction SilentlyContinue
 }
 
 Write-Host "==> Середовище: $Venv"
@@ -71,7 +71,7 @@ if ($LASTEXITCODE -ne 0) { throw "Не вдалося встановити ро�
 
 Write-Host "==> Іконка"
 $env:QT_QPA_PLATFORM = "offscreen"
-& $Py -m bonsai_robot.icon --ico $Ico
+& $Py -m kru_robot.icon --ico $Ico
 Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue
 
 Write-Host "==> Ярлики"
@@ -79,14 +79,11 @@ $shell = New-Object -ComObject WScript.Shell
 function New-RobotShortcut([string]$path) {
     $lnk = $shell.CreateShortcut($path)
     $lnk.TargetPath = $PyW
-    $lnk.Arguments = "-m bonsai_robot"
+    $lnk.Arguments = "-m kru_robot"
     $lnk.WorkingDirectory = $Prefix
     $lnk.IconLocation = "$Ico,0"
     $lnk.Description = "Kru — робот-помічник"
     $lnk.Save()
-}
-foreach ($dir in @([Environment]::GetFolderPath("Programs"), [Environment]::GetFolderPath("Desktop"))) {
-    Remove-Item (Join-Path $dir "Bonsai Robot.lnk") -ErrorAction SilentlyContinue  # стара назва
 }
 New-RobotShortcut (Join-Path ([Environment]::GetFolderPath("Programs")) "Kru.lnk")
 if (-not $NoDesktopShortcut) {
@@ -95,18 +92,18 @@ if (-not $NoDesktopShortcut) {
 
 if ($Server) {
     Write-Host "==> Налаштування: $Server"
-    $code = "import sys; from bonsai_robot.settings import Settings; s = Settings.load(); s.server_url = sys.argv[1]; s.token = sys.argv[2] if len(sys.argv) > 2 else s.token; s.save()"
+    $code = "import sys; from kru_robot.settings import Settings; s = Settings.load(); s.server_url = sys.argv[1]; s.token = sys.argv[2] if len(sys.argv) > 2 else s.token; s.save()"
     if ($Token) { & $Py -c $code $Server $Token } else { & $Py -c $code $Server }
 }
 
 if (-not $NoAutostart) {
     Write-Host "==> Автозапуск разом із Windows (вимкнути: ПКМ по роботу → Налаштування)"
-    & $Py -c "from bonsai_robot.winplatform import set_autostart; set_autostart(True)"
+    & $Py -c "from kru_robot.winplatform import set_autostart; set_autostart(True)"
 }
 
 if (-not $NoLaunch) {
     Write-Host "==> Запускаю робота"
-    Start-Process -FilePath $PyW -ArgumentList "-m", "bonsai_robot" -WorkingDirectory $Prefix
+    Start-Process -FilePath $PyW -ArgumentList "-m", "kru_robot" -WorkingDirectory $Prefix
 }
 
 Write-Host ""

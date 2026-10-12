@@ -5,8 +5,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# назва теки історична (bonsai-robot) — так оновлення не губить середовище й налаштування
-PREFIX="${HOME}/.local/share/bonsai-robot"
+# shellcheck source=../deploy/venv-lib.sh
+source "${HERE}/../deploy/venv-lib.sh"
+PREFIX="${HOME}/.local/share/kru-robot"
 VENV="${PREFIX}/venv"
 BIN="${HOME}/.local/bin"
 APPS="${HOME}/.local/share/applications"
@@ -20,19 +21,11 @@ if [[ ${REFRESH} == 0 ]]; then
   # xcb-util-cursor потрібен Qt6 для X11/XWayland; решта — для прозорих вікон і шрифтів
   sudo dnf install -y python3 python3-pip xcb-util-cursor xcb-util-wm xcb-util-keysyms \
       libxkbcommon-x11 mesa-libEGL google-noto-emoji-color-fonts || true
-
-  echo "==> Віртуальне середовище: ${VENV}"
-  python3 -m venv "${VENV}"
-  "${VENV}/bin/pip" install --upgrade pip >/dev/null
-  "${VENV}/bin/pip" install "${HERE}"
 fi
-# без нової назви в venv (оновлення без доступу до pypi) — створюємо її з наявної
-[[ -x "${VENV}/bin/kru-robot" ]] || cp "${VENV}/bin/bonsai-robot" "${VENV}/bin/kru-robot"
-
-echo "==> Прибираю старі ярлики Bonsai Robot"
-rm -f "${BIN}/bonsai-robot" "${APPS}/bonsai-robot.desktop" "${APPS}/bonsai-robot-toggle.desktop" \
-      "${AUTOSTART}/bonsai-robot.desktop" "${HOME}"/.local/share/icons/hicolor/*/apps/bonsai-robot.png
-
+if [[ ${REFRESH} == 0 || ! -x "${VENV}/bin/kru-robot" ]]; then
+  echo "==> Віртуальне середовище: ${VENV}"
+  kru_venv_install "${VENV}" "${HERE}" kru_robot kru-robot kru_robot.app:main
+fi
 echo "==> Лаунчер ${BIN}/kru-robot"
 cat > "${BIN}/kru-robot" <<LAUNCHER
 #!/usr/bin/env bash
@@ -43,7 +36,7 @@ LAUNCHER
 chmod +x "${BIN}/kru-robot"
 
 echo "==> Іконка програми"
-QT_QPA_PLATFORM=offscreen "${VENV}/bin/python" -m bonsai_robot.icon "${HOME}/.local/share/icons"
+QT_QPA_PLATFORM=offscreen "${VENV}/bin/python" -m kru_robot.icon "${HOME}/.local/share/icons"
 gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 
 sed "s|@EXEC@|${BIN}/kru-robot|" "${HERE}/packaging/kru-robot.desktop" > "${APPS}/kru-robot.desktop"
@@ -70,9 +63,6 @@ case "${XDG_CURRENT_DESKTOP:-}" in
   *KDE*)
     KWC="$(command -v kwriteconfig6 || command -v kwriteconfig5 || true)"
     if [[ -n "${KWC}" ]]; then
-      # стара прив'язка займала б ту саму комбінацію
-      "${KWC}" --file kglobalshortcutsrc --group services --group bonsai-robot-toggle.desktop \
-        --key _launch --delete 2>/dev/null || true
       "${KWC}" --file kglobalshortcutsrc --group services --group kru-robot-toggle.desktop \
         --key _launch "Ctrl+Alt+B" && HOTKEY_OK=1
       # перезапуск служби глобальних шорткатів, щоб підхопила зміни
@@ -83,9 +73,8 @@ case "${XDG_CURRENT_DESKTOP:-}" in
     if command -v gsettings >/dev/null; then
       BASE=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
       KB="${BASE}/kru-robot/"
-      OLD="${BASE}/bonsai-robot/"
       LIST="$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings)"
-      NEW="$(python3 -c "import ast,sys; l=[x for x in ast.literal_eval(sys.argv[1].replace('@as ','')) if x!=sys.argv[3]]; l+=[sys.argv[2]] if sys.argv[2] not in l else []; print(str(l))" "${LIST}" "${KB}" "${OLD}")"
+      NEW="$(python3 -c "import ast,sys; l=ast.literal_eval(sys.argv[1].replace('@as ','')); l+=[sys.argv[2]] if sys.argv[2] not in l else []; print(str(l))" "${LIST}" "${KB}")"
       gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "${NEW}"
       S="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:${KB}"
       gsettings set "${S}" name "Kru"
@@ -99,7 +88,7 @@ esac
 if [[ $# -ge 1 ]]; then
   "${VENV}/bin/python" - "$@" <<'PY'
 import sys
-from bonsai_robot.settings import Settings
+from kru_robot.settings import Settings
 s = Settings.load()
 s.server_url = sys.argv[1]
 if len(sys.argv) > 2:
