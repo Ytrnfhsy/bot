@@ -9,8 +9,9 @@ echo "==> git pull"
 git pull --ff-only
 
 reinstall() {  # $1 — venv, $2 — тека пакета
-  "$1/bin/pip" install --quiet --disable-pip-version-check "$2"  # нові залежності
-  "$1/bin/pip" install --quiet --disable-pip-version-check --force-reinstall --no-deps "$2"  # сам код
+  local pip=("$1/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir)
+  "${pip[@]}" "$2"  # нові залежності
+  "${pip[@]}" --force-reinstall --no-deps "$2"  # сам код
 }
 
 updated=0
@@ -18,9 +19,14 @@ SERVER_VENV="${HOME}/.local/share/bonsai-agent/venv"
 if [[ -x "${SERVER_VENV}/bin/pip" ]]; then
   echo "==> Сервер агента"
   reinstall "${SERVER_VENV}" ./server
-  systemctl --user restart bonsai-agent.service
-  sleep 2
-  systemctl --user --no-pager --lines=0 status bonsai-agent.service | head -3 || true
+  if systemctl --user cat bonsai-agent.service >/dev/null 2>&1; then
+    systemctl --user restart bonsai-agent.service
+    sleep 2
+    systemctl --user --no-pager --lines=0 status bonsai-agent.service | head -3 || true
+  else
+    # пакет є, а сервісу немає: тут лише CLI `bonsai` (сервер працює на іншій машині або під іншим користувачем)
+    echo "Сервісу bonsai-agent у цього користувача немає — оновлено лише CLI bonsai."
+  fi
   updated=1
 fi
 
