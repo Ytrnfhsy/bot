@@ -4,8 +4,8 @@ from typing import Any
 
 import pytest
 
-from bonsai_agent.config import Config
-from bonsai_agent.llm import ChatResult, ToolsNotSupported
+from kru_agent.config import Config
+from kru_agent.llm import ChatResult, ToolsNotSupported
 
 
 class FakeLLM:

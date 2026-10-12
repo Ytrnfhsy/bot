@@ -35,7 +35,7 @@ jobs:
         timeout-minutes: 3
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m bonsai_robot --selftest selftest-linux/report.json
+        run: python -m kru_robot --selftest selftest-linux/report.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -57,18 +57,18 @@ jobs:
       - name: Перевірка результату встановлення
         shell: pwsh
         run: |
-          $prefix = "$env:LOCALAPPDATA\BonsaiRobot"
+          $prefix = "$env:LOCALAPPDATA\Kru"
           foreach ($f in @("$prefix\venv\Scripts\pythonw.exe", "$prefix\robot.ico",
                            "$([Environment]::GetFolderPath('Programs'))\Kru.lnk",
-                           "$env:APPDATA\bonsai-robot\config.json")) {
+                           "$env:APPDATA\kru-robot\config.json")) {
             if (-not (Test-Path $f)) { throw "Немає: $f" } else { Write-Host "OK: $f" }
           }
-          Get-Content "$env:APPDATA\bonsai-robot\config.json"
+          Get-Content "$env:APPDATA\kru-robot\config.json"
       - name: Самоперевірка встановленого робота
         timeout-minutes: 3
         shell: pwsh
         run: |
-          & "$env:LOCALAPPDATA\BonsaiRobot\venv\Scripts\python.exe" -m bonsai_robot --selftest selftest-windows-install/report.json
+          & "$env:LOCALAPPDATA\Kru\venv\Scripts\python.exe" -m kru_robot --selftest selftest-windows-install/report.json
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()
@@ -89,11 +89,11 @@ jobs:
       - name: Іконка
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m bonsai_robot.icon --ico build/robot.ico
+        run: python -m kru_robot.icon --ico build/robot.ico
       - name: PyInstaller
         run: >
           pyinstaller --noconfirm --windowed --name Kru --icon build/robot.ico
-          --collect-submodules bonsai_robot client/windows/launcher.py
+          --collect-submodules kru_robot client/windows/launcher.py
       - name: Самоперевірка exe
         timeout-minutes: 3
         shell: pwsh

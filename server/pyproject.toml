@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bonsai-agent"
+name = "kru-agent"
 version = "0.1.0"
 description = "Kru — автономний агент на Qwen3.6 (llama-server) з інструментами, пам'яттю та WebSocket API"
 requires-python = ">=3.10"
@@ -22,11 +22,10 @@ dependencies = [
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-kru = "bonsai_agent.cli:main"
-bonsai = "bonsai_agent.cli:main"  # стара назва команди — для вже встановлених систем
+kru = "kru_agent.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["bonsai_agent*"]
+include = ["kru_agent*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

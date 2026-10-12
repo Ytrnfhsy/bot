@@ -4,8 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from bonsai_agent.agent import Agent
-from bonsai_agent.server import create_app
+from kru_agent.agent import Agent
+from kru_agent.server import create_app
 
 from .conftest import FakeLLM, call, text
 

@@ -109,7 +109,7 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
-        token = ws.query_params.get("token") or ws.headers.get("x-kru-token") or ws.headers.get("x-bonsai-token")
+        token = ws.query_params.get("token") or ws.headers.get("x-kru-token")
         await ws.accept()
         user = users.authenticate(token)
         if user is None:

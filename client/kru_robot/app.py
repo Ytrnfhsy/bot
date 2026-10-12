@@ -692,7 +692,7 @@ def _ipc_name() -> str:
     import re as _re
 
     user = _re.sub(r"[^\w.-]", "_", getpass.getuser() or "user")  # os.getuid() немає на Windows
-    return f"bonsai-robot-{user}"  # історична назва: так нова версія знаходить і замінює стару
+    return f"kru-robot-{user}"
 
 
 def _command_from_argv(argv: list[str]) -> str | None:

@@ -390,7 +390,7 @@ def main(argv: list[str] | None = None) -> None:
         if name == "ask":
             p.add_argument("text", nargs="+", help="текст задачі")
         p.add_argument("--server", help="ws://host:8765/ws — підключитися до віддаленого сервера")
-        p.add_argument("--token", default=os.environ.get("KRU_TOKEN", os.environ.get("BONSAI_TOKEN", "")))
+        p.add_argument("--token", default=os.environ.get("KRU_TOKEN", ""))
         p.add_argument("--session", help="id чату, щоб продовжити його (типово — новий чат)")
         p.add_argument("--thinking", action="store_true", help="показувати міркування моделі")
         p.add_argument("--yes", action="store_true", help="авто-підтвердження небезпечних дій (лише локально)")
@@ -412,7 +412,7 @@ def main(argv: list[str] | None = None) -> None:
         from .config import _load_dotenv
         from pathlib import Path
 
-        _load_dotenv(Path.home() / ".config" / "bonsai-agent.env")
+        _load_dotenv(Path.home() / ".config" / "kru.env")
     cfg = Config.from_env()
 
     if args.cmd == "serve":

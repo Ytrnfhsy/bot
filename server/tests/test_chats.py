@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from bonsai_agent.agent import Agent
-from bonsai_agent.chats import default_title, to_markdown, transcript
+from kru_agent.agent import Agent
+from kru_agent.chats import default_title, to_markdown, transcript
 
 from .conftest import FakeLLM, call, text
 from .test_agent import Recorder
@@ -63,7 +63,7 @@ def test_old_saved_chats_and_sessions_migrated(tmp_path):
     import json
     import sqlite3
 
-    from bonsai_agent.storage import Storage
+    from kru_agent.storage import Storage
 
     db = tmp_path / "old.sqlite3"
     con = sqlite3.connect(db)
@@ -132,7 +132,7 @@ def test_ws_chat_flow(cfg):
 
 
 def test_cli_chat_commands():
-    from bonsai_agent.cli import Printer, parse_chat_command
+    from kru_agent.cli import Printer, parse_chat_command
 
     pr = Printer(False, "cli-1")
     pr({"type": "chat_list", "chats": [{"id": "a", "title": "A", "count": 1, "updated_at": 0},
@@ -144,3 +144,4 @@ def test_cli_chat_commands():
     assert parse_chat_command("привіт", pr) is None
     pr({"type": "chat_opened", "id": "a", "title": "A", "transcript": []})
     assert pr.session == "a"
+

@@ -15,25 +15,16 @@ MODEL_FILE="${MODEL_FILE:-Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}"
 MODEL_URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/${MODEL_FILE}"
 MMPROJ_FILE="${MMPROJ_FILE:-mmproj-Qwen3.6-35B-A3B-F16.gguf}"
 MMPROJ_URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf"
-ENV_FILE="${HOME}/.config/bonsai-agent.env"
+ENV_FILE="${HOME}/.config/kru.env"
 LLM_URL="http://127.0.0.1:8085"
 export MODEL_DIR
 
 set_key() {  # set_key KEY VALUE — оновити (або додати) KRU_KEY у конфігу агента
   [[ -f "${ENV_FILE}" ]] || return 0
-  sed -i -e "/^BONSAI_$1=/d" "${ENV_FILE}"
   if grep -q "^KRU_$1=" "${ENV_FILE}"; then
     sed -i "s|^KRU_$1=.*|KRU_$1=$2|" "${ENV_FILE}"
   else
     echo "KRU_$1=$2" >> "${ENV_FILE}"
-  fi
-}
-
-retire_bonsai() {  # старий контейнер Bonsai займав той самий порт 8085 і піднімався після перезавантаження
-  local old="${REPO}/docker-compose.yml"
-  if [[ -f "${old}" ]] && grep -qi bonsai "${old}"; then
-    echo "Прибираю старий контейнер Bonsai (${old}); файли моделі не чіпаю."
-    docker compose -f "${old}" down || true
   fi
 }
 
@@ -65,7 +56,6 @@ case "${1:-}" in
       echo "ℹ Зір вимкнено — для розуміння зображень завантаж (~0.9 ГБ) і запусти знову:"
       echo "  curl -L -C - -o '${MODEL_DIR}/${MMPROJ_FILE}' '${MMPROJ_URL}'"
     fi
-    retire_bonsai
     docker compose -f "${COMPOSE}" up -d
     wait_ready
     set_key MODEL qwen3.6-35b-a3b
@@ -74,8 +64,8 @@ case "${1:-}" in
     set_key VISION auto
     set_key MAX_HISTORY_CHARS 120000
     set_key REQUEST_TIMEOUT 1200
-    if systemctl --user cat bonsai-agent.service >/dev/null 2>&1; then
-      systemctl --user restart bonsai-agent.service && echo "Агента Kru перезапущено."
+    if systemctl --user cat kru.service >/dev/null 2>&1; then
+      systemctl --user restart kru.service && echo "Агента Kru перезапущено."
     fi
     nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null \
       | awk '{print "VRAM зайнято: " $0}' || true
