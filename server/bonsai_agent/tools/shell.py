@@ -50,7 +50,7 @@ async def run_shell(ctx: ToolContext, command: str, timeout: int = 0) -> str:
         raise ToolError("Порожня команда")
     t = int(timeout) or ctx.config.shell_timeout
     return await run_process(
-        command, str(ctx.config.workspace), min(t, 3600), ctx.config.max_tool_output_chars, shell=True
+        command, str(ctx.workspace), min(t, 3600), ctx.config.max_tool_output_chars, shell=True
     )
 
 

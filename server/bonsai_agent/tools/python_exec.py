@@ -11,7 +11,7 @@ from .shell import run_process
 
 
 async def run_python(ctx: ToolContext, code: str, timeout: int = 0) -> str:
-    tmp_dir = ctx.config.workspace / ".bonsai_tmp"
+    tmp_dir = ctx.workspace / ".bonsai_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", suffix=".py", dir=tmp_dir, delete=False, encoding="utf-8") as f:
         f.write(code)
@@ -20,7 +20,7 @@ async def run_python(ctx: ToolContext, code: str, timeout: int = 0) -> str:
         t = int(timeout) or ctx.config.python_timeout
         return await run_process(
             [sys.executable, "-u", str(script)],
-            str(ctx.config.workspace),
+            str(ctx.workspace),
             min(t, 3600),
             ctx.config.max_tool_output_chars,
         )

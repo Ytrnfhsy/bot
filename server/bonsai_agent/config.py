@@ -74,7 +74,9 @@ class Config:
 
     # Інструменти
     workspace: Path = field(default_factory=lambda: Path.home() / "bonsai-workspace")
-    allow_outside_workspace: bool = False
+    allow_outside_workspace: bool = False  # лише для адміністраторів
+    # робочі теки інших користувачів: <USERS_WORKSPACE>/<ім'я>/
+    users_workspace: Path = field(default_factory=lambda: Path.home() / "bonsai-users")
     auto_approve: bool = False
     shell_timeout: int = 120
     python_timeout: int = 120
@@ -116,6 +118,7 @@ class Config:
             persona=_env("PERSONA", d.persona),
             workspace=Path(_env("WORKSPACE", str(d.workspace))).expanduser(),
             allow_outside_workspace=_env_bool("ALLOW_OUTSIDE_WORKSPACE", d.allow_outside_workspace),
+            users_workspace=Path(_env("USERS_WORKSPACE", str(d.users_workspace))).expanduser(),
             auto_approve=_env_bool("AUTO_APPROVE", d.auto_approve),
             shell_timeout=int(_env("SHELL_TIMEOUT", str(d.shell_timeout))),
             python_timeout=int(_env("PYTHON_TIMEOUT", str(d.python_timeout))),
