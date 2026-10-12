@@ -172,6 +172,7 @@ class RobotWindow(QWidget):
         self.menu = QMenu()
         self.menu.addAction("💬 Відкрити чат", self.show_panel)
         self.menu.addAction("📝 Новий чат", self.new_chat)
+        self.menu.addAction("📸 Знімок екрана на аналіз (подвійний клік)", self.screenshot_for_analysis)
         self.menu.addAction("📂 Усі чати…", self.show_chats)
         self.menu.addAction("✏ Перейменувати чат…", lambda: self.rename_chat(None, self.chat_title))
         self.menu.addAction("📤 Експорт розмови в Markdown…", lambda: self.export_chat(None))
@@ -186,7 +187,7 @@ class RobotWindow(QWidget):
 
     def _connect_character(self) -> None:
         self.robot.clicked.connect(self.on_robot_clicked)
-        self.robot.double_clicked.connect(self.repeat_last_task)
+        self.robot.double_clicked.connect(self.screenshot_for_analysis)
         self.robot.petted.connect(self.on_petted)
         self.robot.files_dropped.connect(self.upload_files)
         self.robot.text_dropped.connect(self.on_text_dropped)
@@ -297,20 +298,55 @@ class RobotWindow(QWidget):
                                           "(ПКМ по роботу → Налаштування) і чи запущено NetBird.")
             self.robot.set_state("sad", 2.5, then="offline")
 
-    def repeat_last_task(self) -> None:
-        """Подвійний клік: повторити останню задачу."""
+    SCREENSHOT_TASK = (
+        "Подивись на мій знімок екрана {path}. Коротко опиши, що на ньому відбувається. "
+        "Якщо бачиш помилку, попередження чи проблему — поясни її і запропонуй, як виправити."
+    )
+
+    def screenshot_for_analysis(self) -> None:
+        """Подвійний клік: сховатись, зняти екран, передати знімок і попросити модель його проаналізувати."""
         self.touch()
-        last = self.settings.last_task
         if self.busy:
             self.show_panel()
             self.panel.set_activity("⏳ Я ще працюю над попередньою задачею")
             return
-        if not last:
+        if not self.conn.is_connected:
+            self.conn.reconnect_now()
             self.show_panel()
-            self.panel.set_activity("Подвійний клік повторює останню задачу — але її ще не було 🙂")
+            self.panel.add_entry("error", "Немає з'єднання з сервером — знімок нікуди передати. Спробую підключитися…")
             return
+        if getattr(self, "server_vision", None) is False:
+            self.show_panel()
+            self.panel.add_entry(
+                "error",
+                "Модель зараз не бачить зображень (зір вимкнено на сервері). "
+                "Запусти модель із зором: deploy/switch-model.sh qwen",
+            )
+            return
+        # ховаємось, щоб не потрапити на знімок, і даємо композитору мить перемалювати екран
+        self._panel_was_shown = self.panel.shown
+        self.panel.hide()
+        self.hide()
+        QTimer.singleShot(350, self._take_screenshot)
+
+    def _take_screenshot(self) -> None:
+        from .screenshot import ScreenshotError, capture
+
+        try:
+            path = capture(self.geometry())
+        except ScreenshotError as e:
+            path, error = None, str(e)
+        self.show()
         self.show_panel()
-        self.send_task(last)
+        if path is None:
+            self.panel.add_entry("error", error)
+            self.robot.set_state("sad", 2.5)
+            return
+        self.robot.poke()
+        self.panel.set_activity("📸 Знімок готовий — передаю на аналіз…")
+        self._auto_task = self.SCREENSHOT_TASK
+        self.upload_files([str(path)])
+        path.unlink(missing_ok=True)  # уже прочитано й надіслано на сервер
 
     def on_petted(self) -> None:
         self.touch()
@@ -379,6 +415,13 @@ class RobotWindow(QWidget):
         self._uploaded.append(ev["path"])
         size_kb = max(1, int(ev.get("size", 0)) // 1024)
         self.panel.add_entry("tool", f"📎 {ev['path']} ({size_kb} КБ) — на сервері")
+        if not self._pending_uploads and getattr(self, "_auto_task", None):  # знімок екрана — одразу на аналіз
+            task, self._auto_task = self._auto_task, None
+            files = ", ".join(self._uploaded)
+            self._uploaded = []
+            self.panel.set_activity("")
+            self.send_task(task.format(path=files))
+            return
         if not self._pending_uploads:  # усе передано — підказуємо задачу
             files = ", ".join(self._uploaded)
             images = all(p.lower().endswith(IMAGE_EXT) for p in self._uploaded)
@@ -601,6 +644,8 @@ class RobotWindow(QWidget):
         self.touch()
         t = ev.get("type")
         if t == "vision":
+            if ev.get("state") == "unavailable":
+                self.server_vision = False
             if ev.get("state") == "attached":
                 self.panel.set_activity(f"👁 Дивлюся на зображення: {', '.join(ev.get('images', []))}")
             else:
@@ -619,12 +664,14 @@ class RobotWindow(QWidget):
         if t == "upload_error":
             self._pending_uploads = getattr(self, "_pending_uploads", {})
             self._pending_uploads.pop(ev.get("id"), None)
+            self._auto_task = None
             self.panel.add_entry("error", f"Не вдалося передати {ev.get('name')}: {ev.get('message')}")
             self.robot.set_state("sad", 2.0)
             return
         if t == "hello":
             name = ev.get("name") or "Bonsai"
             model = str(ev.get("model", "")).split("/")[-1]
+            self.server_vision = ev.get("vision")
             eye = {True: " · 👁", False: " · без зору"}.get(ev.get("vision"), "")
             user = f" · {ev['user']}" if ev.get("user") and ev.get("user") != "owner" else ""
             self.panel.set_status(f"{name} · підключено · {model}{eye}{user}", True)
