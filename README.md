@@ -318,6 +318,19 @@ hello{user, role} | status | thinking | token | tool_call | tool_result | confir
 `Authorization: Bearer ТОКЕН` виконує задачу неінтерактивно. Небезпечні дії при цьому відхиляються,
 якщо не встановлено `BONSAI_AUTO_APPROVE=true`. Перевірка стану: `GET /health`.
 
+## Оновлення
+
+Сервер і робот встановлені у власні віртуальні середовища, тому самого `git pull` недостатньо.
+На кожній Linux-машині (сервер, Fedora) просто запусти:
+
+```bash
+cd ~/bot && ./update.sh
+```
+
+Скрипт підтягне зміни, перевстановить те, що встановлено на цій машині (сервер і/або робота),
+перезапустить сервіс `bonsai-agent` і робота. На Windows — ще раз `client\windows\install_windows.cmd`
+(або свіжий `BonsaiRobot.exe` з артефактів CI).
+
 ## Розробка
 
 ```bash

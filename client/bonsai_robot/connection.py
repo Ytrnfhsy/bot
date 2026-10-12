@@ -82,6 +82,14 @@ class AgentConnection(QObject):
         self.ws.abort()
         self.open()
 
+    def reconnect_now(self) -> None:
+        """Користувач щось робить, а з'єднання немає — пробуємо одразу, не чекаючи наступної спроби."""
+        if self.is_connected or self.ws.state() == QAbstractSocket.SocketState.ConnectingState:
+            return
+        self._retry.stop()
+        self._backoff = 1000
+        self.open()
+
     def open(self) -> None:
         self._was_connected = False
         url = self.url
@@ -122,7 +130,7 @@ class AgentConnection(QObject):
         self.disconnected.emit(explain_error(raw), raw)
         self._last_error = ""
         self._retry.start(self._backoff)
-        self._backoff = min(self._backoff * 2, 30000)
+        self._backoff = min(self._backoff * 2, 10000)  # не довше 10 с: сервер/NetBird часто піднімаються пізніше
 
     def _on_message(self, text: str) -> None:
         try:

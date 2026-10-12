@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Оновлення Bonsai Agent на цій машині: git pull + перевстановлення встановлених частин + перезапуск.
+#   ./update.sh
+# Сервер і робот встановлені у власні venv, тому самого `git pull` недостатньо — цей скрипт робить решту.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+echo "==> git pull"
+git pull --ff-only
+
+reinstall() {  # $1 — venv, $2 — тека пакета
+  "$1/bin/pip" install --quiet --disable-pip-version-check "$2"  # нові залежності
+  "$1/bin/pip" install --quiet --disable-pip-version-check --force-reinstall --no-deps "$2"  # сам код
+}
+
+updated=0
+SERVER_VENV="${HOME}/.local/share/bonsai-agent/venv"
+if [[ -x "${SERVER_VENV}/bin/pip" ]]; then
+  echo "==> Сервер агента"
+  reinstall "${SERVER_VENV}" ./server
+  systemctl --user restart bonsai-agent.service
+  sleep 2
+  systemctl --user --no-pager --lines=0 status bonsai-agent.service | head -3 || true
+  updated=1
+fi
+
+ROBOT_VENV="${HOME}/.local/share/bonsai-robot/venv"
+if [[ -x "${ROBOT_VENV}/bin/pip" ]]; then
+  echo "==> Робот"
+  reinstall "${ROBOT_VENV}" ./client
+  if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v bonsai-robot >/dev/null; then
+    # запущена стара копія побачить нову версію й поступиться їй
+    (bonsai-robot >/dev/null 2>&1 &)
+    echo "Робота перезапущено"
+  fi
+  updated=1
+fi
+
+if [[ ${updated} == 0 ]]; then
+  echo "Не знайшов встановлених сервера чи робота. Спершу: server/install_server.sh або client/install_fedora.sh"
+  exit 1
+fi
+echo "Готово ✅"
