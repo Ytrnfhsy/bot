@@ -21,7 +21,7 @@ from PySide6.QtGui import (
     QPen,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QWidget
 
 # Колір «настрою» (очі, антена, підсвітка) для кожного стану
 STATE_COLORS = {
@@ -56,7 +56,6 @@ def _lerp(a: float, b: float, k: float) -> float:
 class RobotWidget(QWidget):
     PURR_TEXT = "мрр~"  # що «каже» персонаж, коли його гладять
     clicked = Signal()
-    double_clicked = Signal()
     petted = Signal()  # почав муркотіти
     files_dropped = Signal(list)  # локальні шляхи
     text_dropped = Signal(str)  # URL або виділений текст
@@ -87,13 +86,11 @@ class RobotWidget(QWidget):
         self._hover = False
         self._wave = 0.0
         # «стискання» при кліку
-        self._squish = 0.0
+        self._squish = 0.0  # > 0 — «сплющений», < 0 — «витягнутий» (пружина після кліку)
+        self._squish_v = 0.0
         # перетягування
         self._press_pos: QPointF | None = None
         self._dragging = False
-        # одинарний клік спрацьовує із затримкою, щоб відрізнити його від подвійного
-        self._click_timer = QTimer(self, singleShot=True)
-        self._click_timer.timeout.connect(self.clicked)
         # гладження
         self._pet = 0.0  # «накопичене» гладження
         self._purr = 0.0  # 0..1 — інтенсивність муркотіння
@@ -120,7 +117,8 @@ class RobotWidget(QWidget):
             self._state_until = 0.0
 
     def poke(self) -> None:
-        self._squish = 1.0
+        """Клік: м'який «желейний» поштовх — сплющується, трохи витягується й заспокоюється (~0.8 с)."""
+        self._squish_v = 10.0
 
     @property
     def purring(self) -> bool:
@@ -191,7 +189,12 @@ class RobotWidget(QWidget):
 
         target_wave = 1.0 if (self._hover and self.state in {"idle", "happy"}) else 0.0
         self._wave = _lerp(self._wave, target_wave, min(1.0, dt * 5))
-        self._squish = max(0.0, self._squish - dt * 4)
+        # пружина «желе»: м'яка й неквапна, із невеликим відскоком
+        steps = max(1, int(dt / 0.01))
+        h = dt / steps
+        for _ in range(steps):
+            self._squish_v += (-80.0 * self._squish - 7.5 * self._squish_v) * h
+            self._squish += self._squish_v * h
         self.update()
 
     # ---------------- малювання ----------------
@@ -606,15 +609,13 @@ class RobotWidget(QWidget):
             self.drag_finished.emit()
         else:
             self.poke()
-            self._click_timer.start(QApplication.doubleClickInterval())
+            self.clicked.emit()  # одразу, без очікування подвійного кліку
         self._press_pos = None
         self._dragging = False
 
     def mouseDoubleClickEvent(self, e) -> None:
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._click_timer.stop()  # це не одинарний клік
-            self.poke()
-            self.double_clicked.emit()
+        # другий швидкий клік — просто ще один клік (Qt замість натискання надсилає подвійний)
+        self.mousePressEvent(e)
 
     # ---------------- перетягування файлів / тексту ----------------
     def dragEnterEvent(self, e) -> None:

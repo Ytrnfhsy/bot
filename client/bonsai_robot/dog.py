@@ -43,6 +43,11 @@ class DogWidget(RobotWidget):
         self._dirt: list[list[float]] = []  # [x, y, vx, vy, вік]
         self._next_dirt = 0.0
         self._tail_phase = 0.0
+        self._ear_kick = False
+
+    def poke(self) -> None:
+        super().poke()
+        self._ear_kick = True
 
     # ---------------- поза для поточного кадру ----------------
     def _look(self) -> tuple[str, str]:
@@ -90,11 +95,12 @@ class DogWidget(RobotWidget):
             ang, vel = self._ears[i]
             target = self._ear_target(st, face, side)
             force = 55 * (target - ang) - 7 * vel + max(-4000.0, min(4000.0, acc)) * 0.06
-            if self._squish > 0.9:  # клік — вушка підскакують
-                force += 2500
+            if self._ear_kick:  # клік — вушка підскакують
+                vel += 160
             vel += force * dt
             ang = max(-30.0, min(70.0, ang + vel * dt))
             self._ears[i] = [ang, vel]
+        self._ear_kick = False
         # грудочки землі, коли копає
         now = self.t
         if self.state == "working" and not self._drop_hover and now >= self._next_dirt:
