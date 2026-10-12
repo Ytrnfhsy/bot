@@ -8,17 +8,25 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 echo "==> git pull"
 git pull --ff-only
 
-reinstall() {  # $1 — venv, $2 — тека пакета
+reinstall() {  # $1 — venv, $2 — тека проєкту, $3 — назва Python-пакета
   local pip=("$1/bin/pip" install --quiet --disable-pip-version-check --no-cache-dir)
-  "${pip[@]}" "$2"  # нові залежності
-  "${pip[@]}" --force-reinstall --no-deps "$2"  # сам код
+  if "${pip[@]}" "$2" && "${pip[@]}" --force-reinstall --no-deps "$2"; then
+    return 0
+  fi
+  # pypi.org недоступний (немає інтернету, NetBird, IPv6…): оновлюємо сам код, копіюючи його у встановлений пакет
+  echo "⚠ pip не зміг завантажити залежності — копіюю новий код напряму (залежності лишаються попередні)"
+  local dest
+  dest="$("$1/bin/python" -c "import importlib.util, os; print(os.path.dirname(importlib.util.find_spec('$3').origin))")"
+  find "${dest}" -name '__pycache__' -type d -prune -exec rm -rf {} +
+  cp -r "$2/$3/." "${dest}/"
+  echo "Код оновлено у ${dest}"
 }
 
 updated=0
 SERVER_VENV="${HOME}/.local/share/bonsai-agent/venv"
 if [[ -x "${SERVER_VENV}/bin/pip" ]]; then
   echo "==> Сервер агента"
-  reinstall "${SERVER_VENV}" ./server
+  reinstall "${SERVER_VENV}" ./server bonsai_agent
   if systemctl --user cat bonsai-agent.service >/dev/null 2>&1; then
     systemctl --user restart bonsai-agent.service
     sleep 2
@@ -33,7 +41,7 @@ fi
 ROBOT_VENV="${HOME}/.local/share/bonsai-robot/venv"
 if [[ -x "${ROBOT_VENV}/bin/pip" ]]; then
   echo "==> Робот"
-  reinstall "${ROBOT_VENV}" ./client
+  reinstall "${ROBOT_VENV}" ./client bonsai_robot
   if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v bonsai-robot >/dev/null; then
     # запущена стара копія побачить нову версію й поступиться їй
     (bonsai-robot >/dev/null 2>&1 &)
