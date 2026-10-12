@@ -435,6 +435,14 @@ class RobotWindow(QWidget):
             self.panel.show_chat()
         if had_messages:
             self.panel.set_activity("📝 Новий чат. Попередній збережено — він у «Усі чати»")
+        # після того як Qt застосує приховування стрічки — ще раз підігнати висоту й позицію
+        # (раніше це «доробляло» лише повторне натискання «Новий чат»)
+        QTimer.singleShot(0, self._refit_panel)
+        QTimer.singleShot(120, self._refit_panel)
+
+    def _refit_panel(self) -> None:
+        self.panel._fit()
+        self.position_panel()
 
     def _switch_chat(self, chat_id: str, title: str) -> None:
         self.settings.session_id = chat_id
