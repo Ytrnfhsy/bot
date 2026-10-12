@@ -7,10 +7,11 @@ import sys
 import time
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QIcon, QPixmap
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -23,10 +24,10 @@ from PySide6.QtWidgets import (
 )
 
 from .connection import AgentConnection, normalize_url
+from .characters import CHARACTERS, make_character
 from .icon import app_icon
 from .winplatform import IS_WINDOWS, WinHotkey, autostart_enabled, set_autostart
 from .panel import ChatPanel
-from .robot import RobotWidget
 from .settings import Settings, new_session_id
 
 
@@ -44,11 +45,16 @@ class SettingsDialog(QDialog):
         self.token = QLineEdit(s.token)
         self.token.setEchoMode(QLineEdit.EchoMode.Password)
         self.scale = QDoubleSpinBox(minimum=0.5, maximum=2.0, singleStep=0.1, value=s.scale)
+        self.character = QComboBox()
+        for key, (title, _cls) in CHARACTERS.items():
+            self.character.addItem(title, key)
+        self.character.setCurrentIndex(max(0, self.character.findData(s.character)))
         self.thinking = QCheckBox("Показувати хід думок моделі")
         self.thinking.setChecked(s.show_thinking)
         form.addRow("Сервер (WebSocket):", self.url)
         form.addRow("Токен:", self.token)
-        form.addRow("Розмір робота:", self.scale)
+        form.addRow("Персонаж:", self.character)
+        form.addRow("Розмір:", self.scale)
         form.addRow("", self.thinking)
         self.autostart = None
         if IS_WINDOWS:
@@ -74,7 +80,7 @@ class RobotWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("Bonsai Robot")
 
-        self.robot = RobotWidget(settings.scale, self)
+        self.robot = make_character(settings.character, settings.scale, self)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.robot)
@@ -87,14 +93,7 @@ class RobotWindow(QWidget):
         self.thinking_buf = ""
 
         # сигнали
-        self.robot.clicked.connect(self.on_robot_clicked)
-        self.robot.double_clicked.connect(self.repeat_last_task)
-        self.robot.petted.connect(self.on_petted)
-        self.robot.files_dropped.connect(self.upload_files)
-        self.robot.text_dropped.connect(self.on_text_dropped)
-        self.robot.drag_moved.connect(self.on_drag)
-        self.robot.drag_finished.connect(self.save_position)
-        self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
+        self._connect_character()
         self.panel.task_submitted.connect(self.send_task)
         self.panel.chats_requested.connect(self.show_chats)
         # чати зберігає сервер автоматично; settings.session_id — id поточного чату
@@ -185,11 +184,40 @@ class RobotWindow(QWidget):
         self.menu.addSeparator()
         self.menu.addAction("✕ Вийти", QApplication.quit)
 
+    def _connect_character(self) -> None:
+        self.robot.clicked.connect(self.on_robot_clicked)
+        self.robot.double_clicked.connect(self.repeat_last_task)
+        self.robot.petted.connect(self.on_petted)
+        self.robot.files_dropped.connect(self.upload_files)
+        self.robot.text_dropped.connect(self.on_text_dropped)
+        self.robot.drag_moved.connect(self.on_drag)
+        self.robot.drag_finished.connect(self.save_position)
+        self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
+
+    def set_character(self, name: str) -> None:
+        """Перемкнути персонажа на льоту: стан і позиція зберігаються."""
+        if name not in CHARACTERS:
+            return
+        old = self.robot
+        self.robot = make_character(name, self.settings.scale, self)
+        self.robot.set_state(old.state)
+        self.layout().replaceWidget(old, self.robot)
+        old._timer.stop()
+        old.deleteLater()
+        self._connect_character()
+        self.robot.set_state("happy", 1.2, then=old.state if old.state != "happy" else "idle")
+        self.robot.show()
+        icon = app_icon(name)
+        QApplication.instance().setWindowIcon(icon)
+        self.setWindowIcon(icon)
+        if self.tray:
+            self.tray.setIcon(icon)
+
     def _build_tray(self) -> None:
         self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        self.tray = QSystemTrayIcon(app_icon(), self)
+        self.tray = QSystemTrayIcon(app_icon(self.settings.character), self)
         self.tray.setToolTip("Bonsai Robot")
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(
@@ -217,6 +245,10 @@ class RobotWindow(QWidget):
         s.show_thinking = dlg.thinking.isChecked()
         if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
             set_autostart(dlg.autostart.isChecked())
+        character = dlg.character.currentData()
+        if character != s.character:
+            s.character = character
+            self.set_character(character)
         if abs(dlg.scale.value() - s.scale) > 1e-3:
             s.scale = dlg.scale.value()
             self.robot.scale_factor = s.scale
@@ -763,6 +795,11 @@ def main() -> None:
             return
 
     settings = Settings.load()
+    if "--character" in sys.argv:  # лише на цей запуск, напр. --demo --character dog
+        args = sys.argv[sys.argv.index("--character") + 1 :]
+        if args and args[0] in CHARACTERS:
+            settings.character = args[0]
+    app.setWindowIcon(app_icon(settings.character))
     win = RobotWindow(settings, demo=demo)
     win.show()
     if demo:

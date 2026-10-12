@@ -28,6 +28,7 @@ class Settings:
     token: str = ""
     session_id: str = field(default_factory=lambda: new_session_id())  # поточний чат
     scale: float = 1.0
+    character: str = "robot"  # robot | dog
     pos_x: int | None = None
     pos_y: int | None = None
     sleep_after_sec: int = 180

@@ -148,6 +148,21 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     step(50, lambda: check("history_page", history_flow))
+
+    def character_flow():
+        from .dog import DogWidget
+
+        win.set_character("dog")
+        need(isinstance(win.robot, DogWidget) and win.robot.isVisible(), "таксик не з'явився")
+        img = win.robot.grab().toImage()
+        opaque = sum(1 for x in range(0, img.width(), 7) for y in range(0, img.height(), 7) if img.pixelColor(x, y).alpha() > 0)
+        need(opaque > 50, f"таксик не намалювався ({opaque})")
+        win.robot.grab().save(str(report.with_name("selftest-dog.png")))
+        win.set_character("robot")
+        need(type(win.robot).__name__ == "RobotWidget", "не повернувся робот")
+        return {"dog_opaque_samples": opaque}
+
+    step(50, lambda: check("character_switch", character_flow))
     step(50, lambda: win.on_robot_clicked())
     step(600, lambda: check("panel_hide", lambda: (need(not win.panel.isVisible(), "панель не сховалась"), "ok")[-1]))
 

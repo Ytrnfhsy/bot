@@ -54,6 +54,7 @@ def _lerp(a: float, b: float, k: float) -> float:
 
 
 class RobotWidget(QWidget):
+    PURR_TEXT = "мрр~"  # що «каже» персонаж, коли його гладять
     clicked = Signal()
     double_clicked = Signal()
     petted = Signal()  # почав муркотіти
@@ -276,7 +277,7 @@ class RobotWidget(QWidget):
             col = QColor("#E8589A")
             col.setAlphaF(min(1.0, (self._purr - 0.6) * 2.5) * (0.6 + 0.4 * math.sin(t * 4)))
             p.setPen(col)
-            p.drawText(QPointF(150, 70 + bob + 3 * math.sin(t * 3)), "мрр~")
+            p.drawText(QPointF(150, 70 + bob + 3 * math.sin(t * 3)), self.PURR_TEXT)
 
     def _metal(self, rect: QRectF, light: str = "#FFFFFF", dark: str = "#C9D6E8") -> QLinearGradient:
         g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
