@@ -461,7 +461,9 @@ class ChatPanel(QWidget):
     def _fit(self) -> None:
         """Підігнати висоту під вміст. (adjustSize() у Qt обрізає вікно до ⅔ екрана — тоді запити «зникали».)"""
         self.layout().activate()
-        self.resize(self.width(), self.sizeHint().height())
+        # фіксована висота (min = max): віконний менеджер (KWin/XWayland) не може лишити старий, більший
+        # розмір, коли вміст зменшився, — інакше після «Новий чат» панель лишалась високою з порожнечею
+        self.setFixedHeight(self.sizeHint().height())
 
     # ---------------- вбудовані запити ----------------
     def ask(self, text: str, buttons: list[tuple[str, str, str]], callback, input_text: str | None = None,
