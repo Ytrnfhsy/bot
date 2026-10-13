@@ -35,6 +35,7 @@ class Settings:
     pos_y: int | None = None
     sleep_after_sec: int = 180
     show_thinking: bool = False
+    show_tools: bool = False  # рядки «🔧 read_file: …» — що саме робить агент
     last_task: str = ""
 
     @classmethod

@@ -51,11 +51,14 @@ class SettingsDialog(QDialog):
         self.character.setCurrentIndex(max(0, self.character.findData(s.character)))
         self.thinking = QCheckBox("Показувати хід думок моделі")
         self.thinking.setChecked(s.show_thinking)
+        self.tools = QCheckBox("Показувати дії агента (🔧 read_file, web_search…)")
+        self.tools.setChecked(s.show_tools)
         form.addRow("Сервер (WebSocket):", self.url)
         form.addRow("Токен:", self.token)
         form.addRow("Персонаж:", self.character)
         form.addRow("Розмір:", self.scale)
         form.addRow("", self.thinking)
+        form.addRow("", self.tools)
         self.autostart = None
         if IS_WINDOWS:
             self.autostart = QCheckBox("Запускати разом із Windows")
@@ -68,6 +71,25 @@ class SettingsDialog(QDialog):
         lay.addLayout(form)
         lay.addWidget(buttons)
         self.resize(460, 0)
+
+
+# що показувати замість технічної назви інструмента, коли дії агента приховані
+TOOL_ACTIVITY = {
+    "web_search": "🔎 Шукаю в інтернеті…",
+    "fetch_url": "🌐 Читаю сторінку…",
+    "read_file": "📖 Читаю файл…",
+    "list_dir": "📂 Переглядаю файли…",
+    "search_files": "📂 Шукаю у файлах…",
+    "write_file": "✍️ Записую файл…",
+    "edit_file": "✍️ Редагую файл…",
+    "run_shell": "⚙️ Виконую команду…",
+    "run_python": "🧮 Рахую…",
+    "remember": "🧠 Запам'ятовую…",
+    "recall": "🧠 Пригадую…",
+    "forget": "🧠 Забуваю…",
+    "view_image": "👁 Дивлюся на зображення…",
+    "current_datetime": "🕒 Дивлюся на годинник…",
+}
 
 
 class RobotWindow(QWidget):
@@ -87,6 +109,7 @@ class RobotWindow(QWidget):
         self.adjustSize()
 
         self.panel = ChatPanel()
+        self.panel.show_tools = settings.show_tools
         self.conn = AgentConnection(settings.server_url, settings.token, self)
         self.busy = False
         self.last_activity = time.monotonic()
@@ -242,6 +265,8 @@ class RobotWindow(QWidget):
         changed_conn = (url, dlg.token.text().strip()) != (s.server_url, s.token)
         s.server_url, s.token = url, dlg.token.text().strip()
         s.show_thinking = dlg.thinking.isChecked()
+        s.show_tools = dlg.tools.isChecked()
+        self.panel.set_show_tools(s.show_tools)
         if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
             set_autostart(dlg.autostart.isChecked())
         character = dlg.character.currentData()
@@ -632,7 +657,11 @@ class RobotWindow(QWidget):
                 self.panel.set_activity(f"💭 Думаю… (крок {ev.get('step', 1)})")
             elif state == "working":
                 self.robot.set_state("working")
-                self.panel.set_activity(f"🔧 Працюю: {ev.get('tool', '')}")
+                tool = ev.get("tool", "")
+                if self.settings.show_tools:
+                    self.panel.set_activity(f"🔧 Працюю: {tool}")
+                else:
+                    self.panel.set_activity(TOOL_ACTIVITY.get(tool, "🔧 Працюю…"))
             elif state == "waiting_confirm":
                 self.robot.set_state("waiting")
                 self.panel.set_activity("⏳ Чекаю на твій дозвіл")
