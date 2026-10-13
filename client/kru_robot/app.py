@@ -49,14 +49,19 @@ class SettingsDialog(QDialog):
         for key, (title, _cls) in CHARACTERS.items():
             self.character.addItem(title, key)
         self.character.setCurrentIndex(max(0, self.character.findData(s.character)))
+        self.think = QCheckBox("Думати перед відповіддю (розумніше, але повільніше)")
+        self.think.setChecked(s.think)
         self.thinking = QCheckBox("Показувати хід думок моделі")
         self.thinking.setChecked(s.show_thinking)
+        self.thinking.setEnabled(s.think)  # без міркувань показувати нічого
+        self.think.toggled.connect(self.thinking.setEnabled)
         self.tools = QCheckBox("Показувати дії агента (🔧 read_file, web_search…)")
         self.tools.setChecked(s.show_tools)
         form.addRow("Сервер (WebSocket):", self.url)
         form.addRow("Токен:", self.token)
         form.addRow("Персонаж:", self.character)
         form.addRow("Розмір:", self.scale)
+        form.addRow("", self.think)
         form.addRow("", self.thinking)
         form.addRow("", self.tools)
         self.autostart = None
@@ -264,6 +269,7 @@ class RobotWindow(QWidget):
         url = normalize_url(dlg.url.text())  # зберігаємо вже виправлену адресу — видно, куди підключаємось
         changed_conn = (url, dlg.token.text().strip()) != (s.server_url, s.token)
         s.server_url, s.token = url, dlg.token.text().strip()
+        s.think = dlg.think.isChecked()
         s.show_thinking = dlg.thinking.isChecked()
         s.show_tools = dlg.tools.isChecked()
         self.panel.set_show_tools(s.show_tools)
@@ -298,7 +304,8 @@ class RobotWindow(QWidget):
 
     def send_task(self, text: str) -> None:
         self.touch()
-        if not self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id}):
+        if not self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
+                           "think": self.settings.think}):
             # немає з'єднання: пробуємо підключитися зараз і надішлемо задачу, щойно вийде
             self._pending_task = text
             self.conn.reconnect_now()
@@ -590,7 +597,8 @@ class RobotWindow(QWidget):
     def on_connected(self) -> None:
         self.robot.set_state("happy", 1.5)
         text, self._pending_task = getattr(self, "_pending_task", None), None
-        if text and self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id}):
+        if text and self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
+                           "think": self.settings.think}):
             if text != self.settings.last_task:
                 self.settings.last_task = text
                 self.settings.save()

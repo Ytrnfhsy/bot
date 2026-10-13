@@ -15,8 +15,8 @@ class FakeLLM:
         self.script = list(script)
         self.calls: list[dict[str, Any]] = []
 
-    async def chat(self, messages, tools=None, on_token=None) -> ChatResult:
-        self.calls.append({"messages": messages, "tools": tools})
+    async def chat(self, messages, tools=None, on_token=None, think=None) -> ChatResult:
+        self.calls.append({"messages": messages, "tools": tools, "think": think})
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item

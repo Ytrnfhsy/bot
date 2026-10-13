@@ -319,7 +319,9 @@ class Agent:
         emit: EmitFunc,
         confirm: ConfirmFunc,
         user: User | None = None,
+        think: bool | None = None,
     ) -> str:
+        """think — чи міркувати моделі перед відповіддю (None — як налаштовано на сервері моделі)."""
         ctx = self.make_context(user)
         lock = self._session_locks.setdefault(f"{ctx.owner}:{session_id}", asyncio.Lock())
         async with lock:
@@ -342,7 +344,7 @@ class Agent:
 
             persist()
             try:
-                return await self._loop(history, user_text, emit, confirm, ctx, persist)
+                return await self._loop(history, user_text, emit, confirm, ctx, persist, think)
             finally:
                 persist()
 
@@ -354,10 +356,11 @@ class Agent:
         confirm: ConfirmFunc,
         ctx: ToolContext,
         persist: Callable[[], None] = lambda: None,
+        think: bool | None = None,
     ) -> str:
         for step in range(1, self.config.max_steps + 1):
             await emit({"type": "status", "state": "thinking", "step": step})
-            result = await self._call_llm(history, user_text, emit, ctx)
+            result = await self._call_llm(history, user_text, emit, ctx, think)
 
             calls = self._extract_calls(result)
             if not calls:
@@ -396,7 +399,8 @@ class Agent:
         return answer
 
     async def _call_llm(
-        self, history: list[dict[str, Any]], user_text: str, emit: EmitFunc, ctx: ToolContext
+        self, history: list[dict[str, Any]], user_text: str, emit: EmitFunc, ctx: ToolContext,
+        think: bool | None = None,
     ) -> ChatResult:
         async def on_token(kind: str, text: str) -> None:
             if kind == "thinking":
@@ -410,10 +414,12 @@ class Agent:
             msgs = self._attach_images(msgs, ctx)
             messages = [{"role": "system", "content": self._system_prompt(user_text, ctx)}, *msgs]
             try:
+                extra = {} if think is None else {"think": think}
                 return await self.llm.chat(
                     messages,
                     tools=self.registry.schemas(ctx.denied_tools) if self.native_tools else None,
                     on_token=on_token,
+                    **extra,
                 )
             except VisionNotSupported:
                 if not self.vision:

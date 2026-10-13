@@ -104,7 +104,9 @@ class OllamaClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         on_token: TokenCallback | None = None,
+        think: bool | None = None,
     ) -> ChatResult:
+        """think — увімкнути/вимкнути міркування для цього запиту (None — як налаштовано на сервері моделі)."""
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": _ollama_messages(messages),
@@ -114,8 +116,9 @@ class OllamaClient:
         }
         if tools:
             payload["tools"] = tools
-        if self.think is not None:
-            payload["think"] = self.think
+        think = self.think if think is None else think
+        if think is not None:
+            payload["think"] = think
 
         try:
             return await self._stream(payload, on_token)
@@ -260,7 +263,9 @@ class OpenAICompatClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         on_token: TokenCallback | None = None,
+        think: bool | None = None,
     ) -> ChatResult:
+        """think — увімкнути/вимкнути міркування для цього запиту (None — як налаштовано на сервері моделі)."""
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": self.convert_messages(messages),
@@ -270,6 +275,8 @@ class OpenAICompatClient:
             payload["temperature"] = self.temperature
         if tools:
             payload["tools"] = tools
+        if think is not None:  # Qwen3.x у llama-server: чат-шаблон вмикає/вимикає блок міркувань
+            payload["chat_template_kwargs"] = {"enable_thinking": think}
         result = ChatResult()
         partial: dict[int, dict[str, Any]] = {}
         try:

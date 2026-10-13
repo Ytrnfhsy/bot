@@ -215,6 +215,9 @@ async def test_openai_compat_stream():
     assert json.loads(msgs[1]["tool_calls"][0]["function"]["arguments"]) == {"query": "a"}
     # без явного KRU_TEMPERATURE діють --temp/--top-p/--top-k самого llama-server
     assert "temperature" not in seen["body"]
+    assert "chat_template_kwargs" not in seen["body"]  # без вибору — як налаштовано на сервері моделі
+    await c.chat(history, think=False)
+    assert seen["body"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_env_example_is_qwen(monkeypatch):
