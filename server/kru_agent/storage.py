@@ -89,8 +89,14 @@ class Storage:
 
     def _migrate(self) -> None:
         """Старі бази: додати власника й метадані чатів, перенести «збережені чати» в звичайні чати."""
-        if "owner" not in self._columns("memories"):
-            self._db.execute("ALTER TABLE memories ADD COLUMN owner TEXT NOT NULL DEFAULT 'owner'")
+        mcols = self._columns("memories")
+        for name, ddl in (
+            ("owner", "TEXT NOT NULL DEFAULT 'owner'"),
+            ("embedding", "BLOB"),  # вектор для пошуку за змістом (float32)
+            ("embed_model", "TEXT NOT NULL DEFAULT ''"),  # якою моделлю його пораховано
+        ):
+            if name not in mcols:
+                self._db.execute(f"ALTER TABLE memories ADD COLUMN {name} {ddl}")
         cols = self._columns("sessions")
         for name, ddl in (
             ("owner", "TEXT NOT NULL DEFAULT 'owner'"),
@@ -99,6 +105,8 @@ class Storage:
             ("auto_title", "INTEGER NOT NULL DEFAULT 1"),  # назву ще не задавали вручну
             ("count", "INTEGER NOT NULL DEFAULT 0"),  # кількість повідомлень користувача
             ("created_at", "REAL NOT NULL DEFAULT 0"),
+            ("summary", "TEXT NOT NULL DEFAULT ''"),  # стислий підсумок початку довгої розмови
+            ("summary_upto", "INTEGER NOT NULL DEFAULT 0"),  # скільки перших повідомлень він охоплює
         ):
             if name not in cols:
                 self._db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {ddl}")
@@ -160,6 +168,31 @@ class Storage:
                 ).fetchall()
         return [dict(r) for r in rows]
 
+    def memories_without_embedding(self, owner: str, model: str, limit: int = 32) -> list[tuple[int, str]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, content, tags FROM memories WHERE owner = ? AND (embedding IS NULL OR embed_model != ?)"
+                " ORDER BY id LIMIT ?",
+                (owner, model, limit),
+            ).fetchall()
+        return [(r["id"], r["content"] + (f" ({r['tags']})" if r["tags"] else "")) for r in rows]
+
+    def set_embeddings(self, items: list[tuple[int, bytes]], model: str) -> None:
+        with self._lock, self._db:
+            self._db.executemany(
+                "UPDATE memories SET embedding = ?, embed_model = ? WHERE id = ?",
+                [(blob, model, mid) for mid, blob in items],
+            )
+
+    def memory_vectors(self, owner: str, model: str) -> list[tuple[dict[str, Any], bytes]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, content, tags, created_at, embedding FROM memories"
+                " WHERE owner = ? AND embedding IS NOT NULL AND embed_model = ?",
+                (owner, model),
+            ).fetchall()
+        return [({k: r[k] for k in ("id", "content", "tags", "created_at")}, r["embedding"]) for r in rows]
+
     def recent_memories(self, limit: int = 5, owner: str = "owner") -> list[dict[str, Any]]:
         with self._lock:
             rows = self._db.execute(
@@ -212,6 +245,20 @@ class Storage:
             return None
         return {"id": row["sid"], "title": row["title"], "messages": json.loads(row["messages"]),
                 "created_at": row["created_at"], "updated_at": row["updated_at"]}
+
+    def load_summary(self, session_id: str, owner: str = "owner") -> tuple[str, int]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT summary, summary_upto FROM sessions WHERE id = ?", (_key(owner, session_id),)
+            ).fetchone()
+        return (row["summary"], row["summary_upto"]) if row else ("", 0)
+
+    def save_summary(self, session_id: str, summary: str, upto: int, owner: str = "owner") -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE sessions SET summary = ?, summary_upto = ? WHERE id = ?",
+                (summary, upto, _key(owner, session_id)),
+            )
 
     def rename_chat(self, session_id: str, title: str, owner: str = "owner") -> bool:
         with self._lock, self._db:

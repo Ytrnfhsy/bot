@@ -27,6 +27,7 @@ class ToolContext:
     denied_tools: frozenset[str] = frozenset()  # недоступні цьому користувачу
     vision_ok: bool = True  # чи може поточна модель бачити зображення
     pending_images: list[str] = field(default_factory=list)  # картинки, які view_image просить показати моделі
+    memory: Any = None  # semantic.MemoryIndex — пошук пам'яті за змістом (None — лише за словами)
 
     def __post_init__(self) -> None:
         if self.workspace is None:

@@ -670,6 +670,9 @@ class RobotWindow(QWidget):
                     self.panel.set_activity(f"🔧 Працюю: {tool}")
                 else:
                     self.panel.set_activity(TOOL_ACTIVITY.get(tool, "🔧 Працюю…"))
+            elif state == "summarizing":
+                self.robot.set_state("thinking")
+                self.panel.set_activity("🗜 Стискаю довгу розмову, щоб нічого не забути…")
             elif state == "waiting_confirm":
                 self.robot.set_state("waiting")
                 self.panel.set_activity("⏳ Чекаю на твій дозвіл")
@@ -686,8 +689,13 @@ class RobotWindow(QWidget):
             self.panel.append_draft(ev.get("text", ""))
         elif t == "tool_call":
             self.panel.clear_draft()
-            summary = " ".join(str(ev.get("summary", "")).split())[:140]
-            self.panel.add_entry("tool", f"🔧 {ev.get('name')}: {summary}")
+            if ev.get("name") == "remember":
+                args = ev.get("args") if isinstance(ev.get("args"), dict) else {}
+                fact = " ".join(str(args.get("content", "")).split())[:200]
+                self.panel.add_entry("tool", f"🧠 Запам'ятав: {fact}")
+            else:
+                summary = " ".join(str(ev.get("summary", "")).split())[:140]
+                self.panel.add_entry("tool", f"🔧 {ev.get('name')}: {summary}")
         elif t == "tool_result":
             if not ev.get("ok"):
                 self.panel.add_entry("tool", f"✗ {ev.get('name')}: {str(ev.get('preview', ''))[:140]}")

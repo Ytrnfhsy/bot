@@ -8,7 +8,11 @@
 #     curl -L -C - -o ~/bot/mmproj-Qwen3.6-35B-A3B-F16.gguf \
 #       https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf
 #
-# Запуск/зупинка — простіше через ../model.sh start | stop | status (127.0.0.1:8085).
+#   пам'ять за змістом — маленька модель ембедингів (~0.6 ГБ, працює на CPU; model.sh завантажує сама):
+#     curl -L -C - -o ~/bot/Qwen3-Embedding-0.6B-Q8_0.gguf \
+#       https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf
+#
+# Запуск/зупинка — простіше через ../model.sh start | stop | status (127.0.0.1:8085, ембединги — :8086).
 
 services:
   qwen36:
@@ -71,3 +75,35 @@ services:
       timeout: 5s
       retries: 40
       start_period: 120s
+
+  # Ембединги для пошуку пам'яті за змістом. Лише CPU — відеопам'ять лишається основній моделі.
+  embed:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: kru-embed
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8086:8080"
+    volumes:
+      - ${MODEL_DIR:-../..}:/models:ro
+    environment:
+      EMBED_FILE: ${EMBED_FILE:-Qwen3-Embedding-0.6B-Q8_0.gguf}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        exec /app/llama-server \
+          -m "/models/$$EMBED_FILE" \
+          --alias qwen3-embedding-0.6b \
+          --host 0.0.0.0 --port 8080 \
+          --embedding --pooling last \
+          -c 8192 -b 8192 -ub 8192 -t 4
+    mem_limit: 2g
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s

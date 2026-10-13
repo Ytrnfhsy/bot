@@ -8,12 +8,14 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from .config import Config
 from .images import find_image_refs, is_image, load_image
 from .llm import ChatResult, OllamaClient, OpenAICompatClient, ToolsNotSupported, VisionNotSupported, create_llm
+from .semantic import Embedder, MemoryIndex
 from .storage import Storage
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
@@ -40,9 +42,13 @@ How to work:
 - Use run_python for calculations and data processing instead of computing in your head.
 - Before editing a file, read it. Prefer edit_file for small changes.
 - run_shell, run_python, write_file and edit_file require user approval; if the user declines, adapt or ask.
-- Save durable useful facts about the user or their projects with `remember`; use `recall` when past context may help.
+- Long-term memory: when the user tells you something durable — about themselves, their preferences, family/people,
+  plans, projects, decisions or setup (e.g. "my daughter is 5", "I prefer short answers", "the server runs Fedora") —
+  save it right away with `remember` as one short self-contained fact, without asking. Do not save trivia, one-off
+  requests or secrets (passwords, tokens, keys). If `remember` shows a similar memory that is now outdated or
+  contradicts the new fact, `forget` the old one. Use `recall` (it searches by meaning) when past context may help.
 - When the task is done, reply with the final answer only (no tool call). Be concise but complete; use Markdown.
-{vision}{memories}"""
+{vision}{memories}{summary}"""
 
 JSON_PROTOCOL = """
 TOOLS — you call them by replying with ONLY a JSON object in a ```json code block, exactly one per message:
@@ -130,6 +136,62 @@ def _normalize_args(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _is_user_turn(m: dict[str, Any]) -> bool:
+    """Справжнє повідомлення користувача (не результат інструмента в JSON-протоколі)."""
+    return m.get("role") == "user" and not str(m.get("content") or "").startswith(("TOOL RESULT", "[view_image]"))
+
+
+def _msg_size(m: dict[str, Any]) -> int:
+    return (
+        len(m.get("content") or "")
+        + len(json.dumps(m.get("tool_calls", ""), ensure_ascii=False))
+        + 2500 * len(m.get("images") or [])  # картинка ≈ кілька тисяч токенів
+    )
+
+
+SUMMARY_PROMPT = """You maintain a running summary of a long conversation between a user and an AI assistant ({name}).
+Merge the previous summary with the new messages into ONE updated summary, written in {language}.
+Keep: what the user wants and why, facts about the user, decisions made, important results and numbers,
+file names/paths, URLs, commands that worked, open questions and unfinished tasks. Drop greetings, chit-chat,
+raw tool output and anything already superseded. Use compact bullet points, at most ~350 words.
+Reply with the summary only."""
+
+SUMMARY_CHUNK = 40000  # символів нових повідомлень за один виклик підсумовування
+
+
+def _render_for_summary(msgs: list[dict[str, Any]]) -> str:
+    lines = []
+    for m in msgs:
+        role, content = m.get("role"), strip_think(str(m.get("content") or ""))
+        if role == "user" and _is_user_turn(m):
+            lines.append(f"USER: {content[:4000]}")
+        elif role == "assistant":
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                args = json.dumps(_normalize_args(fn.get("arguments")), ensure_ascii=False)
+                lines.append(f"ASSISTANT called {fn.get('name')}({args[:300]})")
+            if content:
+                lines.append(f"ASSISTANT: {content[:4000]}")
+        elif content:  # результат інструмента
+            lines.append(f"TOOL RESULT ({m.get('tool_name', 'tool')}): {content[:1200]}")
+    return "\n".join(lines)
+
+
+@dataclass
+class Turn:
+    """Одна задача в чаті: історія, підсумок її початку та знайдені спогади."""
+
+    session_id: str
+    history: list[dict[str, Any]]
+    user_text: str
+    ctx: ToolContext
+    persist: Callable[[], None] = lambda: None
+    think: bool | None = None
+    summary: str = ""
+    summary_upto: int = 0  # скільки перших повідомлень history охоплює summary
+    memories: list[dict[str, Any]] = field(default_factory=list)
+
+
 class Agent:
     def __init__(
         self,
@@ -143,6 +205,8 @@ class Agent:
         self.llm = llm or create_llm(config)
         self.storage = storage or Storage(config.db_path)
         self.registry = registry or build_registry()
+        self.embedder = Embedder(config)
+        self.memory = MemoryIndex(self.storage, self.embedder, config.memory_min_score)
         self.native_tools = config.tool_mode != "json"
         self.vision = config.vision != "off"
         self.vision_reason = ""  # чому зору немає (для користувача)
@@ -162,17 +226,21 @@ class Agent:
             allow_outside=self.config.allow_outside_workspace and user.is_admin,
             denied_tools=frozenset() if user.is_admin else ADMIN_ONLY_TOOLS,
             vision_ok=self.vision,
+            memory=self.memory,
         )
 
     # ---------------- побудова контексту ----------------
-    def _system_prompt(self, user_text: str, ctx: ToolContext) -> str:
+    def _system_prompt(self, turn: Turn) -> str:
+        ctx = turn.ctx
         memories = ""
-        try:
-            items = self.storage.search_memories(user_text, limit=6, owner=ctx.owner)
-        except Exception:  # noqa: BLE001
-            items = []
-        if items:
-            memories = "\nRelevant long-term memories (may be useful):\n" + format_memories(items) + "\n"
+        if turn.memories:
+            memories = "\nRelevant long-term memories (may be useful):\n" + format_memories(turn.memories) + "\n"
+        summary = ""
+        if turn.summary and turn.summary_upto:
+            summary = (
+                "\nSummary of the earlier part of THIS conversation (older messages were compressed to save context):\n"
+                + turn.summary + "\n"
+            )
         prompt = SYSTEM_PROMPT.format(
             now=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z (%A)"),
             workspace=ctx.workspace,
@@ -190,27 +258,76 @@ class Agent:
                 "on the server; do not try to read images with scripts or OCR.\n"
             ),
             memories=memories,
+            summary=summary,
         )
         if not self.native_tools:
             prompt += JSON_PROTOCOL.format(catalog=self.registry.text_catalog(ctx.denied_tools))
         return prompt
 
-    def _trim_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        def size(m: dict[str, Any]) -> int:
-            return (
-                len(m.get("content") or "")
-                + len(json.dumps(m.get("tool_calls", ""), ensure_ascii=False))
-                + 2500 * len(m.get("images") or [])  # картинка ≈ кілька тисяч токенів
-            )
-
+    def _trim_history(self, history: list[dict[str, Any]], budget: int | None = None) -> list[dict[str, Any]]:
+        """Жорстке обрізання з початку — запасний варіант, коли підсумок не допоміг або вимкнений."""
+        budget = self.config.max_history_chars if budget is None else budget
         msgs = list(history)
-        total = sum(size(m) for m in msgs)
-        while msgs and total > self.config.max_history_chars and len(msgs) > 1:
-            total -= size(msgs.pop(0))
+        total = sum(_msg_size(m) for m in msgs)
+        while msgs and total > budget and len(msgs) > 1:
+            total -= _msg_size(msgs.pop(0))
         # контекст має починатися з повідомлення користувача
         while msgs and msgs[0].get("role") != "user":
             msgs.pop(0)
         return msgs
+
+    def _budget(self, summary: str) -> int:
+        """Скільки символів історії влазить поруч із підсумком (підсумок не з'їдає більше половини)."""
+        return max(self.config.max_history_chars // 2, self.config.max_history_chars - len(summary))
+
+    async def _fit_history(self, turn: Turn, emit: EmitFunc) -> list[dict[str, Any]]:
+        """Що з історії піде моделі. Коли розмова не влазить у контекст, старі повідомлення
+        стискаються в підсумок (з запасом, щоб не підсумовувати на кожному кроці)."""
+        history = turn.history
+        start = min(turn.summary_upto, len(history))
+        budget = self._budget(turn.summary)
+        total = sum(_msg_size(m) for m in history[start:])
+        if total > budget and self.config.summarize:
+            target, cut, rest = int(budget * 0.6), start, total
+            while rest > target and cut < len(history) - 1:
+                rest -= _msg_size(history[cut])
+                cut += 1
+            while cut < len(history) and not _is_user_turn(history[cut]):
+                cut += 1  # різати лише перед повідомленням користувача: пари виклик/результат не рвуться
+            last_user = max((i for i, m in enumerate(history) if _is_user_turn(m)), default=0)
+            cut = min(cut, last_user)  # поточну задачу не підсумовуємо
+            if cut > start:
+                await emit({"type": "status", "state": "summarizing"})
+                try:
+                    summary = await self._summarize(turn.summary, history[start:cut])
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — без підсумку просто обріжемо, як раніше
+                    log.warning("Не вдалося стиснути історію: %s", e)
+                    summary = ""
+                if summary:
+                    turn.summary, turn.summary_upto, start = summary, cut, cut
+                    self.storage.save_summary(turn.session_id, summary, cut, turn.ctx.owner)
+                    budget = self._budget(summary)
+        return self._trim_history(history[start:], budget)
+
+    async def _summarize(self, previous: str, msgs: list[dict[str, Any]]) -> str:
+        text = _render_for_summary(msgs)
+        summary = previous
+        system = SUMMARY_PROMPT.format(name=self.config.agent_name, language=self.config.language)
+        for i in range(0, len(text), SUMMARY_CHUNK):
+            chunk = text[i : i + SUMMARY_CHUNK]
+            result = await self.llm.chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"PREVIOUS SUMMARY:\n{summary or '(none)'}\n\nNEW MESSAGES:\n{chunk}"},
+                ],
+                think=False,
+            )
+            summary = strip_think(result.content)
+            if not summary:
+                raise ValueError("модель повернула порожній підсумок")
+        return summary.strip()
 
     def _to_json_protocol(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Конвертує нативну історію (tool_calls / role=tool) у текстовий JSON-протокол."""
@@ -343,24 +460,22 @@ class Agent:
                 self.storage.save_session(session_id, history, ctx.owner)
 
             persist()
+            summary, upto = self.storage.load_summary(session_id, ctx.owner)
+            turn = Turn(session_id, history, user_text, ctx, persist, think, summary, upto)
             try:
-                return await self._loop(history, user_text, emit, confirm, ctx, persist, think)
+                turn.memories = await self.memory.search(user_text, ctx.owner, limit=6)
+            except Exception:  # noqa: BLE001 — без спогадів теж можна працювати
+                log.exception("Пошук у пам'яті не вдався")
+            try:
+                return await self._loop(turn, emit, confirm)
             finally:
                 persist()
 
-    async def _loop(
-        self,
-        history: list[dict[str, Any]],
-        user_text: str,
-        emit: EmitFunc,
-        confirm: ConfirmFunc,
-        ctx: ToolContext,
-        persist: Callable[[], None] = lambda: None,
-        think: bool | None = None,
-    ) -> str:
+    async def _loop(self, turn: Turn, emit: EmitFunc, confirm: ConfirmFunc) -> str:
+        history, ctx = turn.history, turn.ctx
         for step in range(1, self.config.max_steps + 1):
             await emit({"type": "status", "state": "thinking", "step": step})
-            result = await self._call_llm(history, user_text, emit, ctx, think)
+            result = await self._call_llm(turn, emit)
 
             calls = self._extract_calls(result)
             if not calls:
@@ -387,7 +502,7 @@ class Agent:
                 paths = list(dict.fromkeys(ctx.pending_images))
                 history.append({"role": "user", "content": "[view_image] " + ", ".join(paths), "images": paths})
                 await emit({"type": "vision", "state": "attached", "images": paths})
-            persist()
+            turn.persist()
 
         answer = (
             f"Я зробив {self.config.max_steps} кроків і не встиг завершити задачу. "
@@ -398,10 +513,9 @@ class Agent:
         await emit({"type": "status", "state": "idle"})
         return answer
 
-    async def _call_llm(
-        self, history: list[dict[str, Any]], user_text: str, emit: EmitFunc, ctx: ToolContext,
-        think: bool | None = None,
-    ) -> ChatResult:
+    async def _call_llm(self, turn: Turn, emit: EmitFunc) -> ChatResult:
+        ctx, think = turn.ctx, turn.think
+
         async def on_token(kind: str, text: str) -> None:
             if kind == "thinking":
                 await emit({"type": "thinking", "text": text})
@@ -409,10 +523,10 @@ class Agent:
                 await emit({"type": "token", "text": text})
 
         while True:
-            trimmed = self._trim_history(history)
+            trimmed = await self._fit_history(turn, emit)
             msgs = trimmed if self.native_tools else self._to_json_protocol(trimmed)
             msgs = self._attach_images(msgs, ctx)
-            messages = [{"role": "system", "content": self._system_prompt(user_text, ctx)}, *msgs]
+            messages = [{"role": "system", "content": self._system_prompt(turn)}, *msgs]
             try:
                 extra = {} if think is None else {"think": think}
                 return await self.llm.chat(
@@ -521,3 +635,4 @@ class Agent:
 
     async def close(self) -> None:
         await self.llm.close()
+        await self.embedder.close()

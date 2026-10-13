@@ -47,6 +47,7 @@ async def test_user_message_survives_crash(cfg):
 
 async def test_manual_title_kept_and_long_history_not_trimmed(cfg):
     cfg.max_history_chars = 200
+    cfg.summarize = False  # підсумовування — у test_memory.py
     agent = Agent(cfg, llm=FakeLLM([text("а" * 300), text("б")]))
     rec = Recorder()
     await agent.run("c", "перше", rec.emit, rec.confirm)
