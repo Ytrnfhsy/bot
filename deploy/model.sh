@@ -4,6 +4,9 @@
 #   deploy/model.sh stop     — зупинити
 #   deploy/model.sh status   — що запущено і скільки зайнято VRAM
 #
+# Разом з основною моделлю запускається маленька модель ембедингів (CPU, :8086) — пам'ять агента
+# шукається за змістом. Без неї агент шукає в пам'яті лише за словами.
+#
 # Змінні: MODEL_DIR — де лежать .gguf (типово корінь репозиторію).
 set -euo pipefail
 
@@ -15,8 +18,12 @@ MODEL_FILE="${MODEL_FILE:-Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}"
 MODEL_URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/${MODEL_FILE}"
 MMPROJ_FILE="${MMPROJ_FILE:-mmproj-Qwen3.6-35B-A3B-F16.gguf}"
 MMPROJ_URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf"
+EMBED_FILE="${EMBED_FILE:-Qwen3-Embedding-0.6B-Q8_0.gguf}"
+EMBED_URL_DL="https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/${EMBED_FILE}"
 ENV_FILE="${HOME}/.config/kru.env"
 LLM_URL="http://127.0.0.1:8085"
+EMBED_URL="http://127.0.0.1:8086"
+export EMBED_FILE
 export MODEL_DIR
 
 set_key() {  # set_key KEY VALUE — оновити (або додати) KRU_KEY у конфігу агента
@@ -56,7 +63,19 @@ case "${1:-}" in
       echo "ℹ Зір вимкнено — для розуміння зображень завантаж (~0.9 ГБ) і запусти знову:"
       echo "  curl -L -C - -o '${MODEL_DIR}/${MMPROJ_FILE}' '${MMPROJ_URL}'"
     fi
-    docker compose -f "${COMPOSE}" up -d
+    SERVICES="qwen36"
+    if [[ ! -f "${MODEL_DIR}/${EMBED_FILE}" ]]; then
+      echo "🧠 Завантажую модель ембедингів для пам'яті за змістом (~0.6 ГБ)…"
+      curl -fL -C - -o "${MODEL_DIR}/${EMBED_FILE}.part" "${EMBED_URL_DL}" \
+        && mv "${MODEL_DIR}/${EMBED_FILE}.part" "${MODEL_DIR}/${EMBED_FILE}" \
+        || echo "⚠ Не вдалося завантажити — пам'ять шукатиметься лише за словами. Спробуй пізніше: $0 start"
+    fi
+    if [[ -f "${MODEL_DIR}/${EMBED_FILE}" ]]; then
+      SERVICES="qwen36 embed"
+      echo "🧠 Пам'ять за змістом: увімкнено (${EMBED_FILE})"
+    fi
+    # shellcheck disable=SC2086
+    docker compose -f "${COMPOSE}" up -d ${SERVICES}
     wait_ready
     set_key MODEL qwen3.6-35b-a3b
     set_key LLM_URL "${LLM_URL}"
@@ -64,6 +83,11 @@ case "${1:-}" in
     set_key VISION auto
     set_key MAX_HISTORY_CHARS 120000
     set_key REQUEST_TIMEOUT 1200
+    if [[ "${SERVICES}" == *embed* ]]; then
+      set_key EMBED_URL "${EMBED_URL}"
+    else
+      set_key EMBED_URL ""
+    fi
     if systemctl --user cat kru.service >/dev/null 2>&1; then
       systemctl --user restart kru.service && echo "Агента Kru перезапущено."
     fi
@@ -74,8 +98,10 @@ case "${1:-}" in
     docker compose -f "${COMPOSE}" stop
     ;;
   status)
-    docker ps --filter name=qwen36 --format '{{.Names}}: {{.Status}}'
+    docker ps --filter name=qwen36 --filter name=kru-embed --format '{{.Names}}: {{.Status}}'
     curl -s "${LLM_URL}/v1/models" | grep -o '"id":"[^"]*"' | head -1 || echo "llama-server не відповідає на ${LLM_URL}"
+    curl -sf "${EMBED_URL}/health" >/dev/null 2>&1 && echo "🧠 ембединги: працюють (${EMBED_URL})" \
+      || echo "🧠 ембединги: не запущено — пам'ять шукається лише за словами"
     nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null \
       | awk '{print "VRAM зайнято: " $0}' || true
     ;;

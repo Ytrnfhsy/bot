@@ -163,6 +163,19 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return {"dog_opaque_samples": opaque}
 
     step(50, lambda: check("character_switch", character_flow))
+
+    def memory_line_flow():
+        win.panel.set_show_tools(False)
+        win.on_event({"type": "tool_call", "name": "remember", "args": {"content": "Люблю каву"}, "summary": "x"})
+        win.on_event({"type": "tool_call", "name": "read_file", "args": {"path": "a"}, "summary": "a"})
+        win.panel._render()
+        md = win.panel.view.toMarkdown()
+        need("Запам'ятав: Люблю каву" in md and "read_file" not in md, f"стрічка: {md[:200]}")
+        win.on_event({"type": "status", "state": "summarizing"})
+        win.new_chat()
+        return "ok"
+
+    step(50, lambda: check("memory_line", memory_line_flow))
     step(50, lambda: win.on_robot_clicked())
     step(600, lambda: check("panel_hide", lambda: (need(not win.panel.isVisible(), "панель не сховалась"), "ok")[-1]))
 

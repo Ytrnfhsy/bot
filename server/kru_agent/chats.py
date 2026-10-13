@@ -12,6 +12,8 @@ from .storage import default_title  # noqa: F401 — частина API моду
 def _tool_line(tc: dict[str, Any]) -> str:
     fn = tc.get("function", {})
     args = fn.get("arguments", {})
+    if fn.get("name") == "remember" and isinstance(args, dict):
+        return f"🧠 Запам'ятав: {str(args.get('content', ''))[:200]}"
     if isinstance(args, dict):
         brief = ", ".join(f"{k}={str(v)[:80]}" for k, v in args.items())
     else:

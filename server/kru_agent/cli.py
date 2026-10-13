@@ -105,6 +105,12 @@ class Printer:
                 print(f"{CYAN}", end="")
                 self.streaming = True
             print(ev["text"], end="", flush=True)
+        elif t == "status" and ev.get("state") == "summarizing":
+            self._end_stream()
+            print(f"{DIM}🗜 Стискаю довгу розмову в підсумок…{RESET}")
+        elif t == "tool_call" and ev.get("name") == "remember":
+            self._end_stream()
+            print(f"{GREEN}🧠 Запам'ятав:{RESET} {ev.get('args', {}).get('content', '')}")
         elif t == "tool_call":
             self._end_stream()
             args = json.dumps(ev.get("args", {}), ensure_ascii=False)

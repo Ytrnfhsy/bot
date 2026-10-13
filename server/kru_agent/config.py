@@ -74,6 +74,8 @@ class Config:
     # Зір (розуміння зображень): auto — пробувати, і вимкнути, якщо модель не вміє; on; off
     vision: str = "auto"
     max_images_in_context: int = 3  # скільки останніх повідомлень із картинками передавати моделі
+    # довгі розмови: старі повідомлення стискаються моделлю в підсумок, а не відкидаються наосліп
+    summarize: bool = True
     language: str = "українська"
     agent_name: str = "Kru"
     persona: str = ""  # характер/стиль, напр. "привітний, з легким гумором"
@@ -87,6 +89,13 @@ class Config:
     shell_timeout: int = 120
     python_timeout: int = 120
     searxng_url: str = ""
+
+    # Пам'ять за змістом: окрема маленька модель ембедингів (deploy/qwen36 → сервіс embed). Порожньо — вимкнено.
+    embed_url: str = "http://127.0.0.1:8086"
+    embed_model: str = "qwen3-embedding-0.6b"
+    # Qwen3-Embedding радить інструкцію для запитів (для записів — без неї)
+    embed_query_prefix: str = "Instruct: Given a question, retrieve stored facts that help answer it\nQuery: "
+    memory_min_score: float = 0.45  # мінімальна схожість (косинус), щоб запис вважався доречним
 
     # Дані / сервер
     data_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "kru")
@@ -119,6 +128,7 @@ class Config:
             max_tool_output_chars=int(_env("MAX_TOOL_OUTPUT_CHARS", str(d.max_tool_output_chars))),
             vision=_env("VISION", d.vision).lower(),
             max_images_in_context=int(_env("MAX_IMAGES_IN_CONTEXT", str(d.max_images_in_context))),
+            summarize=_env_bool("SUMMARIZE", d.summarize),
             language=_env("LANGUAGE", d.language),
             agent_name=_env("AGENT_NAME", d.agent_name),
             persona=_env("PERSONA", d.persona),
@@ -129,6 +139,10 @@ class Config:
             shell_timeout=int(_env("SHELL_TIMEOUT", str(d.shell_timeout))),
             python_timeout=int(_env("PYTHON_TIMEOUT", str(d.python_timeout))),
             searxng_url=_env("SEARXNG_URL", d.searxng_url),
+            embed_url=_env("EMBED_URL", d.embed_url),
+            embed_model=_env("EMBED_MODEL", d.embed_model),
+            embed_query_prefix=_env("EMBED_QUERY_PREFIX", d.embed_query_prefix).replace("\\n", "\n"),
+            memory_min_score=float(_env("MEMORY_MIN_SCORE", str(d.memory_min_score))),
             data_dir=Path(_env("DATA_DIR", str(d.data_dir))).expanduser(),
             host=_env("HOST", d.host),
             port=int(_env("PORT", str(d.port))),
