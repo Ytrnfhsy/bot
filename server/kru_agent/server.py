@@ -3,7 +3,7 @@
 Протокол WebSocket (/ws?token=...), JSON-повідомлення.
 
 Клієнт → сервер:
-  {"type": "task", "text": "...", "session_id": "default"}
+  {"type": "task", "text": "...", "session_id": "default", "think": true}  — think необов'язковий: міркувати чи ні
   {"type": "confirm_response", "id": "<confirm id>", "approved": true}
   {"type": "cancel"}
   {"type": "reset", "session_id": "default"}  — видалити розмову
@@ -155,9 +155,9 @@ class Connection:
         finally:
             self.pending.pop(cid, None)
 
-    async def _run_task(self, text: str, session_id: str) -> None:
+    async def _run_task(self, text: str, session_id: str, think: bool | None = None) -> None:
         try:
-            await self.agent.run(session_id, text, self.send, self.confirm, self.user)
+            await self.agent.run(session_id, text, self.send, self.confirm, self.user, think)
         except asyncio.CancelledError:
             await self.send({"type": "final", "text": "⏹ Задачу скасовано."})
             await self.send({"type": "status", "state": "idle"})
@@ -241,7 +241,9 @@ class Connection:
                         await self.send({"type": "error", "message": "Я ще працюю над попередньою задачею. Скасуй її або зачекай."})
                         continue
                     self._task_session = str(msg.get("session_id") or "default")
-                    self.task = asyncio.create_task(self._run_task(text, self._task_session))
+                    think = msg.get("think")
+                    think = think if isinstance(think, bool) else None
+                    self.task = asyncio.create_task(self._run_task(text, self._task_session, think))
                 elif kind == "confirm_response":
                     fut = self.pending.get(str(msg.get("id")))
                     if fut and not fut.done():

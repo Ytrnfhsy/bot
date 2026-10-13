@@ -670,9 +670,16 @@ class ChatPanel(QWidget):
         if not self._render_timer.isActive():
             self._render_timer.start()
 
+    def set_show_tools(self, show: bool) -> None:
+        """Показувати технічні рядки дій агента («🔧 read_file: …»). Файли 📎 видно завжди."""
+        self.show_tools = show
+        self._render()
+
     def _render(self) -> None:
         parts = []
         for role, text in self.entries:
+            if role == "tool" and not getattr(self, "show_tools", False) and not text.startswith("📎"):
+                continue
             if role == "user":
                 parts.append(f"**🧑 {text}**")
             elif role == "tool":

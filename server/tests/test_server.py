@@ -73,3 +73,15 @@ def test_ws_upload(cfg):
     assert second["path"] == "uploads/мої_нотатки-2.txt"
     assert (cfg.workspace / "uploads/мої_нотатки.txt").read_text() == "привіт, файл"
     assert bad["type"] == "upload_error"
+
+
+def test_ws_task_think_switch(cfg):
+    client, agent = _client(cfg, [text("коротко"), text("подумавши")])
+    with client, client.websocket_connect("/ws?token=secret") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "task", "text": "швидко", "session_id": "t", "think": False})
+        _until(ws, "final")
+        _until(ws, "status")
+        ws.send_json({"type": "task", "text": "як звичайно", "session_id": "t"})
+        _until(ws, "final")
+    assert [c["think"] for c in agent.llm.calls] == [False, None]

@@ -190,7 +190,7 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
 
     try:
         if once:
-            await agent.run(printer.session, once, emit, confirm)
+            await agent.run(printer.session, once, emit, confirm, think=False if args.no_think else None)
             return
         print(f"{BOLD}Kru{RESET} — модель {cfg.model}, workspace {cfg.workspace}\n{HELP}")
         while True:
@@ -212,7 +212,7 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
                     printer(ev)
                 continue
             global _current
-            _current = asyncio.create_task(agent.run(printer.session, text, emit, confirm))
+            _current = asyncio.create_task(agent.run(printer.session, text, emit, confirm, think=False if args.no_think else None))
             try:
                 await asyncio.wait({_current})
                 _current.result()
@@ -278,7 +278,10 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
             async def run_one(text: str) -> None:
                 global _current
                 done.clear()
-                await ws.send(json.dumps({"type": "task", "text": text, "session_id": printer.session}))
+                task = {"type": "task", "text": text, "session_id": printer.session}
+                if args.no_think:
+                    task["think"] = False
+                await ws.send(json.dumps(task))
                 _current = asyncio.create_task(done.wait())
                 await asyncio.wait({_current})
                 if _current.cancelled():
@@ -393,6 +396,7 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--token", default=os.environ.get("KRU_TOKEN", ""))
         p.add_argument("--session", help="id чату, щоб продовжити його (типово — новий чат)")
         p.add_argument("--thinking", action="store_true", help="показувати міркування моделі")
+        p.add_argument("--no-think", action="store_true", help="відповідати без міркувань (швидше)")
         p.add_argument("--yes", action="store_true", help="авто-підтвердження небезпечних дій (лише локально)")
 
     sub.add_parser("health", help="перевірити, чи доступна модель")
