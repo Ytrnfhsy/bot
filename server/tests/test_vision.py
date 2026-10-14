@@ -189,3 +189,33 @@ async def test_probe_endpoints():
     ol = OllamaClient("http://x", "qwen3.5:9b")
     ol._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     assert await ol.supports_vision() is False
+
+
+def _size(img):
+    return Image.open(io.BytesIO(base64.b64decode(img["data"]))).size
+
+
+def test_images_are_limited_by_pixels_not_only_side(tmp_path):
+    from kru_agent.images import MAX_PIXELS, fit_size
+
+    _png(tmp_path / "photo.png", size=(3000, 3000))  # квадратне фото 9 Мп
+    w, h = _size(load_image(tmp_path / "photo.png"))
+    assert w * h <= MAX_PIXELS and abs(w - h) <= 1  # ~1000×1000, пропорції збережено
+    w2, h2 = _size(load_image(tmp_path / "photo.png", max_pixels=2_500_000))
+    assert w2 * h2 > w * h and w2 * h2 <= 2_500_000
+    assert fit_size(800, 600) == (800, 600)  # маленьке не збільшується
+
+
+async def test_view_image_high_detail(cfg):
+    _png(cfg.workspace / "shot.png", size=(2560, 1440))
+    llm = FakeLLM([
+        call("view_image", path="shot.png"), call("view_image", path="shot.png", detail="high"), text("ок"),
+    ])
+    agent = Agent(cfg, llm=llm)
+    rec = Recorder()
+    await agent.run("s", "що на скриншоті?", rec.emit, rec.confirm)
+    normal = _size(llm.calls[1]["messages"][-1]["images"][0])
+    high = _size(llm.calls[2]["messages"][-1]["images"][0])
+    assert normal[0] * normal[1] <= cfg.image_max_pixels
+    assert high[0] * high[1] > normal[0] * normal[1] * 2
+    assert "detail" not in llm.calls[2]["messages"][-1]  # службове поле моделі не передається

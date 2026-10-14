@@ -434,6 +434,8 @@ class Agent:
                 msg = {"role": m["role"], "content": m.get("content", "")}
                 if m.get("images"):
                     msg["images"] = m["images"]
+                    if m.get("detail"):
+                        msg["detail"] = m["detail"]
                 out.append(msg)
         return out
 
@@ -484,7 +486,8 @@ class Agent:
             if not paths:
                 out.append(m)
                 continue
-            m = {k: v for k, v in m.items() if k != "images"}
+            high = m.get("detail") == "high"
+            m = {k: v for k, v in m.items() if k not in {"images", "detail"}}
             loaded, notes = [], []
             for path in paths:
                 if budget <= 0:
@@ -496,7 +499,8 @@ class Agent:
                     notes.append(f"[зображення {path} — {why}]")
                     continue
                 try:
-                    loaded.append(load_image(ctx.resolve_path(path)))
+                    pixels = self.config.image_max_pixels_high if high else self.config.image_max_pixels
+                    loaded.append(load_image(ctx.resolve_path(path), pixels))
                 except Exception as e:  # noqa: BLE001
                     notes.append(f"[зображення {path} не вдалося відкрити: {e}]")
             if loaded:
@@ -598,6 +602,7 @@ class Agent:
                 history.append({"role": "assistant", "content": result.content})
 
             ctx.pending_images.clear()
+            ctx.pending_high = False
             if any(name in PLAN_TOOLS for name, _ in calls):
                 turn.steps_since_plan = 0
             elif turn.plan:
@@ -611,7 +616,10 @@ class Agent:
             # картинки від view_image — окремим повідомленням після всіх результатів інструментів
             if ctx.pending_images:
                 paths = list(dict.fromkeys(ctx.pending_images))
-                history.append({"role": "user", "content": "[view_image] " + ", ".join(paths), "images": paths})
+                msg = {"role": "user", "content": "[view_image] " + ", ".join(paths), "images": paths}
+                if ctx.pending_high:
+                    msg["detail"] = "high"
+                history.append(msg)
                 await emit({"type": "vision", "state": "attached", "images": paths})
             turn.persist()
 
