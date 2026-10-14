@@ -108,6 +108,11 @@ class Printer:
         elif t == "status" and ev.get("state") == "summarizing":
             self._end_stream()
             print(f"{DIM}🗜 Стискаю довгу розмову в підсумок…{RESET}")
+        elif t == "plan":
+            self._end_stream()
+            marks = {"pending": "☐", "in_progress": "⏳", "done": "✅", "skipped": "➖"}
+            for i, step in enumerate(ev.get("steps", []), 1):
+                print(f"{DIM}   {marks.get(step.get('status'), '☐')} {i}. {step.get('title')}{RESET}")
         elif t == "progress":
             self._end_stream()
             print(f"{DIM}   … {ev.get('text', '')}{RESET}")
@@ -116,8 +121,11 @@ class Printer:
             print(f"{GREEN}🧠 Запам'ятав:{RESET} {ev.get('args', {}).get('content', '')}")
         elif t == "tool_call":
             self._end_stream()
+            if ev.get("name") == "update_plan":
+                return  # сам план друкується подією plan
             args = json.dumps(ev.get("args", {}), ensure_ascii=False)
-            print(f"{YELLOW}🔧 {ev['name']}{RESET} {DIM}{args[:200]}{RESET}")
+            lead = "   ↳ " if ev.get("sub") else ""  # дія субагента
+            print(f"{lead}{YELLOW}🔧 {ev['name']}{RESET} {DIM}{args[:200]}{RESET}")
         elif t == "tool_result":
             mark = f"{GREEN}✓" if ev.get("ok") else f"{RED}✗"
             preview = " ".join(str(ev.get("preview", "")).split())[:160]

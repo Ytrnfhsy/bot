@@ -83,6 +83,8 @@ TOOL_ACTIVITY = {
     "web_search": "🔎 Шукаю в інтернеті…",
     "fetch_url": "🌐 Читаю сторінку…",
     "deep_research": "📚 Досліджую тему…",
+    "delegate": "🤝 Працює субагент…",
+    "update_plan": "📋 Оновлюю план…",
     "read_file": "📖 Читаю файл…",
     "list_dir": "📂 Переглядаю файли…",
     "search_files": "📂 Шукаю у файлах…",
@@ -449,6 +451,7 @@ class RobotWindow(QWidget):
         had_messages = bool(self.panel.entries)
         self._switch_chat(new_session_id(), "")
         self.panel.clear()
+        self.panel.set_plan([])
         if self.panel.history_shown:
             self.panel.show_chat()
         if had_messages:
@@ -576,6 +579,7 @@ class RobotWindow(QWidget):
             self.panel.clear()
             for item in ev["transcript"]:
                 self.panel.add_entry(item["role"], item["text"])
+            self.panel.set_plan(ev.get("plan", []))
             if ev.get("running"):  # задача в цьому чаті ще йде (наприклад, після розриву зв'язку)
                 self.busy = True
                 self.panel.set_busy(True)
@@ -698,8 +702,10 @@ class RobotWindow(QWidget):
             elif state == "idle":
                 self.busy = False
                 self.panel.set_busy(False)
+        elif t == "plan":
+            self.panel.set_plan(ev.get("steps", []))
         elif t == "progress":
-            icon = "📚" if ev.get("tool") == "deep_research" else "🔧"
+            icon = {"deep_research": "📚", "delegate": "🤝"}.get(ev.get("tool"), "🔧")
             self.panel.set_activity(f"{icon} {ev.get('text', '')}"[:120])
         elif t == "thinking":
             if self.settings.show_thinking:
@@ -710,7 +716,15 @@ class RobotWindow(QWidget):
             self.panel.append_draft(ev.get("text", ""))
         elif t == "tool_call":
             self.panel.clear_draft()
-            if ev.get("name") == "remember":
+            if ev.get("name") == "update_plan":
+                pass  # план показує окремий чек-лист
+            elif ev.get("name") == "delegate":
+                args = ev.get("args") if isinstance(ev.get("args"), dict) else {}
+                self.panel.add_entry("tool", f"🤝 Доручаю субагенту: {' '.join(str(args.get('task', '')).split())[:200]}")
+            elif ev.get("sub"):
+                summary = " ".join(str(ev.get("summary", "")).split())[:120]
+                self.panel.add_entry("tool", f"↳ 🔧 {ev.get('name')}: {summary}")
+            elif ev.get("name") == "remember":
                 args = ev.get("args") if isinstance(ev.get("args"), dict) else {}
                 fact = " ".join(str(args.get("content", "")).split())[:200]
                 self.panel.add_entry("tool", f"🧠 Запам'ятав: {fact}")

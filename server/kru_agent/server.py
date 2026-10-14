@@ -24,10 +24,13 @@
   {"type": "tool_call", "id", "name", "args", "summary"}
   {"type": "tool_result", "id", "name", "ok", "preview"}
   {"type": "confirm_request", "id", "tool", "summary"}
+  {"type": "plan", "steps": [{title, status: pending|in_progress|done|skipped}]}  — чек-лист великої задачі
+  {"type": "progress", "tool", "text"}       — проміжний стан довгого інструмента / субагента
+  події субагента (delegate) мають "sub": true
   {"type": "final", "text": "..."}
   {"type": "uploaded", "id", "name", "path", "size"} | {"type": "upload_error", "id", "name", "message"}
   {"type": "chat_renamed", "id", "title"} | {"type": "chat_list", "chats": [{id, title, count, created_at, updated_at}]}
-  {"type": "chat_opened", "id", "title", "transcript": [{role, text}], "running": bool}
+  {"type": "chat_opened", "id", "title", "transcript": [{role, text}], "plan": [...], "running": bool}
       running — у цьому чаті ще виконується задача (наприклад, після розриву з'єднання): далі прийдуть її події
   {"type": "chat_export", "title", "markdown"}
   {"type": "chat_error", "message"}

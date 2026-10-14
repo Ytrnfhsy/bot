@@ -48,6 +48,8 @@ STYLE = """
 #card { background: rgba(250, 252, 255, 245); border: 1px solid #C9D6E8; border-radius: 18px; }
 QLabel#status { color: #5B6B82; font-size: 11px; }
 QLabel#activity { color: #7A5AF8; font-size: 11px; }
+QLabel#plan { color: #2B2F3A; background: #F4F1FF; border: 1px solid #DDD3FF; border-radius: 8px;
+    padding: 6px 8px; font-size: 11px; }
 QTextBrowser { background: transparent; border: none; color: #1D2740; font-size: 13px; }
 QPlainTextEdit { background: #FFFFFF; border: 1px solid #C9D6E8; border-radius: 12px;
                  padding: 6px 8px; color: #1D2740; font-size: 13px; }
@@ -237,6 +239,14 @@ class ChatPanel(QWidget):
         self.view.setMaximumHeight(420)
         self.view.hide()
         lay.addWidget(self.view)
+
+        # чек-лист великої задачі (update_plan)
+        self.plan = QLabel("", objectName="plan")
+        self.plan.setWordWrap(True)
+        self.plan.setTextFormat(Qt.TextFormat.RichText)
+        self.plan.hide()
+        lay.addWidget(self.plan)
+        self.plan_steps: list[dict] = []
 
         self.activity = QLabel("", objectName="activity")
         self.activity.setWordWrap(True)
@@ -546,7 +556,7 @@ class ChatPanel(QWidget):
 
     # ---------------- сторінка історії ----------------
     def show_history(self) -> None:
-        for w in (self.view, self.activity, self.input_row):
+        for w in (self.view, self.plan, self.activity, self.input_row):
             w.hide()
         self.history_page.show()
         self.history_list.setFocus()
@@ -556,6 +566,7 @@ class ChatPanel(QWidget):
         self.history_page.hide()
         self.input_row.show()
         self._render()
+        self.set_plan(self.plan_steps)
         self.set_activity(self.activity.text())
         self.input.setFocus()
         self._fit()
@@ -631,6 +642,33 @@ class ChatPanel(QWidget):
         self.btn_send.setVisible(not busy)
         if not busy:
             self.set_activity("")
+
+    def set_plan(self, steps: list[dict]) -> None:
+        """Чек-лист великої задачі: ☐ ще ні, ⏳ зараз, ✅ готово."""
+        self.plan_steps = list(steps or [])
+        if not self.plan_steps:
+            self.plan.hide()
+            self._fit()
+            return
+        done = sum(1 for s in self.plan_steps if s.get("status") in {"done", "skipped"})
+        rows = [f"<b>📋 План · {done}/{len(self.plan_steps)}</b>"]
+        for step in self.plan_steps:
+            title = html.escape(str(step.get("title", "")))
+            status = step.get("status")
+            if status == "done":
+                rows.append(f'<span style="color:#2F9E44">✅</span> <span style="color:#8A8F9C">{title}</span>')
+            elif status == "skipped":
+                rows.append(f'<span style="color:#8A8F9C">➖ <s>{title}</s></span>')
+            elif status == "in_progress":
+                rows.append(f"⏳ <b>{title}</b>")
+            else:
+                rows.append(f"☐ {title}")
+        self.plan.setText("<br>".join(rows))
+        # висота з урахуванням переносу рядків (сам layout її не рахує для QLabel із wordWrap)
+        width = self.WIDTH - 2 * self.MARGIN - 28
+        self.plan.setFixedHeight(self.plan.heightForWidth(width))
+        self.plan.setVisible(not self.history_shown)
+        self._fit()
 
     def set_activity(self, text: str) -> None:
         self.activity.setText(text)
@@ -724,7 +762,7 @@ class ChatPanel(QWidget):
     def _render(self) -> None:
         parts = []
         for role, text in self.entries:
-            if role == "tool" and not getattr(self, "show_tools", False) and not text.startswith(("📎", "🧠")):
+            if role == "tool" and not getattr(self, "show_tools", False) and not text.startswith(("📎", "🧠", "🤝")):
                 continue
             if role == "user":
                 parts.append(f"**🧑 {text}**")

@@ -107,6 +107,7 @@ class Storage:
             ("created_at", "REAL NOT NULL DEFAULT 0"),
             ("summary", "TEXT NOT NULL DEFAULT ''"),  # стислий підсумок початку довгої розмови
             ("summary_upto", "INTEGER NOT NULL DEFAULT 0"),  # скільки перших повідомлень він охоплює
+            ("plan", "TEXT NOT NULL DEFAULT ''"),  # чек-лист великої задачі (JSON)
         ):
             if name not in cols:
                 self._db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {ddl}")
@@ -258,6 +259,21 @@ class Storage:
             self._db.execute(
                 "UPDATE sessions SET summary = ?, summary_upto = ? WHERE id = ?",
                 (summary, upto, _key(owner, session_id)),
+            )
+
+    def load_plan(self, session_id: str, owner: str = "owner") -> list[dict[str, str]]:
+        with self._lock:
+            row = self._db.execute("SELECT plan FROM sessions WHERE id = ?", (_key(owner, session_id),)).fetchone()
+        try:
+            return json.loads(row["plan"]) if row and row["plan"] else []
+        except ValueError:
+            return []
+
+    def save_plan(self, session_id: str, plan: list[dict[str, str]], owner: str = "owner") -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE sessions SET plan = ? WHERE id = ?",
+                (json.dumps(plan, ensure_ascii=False) if plan else "", _key(owner, session_id)),
             )
 
     def rename_chat(self, session_id: str, title: str, owner: str = "owner") -> bool:
