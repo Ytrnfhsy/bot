@@ -3,6 +3,8 @@
 #   deploy/model.sh start    — запустити (і надалі підніматиметься сама після перезавантаження)
 #   deploy/model.sh stop     — зупинити
 #   deploy/model.sh status   — що запущено і скільки зайнято VRAM
+#   deploy/tune.sh           — підібрати --n-cpu-moe / контекст / ubatch під свою відеокарту
+#                              (результат — у deploy/qwen36/.env, його читає compose і цей скрипт)
 #
 # Разом з основною моделлю запускається маленька модель ембедингів (CPU, :8086) — пам'ять агента
 # шукається за змістом. Без неї агент шукає в пам'яті лише за словами.
@@ -24,6 +26,12 @@ ENV_FILE="${HOME}/.config/kru.env"
 LLM_URL="http://127.0.0.1:8085"
 EMBED_URL="http://127.0.0.1:8086"
 export EMBED_FILE
+
+TUNED="${HERE}/qwen36/.env"
+CTX_SIZE="$(grep -s '^CTX_SIZE=' "${TUNED}" | tail -1 | cut -d= -f2 || true)"
+CTX_SIZE="${CTX_SIZE:-65536}"
+# ~1.8 символу на токен історії; решта контексту — системний промпт і результати інструментів
+HISTORY_CHARS=$(( CTX_SIZE * 18 / 10 ))
 export MODEL_DIR
 
 set_key() {  # set_key KEY VALUE — оновити (або додати) KRU_KEY у конфігу агента
@@ -81,7 +89,7 @@ case "${1:-}" in
     set_key LLM_URL "${LLM_URL}"
     set_key BACKEND openai
     set_key VISION auto
-    set_key MAX_HISTORY_CHARS 120000
+    set_key MAX_HISTORY_CHARS "${HISTORY_CHARS}"
     set_key REQUEST_TIMEOUT 1200
     if [[ "${SERVICES}" == *embed* ]]; then
       set_key EMBED_URL "${EMBED_URL}"
@@ -99,6 +107,8 @@ case "${1:-}" in
     ;;
   status)
     docker ps --filter name=qwen36 --filter name=kru-embed --format '{{.Names}}: {{.Status}}'
+    docker logs qwen36 2>&1 | grep -m1 -- '--n-cpu-moe' | sed 's/^\[qwen36\] /налаштування: /' || true
+    [[ -f "${TUNED}" ]] && grep -m1 '^# підібрано' "${TUNED}" | sed 's/^# //' || true
     curl -s "${LLM_URL}/v1/models" | grep -o '"id":"[^"]*"' | head -1 || echo "llama-server не відповідає на ${LLM_URL}"
     curl -sf "${EMBED_URL}/health" >/dev/null 2>&1 && echo "🧠 ембединги: працюють (${EMBED_URL})" \
       || echo "🧠 ембединги: не запущено — пам'ять шукається лише за словами"

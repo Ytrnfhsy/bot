@@ -30,6 +30,10 @@ services:
       # Порожньо — автоматично: 26 без зору, 30 із зором (візуальний модуль займає ~1 ГБ VRAM).
       # «out of memory» у лозі → збільш; у nvidia-smi лишається >1.5 ГБ → зменш.
       N_CPU_MOE: ${N_CPU_MOE:-}
+      # Контекст (токенів) і розмір пакета обробки промпту. Підібрати під свою відеокарту: ../tune.sh
+      # (результат пишеться в deploy/qwen36/.env — compose читає його сам)
+      CTX_SIZE: ${CTX_SIZE:-65536}
+      UBATCH: ${UBATCH:-512}
       # 1 — тримати візуальний модуль на CPU (економить VRAM, але картинки обробляються повільніше)
       MMPROJ_ON_CPU: ${MMPROJ_ON_CPU:-0}
     entrypoint: ["/bin/sh", "-c"]
@@ -44,13 +48,16 @@ services:
         else
           echo "[qwen36] зір: вимкнено (немає /models/$$MMPROJ_FILE)"
         fi
-        echo "[qwen36] --n-cpu-moe $$NCM"
+        echo "[qwen36] --n-cpu-moe $$NCM, контекст $${CTX_SIZE}, ubatch $${UBATCH}"
+        BATCH=2048
+        [ "$$UBATCH" -gt 2048 ] && BATCH="$$UBATCH"
         exec /app/llama-server \
           -m "/models/$$MODEL_FILE" $$VISION \
           --alias qwen3.6-35b-a3b \
           --host 0.0.0.0 --port 8080 \
           -ngl 99 --n-cpu-moe "$$NCM" \
-          -fa on -c 65536 -ctk q8_0 -ctv q8_0 \
+          -fa on -c "$$CTX_SIZE" -ctk q8_0 -ctv q8_0 \
+          -b "$$BATCH" -ub "$$UBATCH" \
           -np 1 \
           --jinja \
           --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0
