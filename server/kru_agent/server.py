@@ -13,6 +13,9 @@
   {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
   {"type": "ping"}
 
+Задача не скасовується, коли з'єднання рветься: вона доробляється на сервері, а після перепідключення
+клієнт відкриває чат (chat_open) і знову отримує її події та непідтверджені запити.
+
 Сервер → клієнт:
   {"type": "hello", "name": "Kru", "model": ..., "version": ..., "user": "owner", "role": "admin"}
   {"type": "status", "state": "thinking|working|waiting_confirm|idle", ...}
@@ -24,7 +27,9 @@
   {"type": "final", "text": "..."}
   {"type": "uploaded", "id", "name", "path", "size"} | {"type": "upload_error", "id", "name", "message"}
   {"type": "chat_renamed", "id", "title"} | {"type": "chat_list", "chats": [{id, title, count, created_at, updated_at}]}
-  {"type": "chat_opened", "id", "title", "transcript": [{role, text}]} | {"type": "chat_export", "title", "markdown"}
+  {"type": "chat_opened", "id", "title", "transcript": [{role, text}], "running": bool}
+      running — у цьому чаті ще виконується задача (наприклад, після розриву з'єднання): далі прийдуть її події
+  {"type": "chat_export", "title", "markdown"}
   {"type": "chat_error", "message"}
   {"type": "error", "message": "..."}
   {"type": "pong"}
@@ -67,6 +72,7 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.agent = agent or Agent(cfg)
+        app.state.hub = TaskHub()
         health = await app.state.agent.llm.health()
         if not health.get("ok"):
             log.warning("LLM-сервер недоступний: %s", health.get("error"))
@@ -116,21 +122,86 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
             # приймаємо і одразу закриваємо з кодом 4401 — клієнт відрізнить «невірний токен» від інших 403
             await ws.close(code=4401, reason="unauthorized")
             return
-        await Connection(ws, ws.app.state.agent, user).serve()
+        await Connection(ws, ws.app.state.agent, user, ws.app.state.hub).serve()
 
     return app
 
 
-class Connection:
-    """Одне WebSocket-підключення: одна активна задача, підтвердження через futures."""
+class RunningTask:
+    """Задача користувача, що живе незалежно від з'єднання: події йдуть усім підписаним підключенням."""
 
-    def __init__(self, ws: WebSocket, agent: Agent, user: User | None = None) -> None:
+    CONFIRM_TIMEOUT = 600
+
+    def __init__(self, owner: str, session_id: str) -> None:
+        self.owner = owner
+        self.session_id = session_id
+        self.task: asyncio.Task | None = None
+        self.subscribers: set[Connection] = set()
+        self.pending: dict[str, tuple[asyncio.Future[bool], dict[str, Any]]] = {}
+        self.last_status: dict[str, Any] | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+    async def emit(self, ev: dict[str, Any]) -> None:
+        if ev.get("type") == "status":
+            self.last_status = ev
+        for conn in list(self.subscribers):
+            await conn.send(ev)
+
+    async def confirm(self, tool: str, summary: str, args: dict[str, Any]) -> bool:
+        cid = uuid.uuid4().hex[:10]
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        ev = {"type": "confirm_request", "id": cid, "tool": tool, "summary": summary}
+        self.pending[cid] = (fut, ev)
+        await self.emit(ev)
+        try:
+            # без підключених клієнтів теж чекаємо: користувач може перепідключитися й відповісти
+            return await asyncio.wait_for(fut, timeout=self.CONFIRM_TIMEOUT)
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self.pending.pop(cid, None)
+
+    def answer(self, cid: str, approved: bool) -> None:
+        item = self.pending.get(cid)
+        if item and not item[0].done():
+            item[0].set_result(approved)
+
+    def deny_all(self) -> None:
+        for fut, _ in self.pending.values():
+            if not fut.done():
+                fut.set_result(False)
+
+    async def attach(self, conn: "Connection") -> None:
+        """Підключення (часто після розриву) знову стежить за задачею: поточний стан і відкриті запити."""
+        self.subscribers.add(conn)
+        if self.last_status:
+            await conn.send(self.last_status)
+        for _, ev in list(self.pending.values()):
+            await conn.send(ev)
+
+
+class TaskHub:
+    """Активні задачі за користувачами (одна на користувача — модель однаково обробляє запити по черзі)."""
+
+    def __init__(self) -> None:
+        self.tasks: dict[str, RunningTask] = {}
+
+    def get(self, owner: str) -> RunningTask | None:
+        rt = self.tasks.get(owner)
+        return rt if rt and rt.running else None
+
+
+class Connection:
+    """Одне WebSocket-підключення користувача. Задачі живуть у TaskHub і переживають розрив з'єднання."""
+
+    def __init__(self, ws: WebSocket, agent: Agent, user: User | None = None, hub: TaskHub | None = None) -> None:
         self.ws = ws
         self.agent = agent
         self.user = user or User("owner", "admin")
-        self.task: asyncio.Task | None = None
-        self._task_session = ""
-        self.pending: dict[str, asyncio.Future[bool]] = {}
+        self.hub = hub or TaskHub()
         self._send_lock = asyncio.Lock()
         self.closed = False
 
@@ -143,28 +214,20 @@ class Connection:
             except Exception:  # noqa: BLE001
                 self.closed = True
 
-    async def confirm(self, tool: str, summary: str, args: dict[str, Any]) -> bool:
-        cid = uuid.uuid4().hex[:10]
-        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self.pending[cid] = fut
-        await self.send({"type": "confirm_request", "id": cid, "tool": tool, "summary": summary})
+    async def _run_task(self, rt: RunningTask, text: str, think: bool | None = None) -> None:
         try:
-            return await asyncio.wait_for(fut, timeout=600)
-        except asyncio.TimeoutError:
-            return False
-        finally:
-            self.pending.pop(cid, None)
-
-    async def _run_task(self, text: str, session_id: str, think: bool | None = None) -> None:
-        try:
-            await self.agent.run(session_id, text, self.send, self.confirm, self.user, think)
+            await self.agent.run(rt.session_id, text, rt.emit, rt.confirm, self.user, think)
         except asyncio.CancelledError:
-            await self.send({"type": "final", "text": "⏹ Задачу скасовано."})
-            await self.send({"type": "status", "state": "idle"})
+            await rt.emit({"type": "final", "text": "⏹ Задачу скасовано."})
+            await rt.emit({"type": "status", "state": "idle"})
         except Exception as e:  # noqa: BLE001
             log.exception("Помилка під час виконання задачі")
-            await self.send({"type": "error", "message": str(e)})
-            await self.send({"type": "status", "state": "idle"})
+            await rt.emit({"type": "error", "message": str(e)})
+            await rt.emit({"type": "status", "state": "idle"})
+        finally:
+            rt.subscribers.clear()
+            if self.hub.tasks.get(rt.owner) is rt:
+                del self.hub.tasks[rt.owner]
 
     async def _save_upload(self, msg: dict[str, Any]) -> None:
         """Файл, перетягнутий на робота: зберігаємо у workspace/uploads/ (без перезапису наявних)."""
@@ -199,7 +262,7 @@ class Connection:
         """Чати (зберігаються автоматично): список / відкрити / перейменувати / видалити / експорт."""
         ag, owner = self.agent, self.user.name
         chat_id = str(msg.get("id") or msg.get("session_id") or "")
-        busy = self.task is not None and not self.task.done()
+        rt = self.hub.get(owner)
         try:
             if kind in {"chat_rename", "chat_save"}:  # chat_save — від старих клієнтів: лише назва
                 title = msg.get("title")
@@ -207,9 +270,12 @@ class Connection:
                     raise ValueError("Чати тепер зберігаються автоматично")
                 await self.send({"type": "chat_renamed", **ag.rename_chat(chat_id, title, owner)})
             elif kind == "chat_open":
-                await self.send({"type": "chat_opened", **ag.open_chat(chat_id, owner)})
+                running = rt is not None and rt.session_id == chat_id
+                await self.send({"type": "chat_opened", **ag.open_chat(chat_id, owner), "running": running})
+                if running:
+                    await rt.attach(self)
             elif kind == "chat_delete":
-                if busy and chat_id == self._task_session:
+                if rt is not None and chat_id == rt.session_id:
                     raise ValueError("Спершу зупини задачу в цьому чаті")
                 ag.delete_chat(chat_id, owner)
             elif kind == "chat_export":
@@ -218,11 +284,6 @@ class Connection:
                 await self.send({"type": "chat_list", "chats": ag.list_chats(owner)})
         except (ValueError, TypeError, KeyError) as e:
             await self.send({"type": "chat_error", "message": str(e)})
-
-    def _cancel_pending(self) -> None:
-        for fut in self.pending.values():
-            if not fut.done():
-                fut.set_result(False)
 
     async def serve(self) -> None:
         cfg = self.agent.config
@@ -237,21 +298,22 @@ class Connection:
                     text = str(msg.get("text", "")).strip()
                     if not text:
                         continue
-                    if self.task and not self.task.done():
+                    if self.hub.get(self.user.name):
                         await self.send({"type": "error", "message": "Я ще працюю над попередньою задачею. Скасуй її або зачекай."})
                         continue
-                    self._task_session = str(msg.get("session_id") or "default")
                     think = msg.get("think")
                     think = think if isinstance(think, bool) else None
-                    self.task = asyncio.create_task(self._run_task(text, self._task_session, think))
+                    rt = RunningTask(self.user.name, str(msg.get("session_id") or "default"))
+                    rt.subscribers.add(self)
+                    self.hub.tasks[self.user.name] = rt
+                    rt.task = asyncio.create_task(self._run_task(rt, text, think))
                 elif kind == "confirm_response":
-                    fut = self.pending.get(str(msg.get("id")))
-                    if fut and not fut.done():
-                        fut.set_result(bool(msg.get("approved")))
+                    if rt := self.hub.get(self.user.name):
+                        rt.answer(str(msg.get("id")), bool(msg.get("approved")))
                 elif kind == "cancel":
-                    self._cancel_pending()
-                    if self.task and not self.task.done():
-                        self.task.cancel()
+                    if rt := self.hub.get(self.user.name):
+                        rt.deny_all()
+                        rt.task.cancel()
                 elif kind == "reset":
                     self.agent.reset_session(str(msg.get("session_id") or "default"), self.user.name)
                     await self.send({"type": "final", "text": "🧹 Розмову очищено."})
@@ -266,10 +328,10 @@ class Connection:
         except Exception:  # noqa: BLE001
             log.exception("Помилка WebSocket")
         finally:
+            # задачу НЕ скасовуємо: вона доробиться, а клієнт підхопить її після перепідключення
             self.closed = True
-            self._cancel_pending()
-            if self.task and not self.task.done():
-                self.task.cancel()
+            for rt in self.hub.tasks.values():
+                rt.subscribers.discard(self)
 
 
 def run_server(config: Config) -> None:

@@ -177,6 +177,71 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     step(50, lambda: check("memory_line", memory_line_flow))
+
+    def overlap_flow():
+        # панель згорнута, а агент тим часом працює; потім користувач її відкриває —
+        # поле вводу не має налізти на стрічку (окрема панель, щоб відтворити саме цей порядок подій)
+        from PySide6.QtCore import QPoint
+
+        from .panel import ChatPanel
+
+        p = ChatPanel()
+        p.set_show_tools(True)
+        p.show_panel(QPoint(100, 100))
+        QApplication.processEvents()
+        p.hide()
+        QApplication.processEvents()
+        for _ in range(8):
+            p.add_entry("tool", "🔧 read_file: path=/home/ai/kru-workspace/uploads/дуже_довга_назва_файлу.txt, "
+                                "start_line=1515, max_lines=100")
+            p._render()
+        p.set_busy(True)
+        p.set_activity("🔧 Працюю: run_shell")
+        p.show_panel(QPoint(100, 100))
+        overlap_state["panel"] = p
+        # висота, яку панель попросила у вікна, має вміщати весь вміст (раніше бралась застаріла, менша)
+        asked, needed = p.maximumHeight(), p.layout().minimumSize().height()
+        need(asked >= needed, f"панель просить {asked} px, а вмісту треба {needed}")
+        return {"asked": asked, "needed": needed}
+
+    overlap_state: dict[str, Any] = {}
+
+    def overlap_check():
+        # перевіряємо трохи згодом: на Windows вікно змінює розмір асинхронно (WM_SIZE)
+        from PySide6.QtCore import QPoint
+
+        p = overlap_state["panel"]
+        view_bottom = p.view.mapTo(p, QPoint(0, 0)).y() + p.view.height()
+        input_top = p.input.mapTo(p, QPoint(0, 0)).y()
+        result = {"view_bottom": view_bottom, "input_top": input_top, "height": p.height(),
+                  "needed": p.layout().minimumSize().height()}
+        p.hide()
+        p.deleteLater()
+        need(view_bottom <= input_top and result["height"] >= result["needed"], f"поле вводу налазить на стрічку: {result}")
+        return result
+
+    def big_confirm_flow():
+        # агент просить дозволу на великий скрипт — кнопки мають лишатися на екрані
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QGuiApplication
+
+        code = "Виконати Python-код:\n" + "\n".join(f"print('рядок {i}', {i} * {i})  # коментар" for i in range(400))
+        win.on_event({"type": "confirm_request", "id": "big", "tool": "run_python", "summary": code})
+        QApplication.processEvents()
+        p = win.panel
+        screen_h = (p.screen() or QGuiApplication.primaryScreen()).availableGeometry().height()
+        allow_bottom = p.btn_allow.mapTo(p, QPoint(0, 0)).y() + p.btn_allow.height()
+        result = {"panel": p.maximumHeight(), "screen": screen_h, "allow_bottom": allow_bottom,
+                  "code_box": p.confirm_text.height(), "full_text": len(p.confirm_text.toPlainText()) == len(code)}
+        need(p.maximumHeight() <= screen_h, f"панель вища за екран: {result}")
+        need(p.btn_allow.isVisible() and allow_bottom <= p.maximumHeight(), f"кнопок не видно: {result}")
+        need(result["full_text"], "код показано не повністю")
+        p._answer(False)
+        return result
+
+    step(50, lambda: check("big_confirm", big_confirm_flow))
+    step(50, lambda: check("panel_height", overlap_flow))
+    step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())
     step(600, lambda: check("panel_hide", lambda: (need(not win.panel.isVisible(), "панель не сховалась"), "ok")[-1]))
 

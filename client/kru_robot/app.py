@@ -124,6 +124,7 @@ class RobotWindow(QWidget):
         # сигнали
         self._connect_character()
         self.panel.task_submitted.connect(self.send_task)
+        self.panel.height_changed.connect(lambda: self.panel.isVisible() and self.position_panel())
         self.panel.chats_requested.connect(self.show_chats)
         # чати зберігає сервер автоматично; settings.session_id — id поточного чату
         self.chat_title = ""
@@ -575,6 +576,14 @@ class RobotWindow(QWidget):
             self.panel.clear()
             for item in ev["transcript"]:
                 self.panel.add_entry(item["role"], item["text"])
+            if ev.get("running"):  # задача в цьому чаті ще йде (наприклад, після розриву зв'язку)
+                self.busy = True
+                self.panel.set_busy(True)
+                self.robot.set_state("thinking")
+                self.panel.set_activity("🔄 Зв'язок відновлено — агент ще працює над задачею…")
+            elif self.busy and restoring:
+                self.busy = False  # задача завершилась, поки не було зв'язку: відповідь уже в стрічці
+                self.panel.set_busy(False)
             if restoring:
                 return  # тихо відновили поточний чат після запуску
             self.panel.show_chat()
@@ -584,6 +593,9 @@ class RobotWindow(QWidget):
         elif t == "chat_export":
             self._write_export(ev)
         elif t == "chat_error":
+            if restoring and self.busy:  # чату на сервері немає — і задачі в ньому теж
+                self.busy = False
+                self.panel.set_busy(False)
             if restoring:
                 return  # поточний чат ще порожній — нічого відновлювати
             self.show_panel()
@@ -598,6 +610,7 @@ class RobotWindow(QWidget):
     def on_connected(self) -> None:
         self.robot.set_state("happy", 1.5)
         text, self._pending_task = getattr(self, "_pending_task", None), None
+        self._sent_on_connect = bool(text)  # тоді hello не перезавантажує чат: задача щойно пішла
         if text and self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
                            "think": self.settings.think}):
             if text != self.settings.last_task:
@@ -610,9 +623,10 @@ class RobotWindow(QWidget):
     def on_disconnected(self, reason: str, raw: str = "") -> None:
         self.panel.set_status(f"немає з'єднання: {reason}", False, details=f"{self.conn.url}\n{raw}")
         if self.busy:
-            self.busy = False
-            self.panel.set_busy(False)
+            # задача доробляється на сервері; після перепідключення чат відкриється знову й покаже її хід
             self.panel.drop_confirms()
+            self.panel.clear_draft()
+            self.panel.set_activity("📡 Зв'язок втрачено — задача продовжується на сервері, чекаю на з'єднання…")
         self.robot.set_state("offline")
 
     def on_event(self, ev: dict) -> None:  # noqa: C901
@@ -652,8 +666,11 @@ class RobotWindow(QWidget):
                     "Сервер агента старої версії: чати не відкриватимуться. Онови його: "
                     "cd ~/bot && ./update.sh",
                 )
-            elif not self.panel.entries and not self.busy:
-                # показати розмову, на якій зупинились (наприклад, після перезапуску ПК)
+            elif getattr(self, "_sent_on_connect", False):
+                self._sent_on_connect = False  # стрічка вже актуальна, події нової задачі підуть самі
+            else:
+                # підтягнути поточний чат із сервера: після запуску ПК — розмову, на якій зупинились;
+                # після розриву зв'язку — усе, що агент встиг зробити, і (якщо задача ще йде) її подальший хід
                 self._restoring = True
                 self.conn.send({"type": "chat_open", "id": self.settings.session_id})
             self.setWindowTitle(name)

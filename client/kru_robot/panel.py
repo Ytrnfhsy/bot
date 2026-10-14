@@ -18,6 +18,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QGuiApplication,
     QIcon,
     QKeyEvent,
     QKeySequence,
@@ -27,6 +28,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
     QShortcut,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QFrame,
@@ -61,7 +63,8 @@ QPushButton#allow { background: #5BE49B; color: #0E3B22; }
 QPushButton#deny { background: #FFE1E1; color: #C92A2A; }
 #confirm { background: #FFF6E9; border: 1px solid #FFC98A; border-radius: 12px; }
 QLabel#confirmTitle { color: #B35C00; font-weight: 700; }
-QLabel#confirmText { color: #3A2A10; font-family: monospace; font-size: 11px; }
+QPlainTextEdit#confirmText { color: #3A2A10; background: #FFFBF4; border: 1px solid #FFE0B8;
+    border-radius: 6px; font-family: monospace; font-size: 11px; }
 #ask { background: #EEF6FF; border: 1px solid #B9DBF5; border-radius: 12px; }
 QLabel#askText { color: #1D3A57; font-weight: 600; }
 QLineEdit#askInput { background: #FFFFFF; border: 1px solid #C9D6E8; border-radius: 8px; padding: 5px 8px; color: #1D2740; }
@@ -161,6 +164,7 @@ class InputBox(QPlainTextEdit):
 
 class ChatPanel(QWidget):
     task_submitted = Signal(str)
+    height_changed = Signal()  # вміст змінив висоту — панель треба перепозиціонувати біля персонажа
     image_pasted = Signal(str)
     cancel_requested = Signal()
     history_open = Signal(str)
@@ -176,6 +180,7 @@ class ChatPanel(QWidget):
     MARGIN = 14  # поле навколо картки (тінь + «хвостик»)
 
     def __init__(self) -> None:
+        self._refit_pending = False
         super().__init__(
             None,
             Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
@@ -243,9 +248,11 @@ class ChatPanel(QWidget):
         cl = QVBoxLayout(self.confirm_box)
         cl.setContentsMargins(10, 8, 10, 8)
         cl.addWidget(QLabel("⚠ Агент просить дозволу", objectName="confirmTitle"))
-        self.confirm_text = QLabel("", objectName="confirmText")
-        self.confirm_text.setWordWrap(True)
-        self.confirm_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # великий скрипт — у полі з прокруткою: кнопки «Дозволити / Відхилити» завжди лишаються на екрані
+        self.confirm_text = QPlainTextEdit(objectName="confirmText")
+        self.confirm_text.setReadOnly(True)
+        self.confirm_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.confirm_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         cl.addWidget(self.confirm_text)
         bl = QHBoxLayout()
         self.btn_allow = QPushButton("Дозволити", objectName="allow")
@@ -396,6 +403,9 @@ class ChatPanel(QWidget):
             self.setWindowOpacity(opacity)
             self.move(start)
             self.show()
+            # поки панель була схована, Qt не враховував у розмітці стрічку, що оновилась за цей час, —
+            # перерахувати висоту одразу після показу, інакше поле вводу налазить на текст
+            self._fit()
             self._animate(start, target, (opacity, 1.0), self.SHOW_MS, QEasingCurve.Type.OutBack)
         self.raise_()
         self.activateWindow()
@@ -460,10 +470,30 @@ class ChatPanel(QWidget):
 
     def _fit(self) -> None:
         """Підігнати висоту під вміст. (adjustSize() у Qt обрізає вікно до ⅔ екрана — тоді запити «зникали».)"""
-        self.layout().activate()
+        lay = self.layout()
+        # спершу скинути закешовані розміри: щойно показана/схована стрічка чи рядок активності інакше
+        # не враховуються, панель лишається нижчою за вміст, і поле вводу налазить на текст
+        lay.invalidate()
+        lay.activate()
         # фіксована висота (min = max): віконний менеджер (KWin/XWayland) не може лишити старий, більший
         # розмір, коли вміст зменшився, — інакше після «Новий чат» панель лишалась високою з порожнечею
-        self.setFixedHeight(self.sizeHint().height())
+        h = max(lay.sizeHint().height(), lay.minimumSize().height())
+        if h != self.height() or self.minimumHeight() != self.maximumHeight():
+            self.setFixedHeight(h)
+            self.height_changed.emit()
+        if not self._refit_pending:  # і ще раз, коли Qt обробить відкладені зміни геометрії
+            self._refit_pending = True
+            QTimer.singleShot(0, self._refit)
+
+    def _refit(self) -> None:
+        self._refit_pending = False
+        lay = self.layout()
+        lay.invalidate()
+        lay.activate()
+        h = max(lay.sizeHint().height(), lay.minimumSize().height())
+        if h != self.height():
+            self.setFixedHeight(h)
+            self.height_changed.emit()
 
     # ---------------- вбудовані запити ----------------
     def ask(self, text: str, buttons: list[tuple[str, str, str]], callback, input_text: str | None = None,
@@ -641,14 +671,30 @@ class ChatPanel(QWidget):
     def _show_confirm(self) -> None:
         if not self._confirm_queue:
             self.confirm_box.hide()
+            self._render()  # стрічка знову може бути вищою
         else:
-            summary = self._confirm_queue[0][1]
-            if len(summary) > 1200:
-                summary = summary[:1200] + "…"
-            self.confirm_text.setText(summary)
+            self.confirm_text.setPlainText(self._confirm_queue[0][1])
+            self.confirm_text.moveCursor(QTextCursor.MoveOperation.Start)
             self.confirm_box.show()
+            self._size_confirm_text()
+            self._render()  # стрічка стає нижчою, щоб запит із кнопками вмістився на екрані
             self.btn_allow.setFocus()
         self._fit()
+
+    def _screen_height(self) -> int:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        return screen.availableGeometry().height() if screen else 800
+
+    def _size_confirm_text(self) -> None:
+        """Висота поля з кодом: за вмістом, але не більше ~третини екрана (далі — прокрутка)."""
+        lines = 0
+        fm = self.confirm_text.fontMetrics()
+        width = max(100, self.WIDTH - 2 * self.MARGIN - 60)
+        for line in self.confirm_text.toPlainText().split("\n"):
+            lines += max(1, -(-fm.horizontalAdvance(line) // width))  # з урахуванням переносу рядків
+        content = lines * fm.lineSpacing() + 14
+        cap = max(90, min(320, int(self._screen_height() * 0.33)))
+        self.confirm_text.setFixedHeight(max(36, min(cap, content)))
 
     def _answer(self, approved: bool) -> None:
         if not self._confirm_queue:
@@ -699,7 +745,9 @@ class ChatPanel(QWidget):
             doc.setTextWidth(self.WIDTH - 2 * self.MARGIN - 28 - 18)
             doc_h = int(doc.size().height()) + 12
             # коли відкритий запит/підтвердження — стрічка нижча, щоб усе вмістилося на екрані
-            cap = 240 if (self.ask_box.isVisible() or self.confirm_box.isVisible()) else 420
+            cap = 420
+            if self.ask_box.isVisible() or self.confirm_box.isVisible():
+                cap = max(60, min(240, int(self._screen_height() * 0.2)))
             self.view.setFixedHeight(max(40, min(cap, doc_h)))
             sb = self.view.verticalScrollBar()
             sb.setValue(sb.maximum())

@@ -141,6 +141,12 @@ def build_registry() -> ToolRegistry:
     return reg
 
 
+def preview(text: str, limit: int = 20000) -> str:
+    """Текст для запиту на дозвіл: користувач має бачити, що саме погоджує (у роботі — з прокруткою)."""
+    text = str(text)
+    return text if len(text) <= limit else f"{text[:limit]}\n… (ще {len(text) - limit} символів)"
+
+
 def truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
