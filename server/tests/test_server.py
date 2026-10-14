@@ -85,3 +85,47 @@ def test_ws_task_think_switch(cfg):
         ws.send_json({"type": "task", "text": "як звичайно", "session_id": "t"})
         _until(ws, "final")
     assert [c["think"] for c in agent.llm.calls] == [False, None]
+
+
+def test_task_survives_disconnect_and_resumes_on_reconnect(cfg):
+    """З'єднання рветься посеред задачі → задача не скасовується; після перепідключення клієнт
+    відкриває чат, бачить, що задача ще йде, і отримує той самий запит на підтвердження."""
+    client, agent = _client(cfg, [call("write_file", path="hi.txt", content="hello"), text("Готово після розриву")])
+    with client:
+        with client.websocket_connect("/ws?token=secret") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "task", "text": "створи файл", "session_id": "t"})
+            first, _ = _until(ws, "confirm_request")
+        # з'єднання розірвано, задача чекає на дозвіл
+        with client.websocket_connect("/ws?token=secret") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "task", "text": "інша", "session_id": "x"})
+            assert "ще працюю" in _until(ws, "error")[0]["message"]
+            ws.send_json({"type": "chat_open", "id": "t"})
+            opened, _ = _until(ws, "chat_opened")
+            assert opened["running"] is True
+            assert opened["transcript"][0]["text"] == "створи файл"
+            again, seen = _until(ws, "confirm_request")
+            assert again["id"] == first["id"]
+            assert {"type": "status", "state": "waiting_confirm"} in seen
+            ws.send_json({"type": "confirm_response", "id": again["id"], "approved": True})
+            assert _until(ws, "final")[0]["text"] == "Готово після розриву"
+            ws.send_json({"type": "chat_open", "id": "t"})
+            assert _until(ws, "chat_opened")[0]["running"] is False
+    assert (cfg.workspace / "hi.txt").read_text() == "hello"
+
+
+def test_task_finishes_while_client_offline(cfg):
+    client, agent = _client(cfg, [text("відповідь без клієнта")])
+    with client:
+        with client.websocket_connect("/ws?token=secret") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "task", "text": "питання", "session_id": "s"})
+        with client.websocket_connect("/ws?token=secret") as ws:
+            ws.receive_json()
+            for _ in range(50):
+                ws.send_json({"type": "chat_open", "id": "s"})
+                opened, _ = _until(ws, "chat_opened")
+                if not opened["running"] and len(opened["transcript"]) == 2:
+                    break
+            assert [m["text"] for m in opened["transcript"]] == ["питання", "відповідь без клієнта"]

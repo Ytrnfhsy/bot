@@ -161,6 +161,7 @@ class InputBox(QPlainTextEdit):
 
 class ChatPanel(QWidget):
     task_submitted = Signal(str)
+    height_changed = Signal()  # вміст змінив висоту — панель треба перепозиціонувати біля персонажа
     image_pasted = Signal(str)
     cancel_requested = Signal()
     history_open = Signal(str)
@@ -176,6 +177,7 @@ class ChatPanel(QWidget):
     MARGIN = 14  # поле навколо картки (тінь + «хвостик»)
 
     def __init__(self) -> None:
+        self._refit_pending = False
         super().__init__(
             None,
             Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
@@ -460,10 +462,30 @@ class ChatPanel(QWidget):
 
     def _fit(self) -> None:
         """Підігнати висоту під вміст. (adjustSize() у Qt обрізає вікно до ⅔ екрана — тоді запити «зникали».)"""
-        self.layout().activate()
+        lay = self.layout()
+        # спершу скинути закешовані розміри: щойно показана/схована стрічка чи рядок активності інакше
+        # не враховуються, панель лишається нижчою за вміст, і поле вводу налазить на текст
+        lay.invalidate()
+        lay.activate()
         # фіксована висота (min = max): віконний менеджер (KWin/XWayland) не може лишити старий, більший
         # розмір, коли вміст зменшився, — інакше після «Новий чат» панель лишалась високою з порожнечею
-        self.setFixedHeight(self.sizeHint().height())
+        h = max(lay.sizeHint().height(), lay.minimumSize().height())
+        if h != self.height() or self.minimumHeight() != self.maximumHeight():
+            self.setFixedHeight(h)
+            self.height_changed.emit()
+        if not self._refit_pending:  # і ще раз, коли Qt обробить відкладені зміни геометрії
+            self._refit_pending = True
+            QTimer.singleShot(0, self._refit)
+
+    def _refit(self) -> None:
+        self._refit_pending = False
+        lay = self.layout()
+        lay.invalidate()
+        lay.activate()
+        h = max(lay.sizeHint().height(), lay.minimumSize().height())
+        if h != self.height():
+            self.setFixedHeight(h)
+            self.height_changed.emit()
 
     # ---------------- вбудовані запити ----------------
     def ask(self, text: str, buttons: list[tuple[str, str, str]], callback, input_text: str | None = None,

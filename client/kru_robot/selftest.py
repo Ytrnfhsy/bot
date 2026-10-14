@@ -177,6 +177,38 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     step(50, lambda: check("memory_line", memory_line_flow))
+
+    def overlap_flow():
+        # панель згорнута, а агент тим часом працює; потім користувач її відкриває —
+        # поле вводу не має налізти на стрічку (окрема панель, щоб відтворити саме цей порядок подій)
+        from PySide6.QtCore import QPoint
+
+        from .panel import ChatPanel
+
+        p = ChatPanel()
+        p.set_show_tools(True)
+        p.show_panel(QPoint(100, 100))
+        QApplication.processEvents()
+        p.hide()
+        QApplication.processEvents()
+        for _ in range(8):
+            p.add_entry("tool", "🔧 read_file: path=/home/ai/kru-workspace/uploads/дуже_довга_назва_файлу.txt, "
+                                "start_line=1515, max_lines=100")
+            p._render()
+        p.set_busy(True)
+        p.set_activity("🔧 Працюю: run_shell")
+        p.show_panel(QPoint(100, 100))
+        QApplication.processEvents()
+        view_bottom = p.view.mapTo(p, QPoint(0, 0)).y() + p.view.height()
+        input_top = p.input.mapTo(p, QPoint(0, 0)).y()
+        result = {"view_bottom": view_bottom, "input_top": input_top, "height": p.height(),
+                  "needed": p.layout().minimumSize().height()}
+        p.hide()
+        p.deleteLater()
+        need(view_bottom <= input_top and result["height"] >= result["needed"], f"поле вводу налазить на стрічку: {result}")
+        return result
+
+    step(50, lambda: check("no_overlap", overlap_flow))
     step(50, lambda: win.on_robot_clicked())
     step(600, lambda: check("panel_hide", lambda: (need(not win.panel.isVisible(), "панель не сховалась"), "ok")[-1]))
 
