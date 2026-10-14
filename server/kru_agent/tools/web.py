@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from bs4 import BeautifulSoup
 
-from . import Tool, ToolContext, ToolError, truncate
+from . import Tool, ToolContext, ToolError
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Fedora; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0 KruAgent/0.1"
@@ -44,8 +44,15 @@ def _ddgs_search(query: str, max_results: int, kind: str, region: str) -> list[d
         return [{"title": r.get("title"), "url": r.get("href"), "snippet": r.get("body")} for r in raw]
 
 
-async def _searxng_search(base: str, query: str, max_results: int, kind: str) -> list[dict[str, Any]]:
-    params = {"q": query, "format": "json", "categories": "news" if kind == "news" else "general"}
+def _searxng_language(region: str) -> str:
+    """Регіон у стилі DuckDuckGo («ua-uk», «us-en», «wt-wt») → мова SearXNG («uk», «en», «all»)."""
+    parts = region.lower().split("-")
+    return parts[1] if len(parts) == 2 and parts[0] != "wt" and parts[1].isalpha() else "all"
+
+
+async def _searxng_search(base: str, query: str, max_results: int, kind: str, region: str = "wt-wt") -> list[dict[str, Any]]:
+    params = {"q": query, "format": "json", "categories": "news" if kind == "news" else "general",
+              "language": _searxng_language(region)}
     async with httpx.AsyncClient(timeout=20, headers={"User-Agent": USER_AGENT}) as client:
         r = await client.get(base.rstrip("/") + "/search", params=params)
         r.raise_for_status()
@@ -65,7 +72,7 @@ async def _search_once(ctx: ToolContext, query: str, n: int, kind: str, region: 
     ok = False
     if ctx.config.searxng_url:
         try:
-            results = await _searxng_search(ctx.config.searxng_url, query, n, kind)
+            results = await _searxng_search(ctx.config.searxng_url, query, n, kind, region)
             if results:
                 return results
             ok = True
@@ -145,13 +152,13 @@ def _pdf_to_text(data: bytes) -> str:
     return "\n\n".join(f"[стор. {i + 1}]\n{page.extract_text() or ''}" for i, page in enumerate(reader.pages))
 
 
-async def fetch_url(ctx: ToolContext, url: str, offset: int = 0, max_chars: int = 0) -> str:
+async def fetch_page(url: str, timeout: float = 30) -> tuple[str, str, str]:
+    """Завантажує сторінку чи PDF: (кінцевий URL, заголовок, текст)."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    limit = int(max_chars) or ctx.config.max_tool_output_chars
     try:
         async with httpx.AsyncClient(
-            timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT, "Accept-Language": "uk,en;q=0.8"}
+            timeout=timeout, follow_redirects=True, headers={"User-Agent": USER_AGENT, "Accept-Language": "uk,en;q=0.8"}
         ) as client:
             r = await client.get(url)
     except httpx.HTTPError as e:
@@ -164,13 +171,19 @@ async def fetch_url(ctx: ToolContext, url: str, offset: int = 0, max_chars: int 
     if "pdf" in ctype or url.lower().endswith(".pdf"):
         text = await asyncio.to_thread(_pdf_to_text, r.content)
     elif "html" in ctype or "<html" in r.text[:500].lower():
-        title, text = _html_to_text(r.text)
+        title, text = await asyncio.to_thread(_html_to_text, r.text)
     else:
         text = r.text
+    return str(r.url), title, text
+
+
+async def fetch_url(ctx: ToolContext, url: str, offset: int = 0, max_chars: int = 0) -> str:
+    limit = int(max_chars) or ctx.config.max_tool_output_chars
+    final_url, title, text = await fetch_page(url)
 
     offset = max(0, int(offset))
     chunk = text[offset : offset + limit]
-    header = f"URL: {r.url}\n" + (f"Заголовок: {title}\n" if title else "")
+    header = f"URL: {final_url}\n" + (f"Заголовок: {title}\n" if title else "")
     header += f"Символи {offset}–{offset + len(chunk)} з {len(text)}"
     if offset + limit < len(text):
         header += f" (є продовження: виклич fetch_url з offset={offset + limit})"

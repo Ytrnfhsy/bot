@@ -28,6 +28,12 @@ class ToolContext:
     vision_ok: bool = True  # чи може поточна модель бачити зображення
     pending_images: list[str] = field(default_factory=list)  # картинки, які view_image просить показати моделі
     memory: Any = None  # semantic.MemoryIndex — пошук пам'яті за змістом (None — лише за словами)
+    llm: Any = None  # модель — для інструментів, яким треба «подумати» (deep_research)
+    progress: Callable[[str], Awaitable[None]] | None = None  # проміжний стан довгого інструмента
+
+    async def report(self, text: str) -> None:
+        if self.progress is not None:
+            await self.progress(text)
 
     def __post_init__(self) -> None:
         if self.workspace is None:
@@ -126,10 +132,10 @@ class ToolRegistry:
 
 
 def build_registry() -> ToolRegistry:
-    from . import files, memory, python_exec, shell, system, vision, web
+    from . import files, memory, python_exec, research, shell, system, vision, web
 
     reg = ToolRegistry()
-    for module in (web, files, shell, python_exec, memory, system, vision):
+    for module in (web, research, files, shell, python_exec, memory, system, vision):
         for tool in module.TOOLS:
             reg.register(tool)
     return reg

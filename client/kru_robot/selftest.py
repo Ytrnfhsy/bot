@@ -172,6 +172,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         md = win.panel.view.toMarkdown()
         need("Запам'ятав: Люблю каву" in md and "read_file" not in md, f"стрічка: {md[:200]}")
         win.on_event({"type": "status", "state": "summarizing"})
+        win.on_event({"type": "progress", "tool": "deep_research", "text": "читаю джерело 1"})
         win.new_chat()
         return "ok"
 

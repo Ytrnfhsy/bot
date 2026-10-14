@@ -1,0 +1,21 @@
+# Власний пошуковик SearXNG для агента Kru: без лімітів і блокувань, результати з кількох пошуковиків одразу.
+# Запуск — через ../searxng.sh start (створить конфіг із секретом і пропише KRU_SEARXNG_URL).
+
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: kru-searxng
+    restart: unless-stopped   # піднімається сама після перезавантаження сервера
+    ports:
+      - "127.0.0.1:8888:8080"   # лише для агента на цій машині
+    volumes:
+      - ${SEARXNG_CONFIG:-~/.config/kru-searxng}:/etc/searxng:rw
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:8888/
+    mem_limit: 1g
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: {max-size: "1m", max-file: "1"}
