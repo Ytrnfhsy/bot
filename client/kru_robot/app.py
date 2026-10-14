@@ -93,6 +93,7 @@ TOOL_ACTIVITY = {
     "deep_research": "📚 Досліджую тему…",
     "delegate": "🤝 Працює субагент…",
     "update_plan": "📋 Оновлюю план…",
+    "mark_step": "📋 Відмічаю виконане…",
     "schedule_task": "⏰ Планую завдання…",
     "send_telegram": "✈️ Надсилаю в Telegram…",
     "read_file": "📖 Читаю файл…",
@@ -730,7 +731,7 @@ class RobotWindow(QWidget):
             self.panel.append_draft(ev.get("text", ""))
         elif t == "tool_call":
             self.panel.clear_draft()
-            if ev.get("name") == "update_plan":
+            if ev.get("name") in {"update_plan", "mark_step"}:
                 pass  # план показує окремий чек-лист
             elif ev.get("name") == "delegate":
                 args = ev.get("args") if isinstance(ev.get("args"), dict) else {}

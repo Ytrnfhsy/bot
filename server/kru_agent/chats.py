@@ -14,6 +14,8 @@ def _tool_line(tc: dict[str, Any]) -> str:
     args = fn.get("arguments", {})
     if fn.get("name") == "update_plan":
         return "📋 План оновлено"
+    if fn.get("name") == "mark_step" and isinstance(args, dict):
+        return f"📋 Виконано пункт плану {args.get('step')}"
     if fn.get("name") == "delegate" and isinstance(args, dict):
         return f"🤝 Доручено субагенту: {str(args.get('task', ''))[:200]}"
     if fn.get("name") == "remember" and isinstance(args, dict):

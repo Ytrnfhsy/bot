@@ -121,7 +121,7 @@ class Printer:
             print(f"{GREEN}🧠 Запам'ятав:{RESET} {ev.get('args', {}).get('content', '')}")
         elif t == "tool_call":
             self._end_stream()
-            if ev.get("name") == "update_plan":
+            if ev.get("name") in {"update_plan", "mark_step"}:
                 return  # сам план друкується подією plan
             args = json.dumps(ev.get("args", {}), ensure_ascii=False)
             lead = "   ↳ " if ev.get("sub") else ""  # дія субагента

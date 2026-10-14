@@ -19,8 +19,9 @@ from .semantic import Embedder, MemoryIndex
 from .storage import Storage
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
-from .tools.plan import SUBAGENT_DENIED, format_plan
+from .tools.plan import PLAN_TOOLS, SUBAGENT_DENIED, format_plan
 
+PLAN_NUDGE_STEPS = 5  # стільки кроків без оновлення плану — і модель отримує нагадування
 AUTO_FILE_TOOLS = frozenset({"write_file", "edit_file"})  # що можна дозволити без запиту (лише в робочій теці)
 from .users import ADMIN_ONLY_TOOLS, OWNER, User, workspace_for
 
@@ -52,9 +53,10 @@ How to work:
 - To read, list or search files use read_file / list_dir / search_files (no approval needed) — never run_shell
   with cat/grep/head/sed for that. For big texts read in chunks (start_line/max_lines) and write results with
   write_file (append=true for the next parts).
-- Big tasks (3+ distinct steps: research + code + report, multi-file changes, etc.): FIRST call update_plan with
-  a short checklist, then work through it, marking the current step in_progress and finished steps done
-  (always send the whole list). The user sees this checklist live. Skip the plan for simple questions.
+- Big tasks (3+ distinct steps: research + code + report, multi-file changes, translating a book chapter by
+  chapter, etc.): FIRST call update_plan with a short checklist (first step in_progress, the rest pending). Then
+  after finishing EACH step call mark_step with its number — the user watches this checklist live. Use
+  update_plan again only to change the list itself. Skip the plan for simple questions.
 - delegate: hand a self-contained subtask that needs lots of reading/searching (several files or pages) to a
   sub-agent with a fresh context; you get only its result. Describe the subtask fully — it cannot see this chat.
 - Scheduling: when the user wants something done at a specific time or regularly ("at 18:00…", "every morning…",
@@ -212,6 +214,7 @@ class Turn:
     memories: list[dict[str, Any]] = field(default_factory=list)
     plan: list[dict[str, str]] = field(default_factory=list)  # чек-лист великої задачі (update_plan)
     subagent: bool = False  # це підзадача, доручена субагенту (delegate)
+    steps_since_plan: int = 0  # кроків без оновлення плану — для нагадування моделі
 
 
 class Agent:
@@ -297,10 +300,18 @@ class Agent:
             )
         if not turn.plan:
             return ""
-        return (
-            "\nCurrent plan of this task (keep it updated with update_plan; finish the in_progress step first):\n"
+        text = (
+            "\nCurrent plan of this task (the user sees it as a checklist). Work on the in_progress step; as soon as "
+            "a step is finished call mark_step with its number (the next step becomes in_progress automatically):\n"
             + format_plan(turn.plan) + "\n"
         )
+        unfinished = any(s["status"] in {"pending", "in_progress"} for s in turn.plan)
+        if unfinished and turn.steps_since_plan >= PLAN_NUDGE_STEPS:
+            text += (
+                f"REMINDER: you have made {turn.steps_since_plan} steps without updating the plan. If any step above "
+                "is already done, call mark_step for it NOW (you can pass several numbers at once).\n"
+            )
+        return text
 
     def _step_limit(self, turn: Turn) -> int:
         """Кроків на задачу: велика задача з планом отримує більше — по ~8 на кожен пункт."""
@@ -315,7 +326,7 @@ class Agent:
         ctx = turn.ctx
         sub_ctx = replace(
             ctx, denied_tools=ctx.denied_tools | SUBAGENT_DENIED, pending_images=[],
-            plan_hook=None, delegate_hook=None, progress=None,
+            plan_hook=None, plan_get=None, delegate_hook=None, progress=None,
         )
         passthrough = {"tool_call", "tool_result", "confirm_request", "progress", "vision"}
 
@@ -550,6 +561,7 @@ class Agent:
                 return await self._delegate(turn, task, context, emit, confirm)
 
             ctx.plan_hook, ctx.delegate_hook = plan_hook, delegate_hook
+            ctx.plan_get = lambda: turn.plan
             try:
                 turn.memories = await self.memory.search(user_text, ctx.owner, limit=6)
             except Exception:  # noqa: BLE001 — без спогадів теж можна працювати
@@ -581,6 +593,10 @@ class Agent:
                 history.append({"role": "assistant", "content": result.content})
 
             ctx.pending_images.clear()
+            if any(name in PLAN_TOOLS for name, _ in calls):
+                turn.steps_since_plan = 0
+            elif turn.plan:
+                turn.steps_since_plan += 1
             for name, args in calls:
                 output = await self._execute(name, args, emit, confirm, ctx)
                 if self.native_tools:
