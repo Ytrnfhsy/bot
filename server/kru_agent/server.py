@@ -86,6 +86,13 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
             lambda owner: app.state.hub.get(owner) is not None,
         )
         app.state.scheduler.start()
+        app.state.telegram = None
+        if cfg.telegram_bot_token and cfg.telegram_poll:
+            from .telegram_bot import TelegramGateway
+
+            app.state.telegram = TelegramGateway(app.state.agent, app.state.hub, users)
+            app.state.telegram.start()
+            log.info("Telegram-бот слухає повідомлення")
         health = await app.state.agent.llm.health()
         if not health.get("ok"):
             log.warning("LLM-сервер недоступний: %s", health.get("error"))
@@ -98,6 +105,8 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
             log.warning("KRU_TOKEN не задано і користувачів немає — сервер доступний без авторизації!")
         yield
         await app.state.scheduler.stop()
+        if app.state.telegram:
+            await app.state.telegram.stop()
         await app.state.agent.close()
 
     app = FastAPI(title="Kru", version=__version__, lifespan=lifespan)
