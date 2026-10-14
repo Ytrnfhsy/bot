@@ -82,6 +82,7 @@ class SettingsDialog(QDialog):
 TOOL_ACTIVITY = {
     "web_search": "🔎 Шукаю в інтернеті…",
     "fetch_url": "🌐 Читаю сторінку…",
+    "deep_research": "📚 Досліджую тему…",
     "read_file": "📖 Читаю файл…",
     "list_dir": "📂 Переглядаю файли…",
     "search_files": "📂 Шукаю у файлах…",
@@ -680,6 +681,9 @@ class RobotWindow(QWidget):
             elif state == "idle":
                 self.busy = False
                 self.panel.set_busy(False)
+        elif t == "progress":
+            icon = "📚" if ev.get("tool") == "deep_research" else "🔧"
+            self.panel.set_activity(f"{icon} {ev.get('text', '')}"[:120])
         elif t == "thinking":
             if self.settings.show_thinking:
                 self.thinking_buf = (self.thinking_buf + ev.get("text", ""))[-160:]

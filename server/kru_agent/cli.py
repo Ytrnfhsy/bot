@@ -108,6 +108,9 @@ class Printer:
         elif t == "status" and ev.get("state") == "summarizing":
             self._end_stream()
             print(f"{DIM}🗜 Стискаю довгу розмову в підсумок…{RESET}")
+        elif t == "progress":
+            self._end_stream()
+            print(f"{DIM}   … {ev.get('text', '')}{RESET}")
         elif t == "tool_call" and ev.get("name") == "remember":
             self._end_stream()
             print(f"{GREEN}🧠 Запам'ятав:{RESET} {ev.get('args', {}).get('content', '')}")

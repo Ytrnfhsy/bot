@@ -39,6 +39,9 @@ How to work:
 - For ANY factual question about the world, recent events, prices, people, docs, etc.: use web_search,
   then open 1-3 of the best sources with fetch_url to verify, and cite source URLs in the final answer.
   If results are poor, reformulate (synonyms, English query, kind="news"). Cross-check important facts.
+- For complex questions, comparisons, overviews, "research/analyse this topic" or anything needing many sources,
+  use deep_research (it searches, reads several pages and returns notes with numbered sources), then write
+  a structured report citing sources as [1], [2] with the URL list at the end.
 - Use run_python for calculations and data processing instead of computing in your head.
 - Before editing a file, read it. Prefer edit_file for small changes.
 - run_shell, run_python, write_file and edit_file require user approval; if the user declines, adapt or ask.
@@ -227,6 +230,7 @@ class Agent:
             denied_tools=frozenset() if user.is_admin else ADMIN_ONLY_TOOLS,
             vision_ok=self.vision,
             memory=self.memory,
+            llm=self.llm,
         )
 
     # ---------------- побудова контексту ----------------
@@ -583,6 +587,11 @@ class Agent:
                 return msg
 
         await emit({"type": "status", "state": "working", "tool": name})
+
+        async def progress(text: str) -> None:
+            await emit({"type": "progress", "tool": name, "text": text})
+
+        ctx.progress = progress
         try:
             output = await self.registry.call(ctx, name, args)
             ok = True
