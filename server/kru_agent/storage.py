@@ -73,6 +73,10 @@ class Storage:
                 "CREATE TABLE IF NOT EXISTS telegram ("
                 " owner TEXT PRIMARY KEY, chat_id TEXT NOT NULL, linked_at REAL NOT NULL)"
             )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS telegram_codes ("
+                " code TEXT PRIMARY KEY, owner TEXT NOT NULL, expires REAL NOT NULL)"
+            )
             had_fts = self._db.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'memories_fts'"
             ).fetchone() is not None
@@ -133,6 +137,8 @@ class Storage:
                 (_key("owner", row["id"]), row["id"], default_title(messages), _user_count(messages),
                  row["updated_at"], row["id"]),
             )
+        if "session" not in self._columns("telegram"):  # поточний чат, у який пишуть із Telegram
+            self._db.execute("ALTER TABLE telegram ADD COLUMN session TEXT NOT NULL DEFAULT ''")
         if "tz" not in self._columns("schedules"):
             self._db.execute("ALTER TABLE schedules ADD COLUMN tz TEXT NOT NULL DEFAULT ''")
         self._db.execute("CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner, updated_at)")
@@ -364,6 +370,34 @@ class Storage:
                 " ON CONFLICT(owner) DO UPDATE SET chat_id = excluded.chat_id, linked_at = excluded.linked_at",
                 (owner, str(chat_id), time.time()),
             )
+
+    def telegram_owner(self, chat_id: str) -> str | None:
+        """Чий це Telegram-чат (None — не прив'язаний)."""
+        with self._lock:
+            row = self._db.execute("SELECT owner FROM telegram WHERE chat_id = ?", (str(chat_id),)).fetchone()
+        return row["owner"] if row else None
+
+    def telegram_session(self, owner: str) -> str:
+        with self._lock:
+            row = self._db.execute("SELECT session FROM telegram WHERE owner = ?", (owner,)).fetchone()
+        return row["session"] if row else ""
+
+    def set_telegram_session(self, owner: str, session: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE telegram SET session = ? WHERE owner = ?", (session, owner))
+
+    def add_telegram_code(self, owner: str, code: str, ttl: float = 600) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM telegram_codes WHERE expires < ? OR owner = ?", (time.time(), owner))
+            self._db.execute("INSERT INTO telegram_codes(code, owner, expires) VALUES (?, ?, ?)",
+                             (code, owner, time.time() + ttl))
+
+    def use_telegram_code(self, code: str) -> str | None:
+        """Одноразовий код прив'язки → власник (і код згорає); None — невірний чи прострочений."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT owner, expires FROM telegram_codes WHERE code = ?", (code,)).fetchone()
+            self._db.execute("DELETE FROM telegram_codes WHERE code = ?", (code,))
+        return row["owner"] if row and row["expires"] >= time.time() else None
 
     def telegram_chat(self, owner: str) -> str | None:
         with self._lock:

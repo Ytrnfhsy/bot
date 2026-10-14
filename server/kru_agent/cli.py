@@ -399,30 +399,51 @@ def _user_command(cfg: Config, args: argparse.Namespace, parser: argparse.Argume
         parser.print_help()
 
 
-async def _telegram_link(cfg: Config, owner: str, wait: int = 180) -> str:
-    """Чекає повідомлення боту й прив'язує цей чат до користувача. Повертає chat_id."""
-    from .storage import Storage
-    from .telegram import TelegramBot
+async def _telegram_link(cfg: Config, owner: str, wait: int = 600) -> str:
+    """Одноразовий код прив'язки: користувач надсилає боту «/link КОД».
 
+    Якщо сервер уже слухає бота, повідомлення обробить він, а тут лише чекаємо, поки прив'язка з'явиться в базі;
+    якщо ні — слухаємо бота самі.
+    """
+    from .storage import Storage
+    from .telegram import TelegramBot, TelegramError
+    from .telegram_bot import new_code
+
+    storage = Storage(cfg.db_path)
     bot = TelegramBot(cfg.telegram_bot_token)
     me = await bot.me()
-    old = await bot.updates()  # пропустити старі повідомлення
-    offset = (old[-1]["update_id"] + 1) if old else None
-    print(f"Напиши будь-що боту @{me.get('username')} у Telegram (чекаю {wait // 60} хв)…")
+    code = new_code()
+    before = storage.telegram_chat(owner)
+    storage.add_telegram_code(owner, code, ttl=wait)
+    print(f"Відкрий бота @{me.get('username')} у Telegram і надішли йому:\n\n    {BOLD}/link {code}{RESET}\n\n"
+          f"(код діє {wait // 60} хв і спрацює один раз)")
     loop = asyncio.get_running_loop()
     deadline = loop.time() + wait
+    offset, server_listens = None, False
     while loop.time() < deadline:
-        for upd in await bot.updates(offset, timeout=25):
+        chat = storage.telegram_chat(owner)
+        if chat and chat != before:
+            print(f"{GREEN}Прив'язано: chat_id {chat} → користувач {owner}{RESET}")
+            return chat
+        if server_listens:
+            await asyncio.sleep(2)
+            continue
+        try:
+            updates = await bot.updates(offset, timeout=20)
+        except TelegramError as e:
+            if "conflict" in str(e).lower():  # сервер уже слухає бота — він і прив'яже
+                server_listens = True
+                continue
+            raise
+        for upd in updates:
             offset = upd["update_id"] + 1
-            chat = (upd.get("message") or {}).get("chat") or {}
-            if chat.get("id") is not None:
-                chat_id = str(chat["id"])
-                Storage(cfg.db_path).set_telegram_chat(owner, chat_id)
-                who = chat.get("first_name") or chat.get("title") or chat_id
-                await bot.send(chat_id, f"✅ {cfg.agent_name} підключено! Сюди надходитимуть повідомлення для «{owner}».")
-                print(f"{GREEN}Прив'язано: {who} (chat_id {chat_id}) → користувач {owner}{RESET}")
-                return chat_id
-    raise SystemExit("Не дочекався повідомлення. Спробуй ще раз: kru telegram link")
+            msg = upd.get("message") or {}
+            text = (msg.get("text") or "").strip()
+            chat_id = str((msg.get("chat") or {}).get("id", ""))
+            if chat_id and text.split()[-1:] == [code] and storage.use_telegram_code(code) == owner:
+                storage.set_telegram_chat(owner, chat_id)
+                await bot.send(chat_id, f"✅ {cfg.agent_name} підключено для «{owner}»!")
+    raise SystemExit("Не дочекався коду. Спробуй ще раз: kru telegram link")
 
 
 def _telegram_command(cfg: Config, args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
