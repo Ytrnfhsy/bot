@@ -37,6 +37,7 @@ class Settings:
     think: bool = True  # модель міркує перед відповіддю (розумніше, але повільніше)
     show_thinking: bool = False
     show_tools: bool = False  # рядки «🔧 read_file: …» — що саме робить агент
+    auto_files: bool = False  # запис файлів у робочій теці агента без запиту (копії — в .kru-backup)
     last_task: str = ""
 
     @classmethod

@@ -57,6 +57,13 @@ class SettingsDialog(QDialog):
         self.think.toggled.connect(self.thinking.setEnabled)
         self.tools = QCheckBox("Показувати дії агента (🔧 read_file, web_search…)")
         self.tools.setChecked(s.show_tools)
+        self.auto_files = QCheckBox("Запис файлів у робочій теці — без запиту (старі версії → .kru-backup)")
+        self.auto_files.setToolTip(
+            "Агент записує й змінює файли лише у своїй робочій теці на сервері, не питаючи щоразу.\n"
+            "Перед перезаписом стара версія копіюється в .kru-backup (зберігається 7 днів).\n"
+            "Команди shell і Python, як і раніше, просять дозволу."
+        )
+        self.auto_files.setChecked(s.auto_files)
         form.addRow("Сервер (WebSocket):", self.url)
         form.addRow("Токен:", self.token)
         form.addRow("Персонаж:", self.character)
@@ -64,6 +71,7 @@ class SettingsDialog(QDialog):
         form.addRow("", self.think)
         form.addRow("", self.thinking)
         form.addRow("", self.tools)
+        form.addRow("", self.auto_files)
         self.autostart = None
         if IS_WINDOWS:
             self.autostart = QCheckBox("Запускати разом із Windows")
@@ -278,6 +286,7 @@ class RobotWindow(QWidget):
         s.think = dlg.think.isChecked()
         s.show_thinking = dlg.thinking.isChecked()
         s.show_tools = dlg.tools.isChecked()
+        s.auto_files = dlg.auto_files.isChecked()
         self.panel.set_show_tools(s.show_tools)
         if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
             set_autostart(dlg.autostart.isChecked())
@@ -311,7 +320,7 @@ class RobotWindow(QWidget):
     def send_task(self, text: str) -> None:
         self.touch()
         if not self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
-                           "think": self.settings.think}):
+                           "think": self.settings.think, "auto_files": self.settings.auto_files}):
             # немає з'єднання: пробуємо підключитися зараз і надішлемо задачу, щойно вийде
             self._pending_task = text
             self.conn.reconnect_now()
@@ -607,9 +616,12 @@ class RobotWindow(QWidget):
             self.show_panel()
             self.panel.ask(f"⚠ {ev['message']}", [("ok", "Гаразд", "primary")], lambda *_: None)
 
-    def answer_confirm(self, cid: str, approved: bool) -> None:
+    def answer_confirm(self, cid: str, approved: bool, scope: str = "") -> None:
         self.touch()
-        self.conn.send({"type": "confirm_response", "id": cid, "approved": approved})
+        msg = {"type": "confirm_response", "id": cid, "approved": approved}
+        if scope:
+            msg["scope"] = scope
+        self.conn.send(msg)
         self.robot.set_state("working" if approved else "thinking")
 
     # ---------------- події сервера ----------------
@@ -618,7 +630,7 @@ class RobotWindow(QWidget):
         text, self._pending_task = getattr(self, "_pending_task", None), None
         self._sent_on_connect = bool(text)  # тоді hello не перезавантажує чат: задача щойно пішла
         if text and self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
-                           "think": self.settings.think}):
+                           "think": self.settings.think, "auto_files": self.settings.auto_files}):
             if text != self.settings.last_task:
                 self.settings.last_task = text
                 self.settings.save()
@@ -742,7 +754,7 @@ class RobotWindow(QWidget):
             summary = ev.get("summary", "")
             if ev.get("scheduled"):  # дозволу просить заплановане завдання, а не поточний чат
                 summary = f"{ev['scheduled']}\n\n{summary}"
-            self.panel.ask_confirm(ev["id"], summary)
+            self.panel.ask_confirm(ev["id"], summary, str(ev.get("tool", "")))
             self.robot.set_state("waiting")
             self.show_panel()
         elif t == "final":

@@ -36,7 +36,7 @@ def _office_to_text(p) -> str:
     return "\n".join(paragraphs)
 
 
-_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".kru_tmp"}
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".kru_tmp", ".kru-backup"}
 
 
 async def read_file(ctx: ToolContext, path: str, start_line: int = 1, max_lines: int = 400) -> str:
@@ -67,12 +67,49 @@ async def read_file(ctx: ToolContext, path: str, start_line: int = 1, max_lines:
     return truncate(f"{p} (рядки {start}-{end} з {len(lines)})\n{body}{more}", ctx.config.max_tool_output_chars)
 
 
+BACKUP_DIR = ".kru-backup"
+BACKUP_DAYS = 7
+BACKUP_MAX_BYTES = 20 * 1024 * 1024
+
+
+def backup(ctx: ToolContext, p) -> str:
+    """Копія файлу перед перезаписом/зміною: <тека>/.kru-backup/<дата-час>/<шлях>. Старші за 7 днів прибираються."""
+    import shutil
+    import time
+    from pathlib import Path
+
+    if not p.is_file() or p.stat().st_size > BACKUP_MAX_BYTES:
+        return ""
+    ws = Path(ctx.workspace).resolve()
+    root = ws / BACKUP_DIR
+    try:
+        rel = p.resolve().relative_to(ws)
+    except ValueError:  # файл поза робочою текою (лише для адміна з дозволом)
+        rel = Path("_outside", *p.resolve().parts[1:])
+    now = time.time()
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + f".{int(now * 1000) % 1000:03d}"
+    target = root / stamp / rel
+    n = 1
+    while target.exists():  # кілька змін того самого файлу за мить — жодна копія не затирається
+        n += 1
+        target = root / f"{stamp}-{n}" / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(p, target)
+    cutoff = time.time() - BACKUP_DAYS * 86400
+    for old in root.iterdir():
+        if old.is_dir() and old.stat().st_mtime < cutoff:
+            shutil.rmtree(old, ignore_errors=True)
+    return target.relative_to(ws).as_posix()
+
+
 async def write_file(ctx: ToolContext, path: str, content: str, append: bool = False) -> str:
     p = ctx.resolve_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    saved = "" if append else await asyncio.to_thread(backup, ctx, p)
     with open(p, "a" if append else "w", encoding="utf-8") as f:
         f.write(content)
-    return f"{'Дописано' if append else 'Записано'} {len(content)} символів у {p}"
+    note = f" (попередня версія — {saved})" if saved else ""
+    return f"{'Дописано' if append else 'Записано'} {len(content)} символів у {p}{note}"
 
 
 async def edit_file(ctx: ToolContext, path: str, old_text: str, new_text: str) -> str:
@@ -85,8 +122,9 @@ async def edit_file(ctx: ToolContext, path: str, old_text: str, new_text: str) -
         raise ToolError("old_text не знайдено у файлі — спершу прочитай файл через read_file")
     if count > 1:
         raise ToolError(f"old_text зустрічається {count} разів — додай більше контексту, щоб він був унікальним")
+    saved = await asyncio.to_thread(backup, ctx, p)
     p.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
-    return f"Файл {p} змінено"
+    return f"Файл {p} змінено" + (f" (попередня версія — {saved})" if saved else "")
 
 
 async def list_dir(ctx: ToolContext, path: str = ".", recursive: bool = False, pattern: str = "*") -> str:

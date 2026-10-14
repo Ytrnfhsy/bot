@@ -3,8 +3,10 @@
 Протокол WebSocket (/ws?token=...), JSON-повідомлення.
 
 Клієнт → сервер:
-  {"type": "task", "text": "...", "session_id": "default", "think": true}  — think необов'язковий: міркувати чи ні
-  {"type": "confirm_response", "id": "<confirm id>", "approved": true}
+  {"type": "task", "text": "...", "session_id": "default", "think": true, "auto_files": false}
+      think — міркувати чи ні; auto_files — запис файлів у робочій теці без запиту (копії в .kru-backup)
+  {"type": "confirm_response", "id": "<confirm id>", "approved": true, "scope": "task"}
+      scope "task" — дозволяти цей інструмент до кінця задачі (лише запис файлів у робочій теці)
   {"type": "cancel"}
   {"type": "reset", "session_id": "default"}  — видалити розмову
   {"type": "upload", "id": "...", "name": "звіт.pdf", "data": "<base64>"}  — збереже у <тека користувача>/uploads/
@@ -151,7 +153,7 @@ class RunningTask:
         self.scheduled = scheduled
         self.task: asyncio.Task | None = None
         self.subscribers: set[Connection] = set()
-        self.pending: dict[str, tuple[asyncio.Future[bool], dict[str, Any]]] = {}
+        self.pending: dict[str, tuple[asyncio.Future[bool | str], dict[str, Any]]] = {}
         self.last_status: dict[str, Any] | None = None
 
     @property
@@ -168,9 +170,9 @@ class RunningTask:
         for conn in list(self.subscribers):
             await conn.send(ev)
 
-    async def confirm(self, tool: str, summary: str, args: dict[str, Any]) -> bool:
+    async def confirm(self, tool: str, summary: str, args: dict[str, Any]) -> bool | str:
         cid = uuid.uuid4().hex[:10]
-        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        fut: asyncio.Future[bool | str] = asyncio.get_running_loop().create_future()
         ev = {"type": "confirm_request", "id": cid, "tool": tool, "summary": summary}
         if self.scheduled:
             ev["scheduled"] = self.scheduled
@@ -184,10 +186,10 @@ class RunningTask:
         finally:
             self.pending.pop(cid, None)
 
-    def answer(self, cid: str, approved: bool) -> None:
+    def answer(self, cid: str, approved: bool, scope: str = "") -> None:
         item = self.pending.get(cid)
         if item and not item[0].done():
-            item[0].set_result(approved)
+            item[0].set_result("task" if approved and scope == "task" else approved)
 
     def deny_all(self) -> None:
         for fut, _ in self.pending.values():
@@ -239,9 +241,9 @@ class Connection:
             except Exception:  # noqa: BLE001
                 self.closed = True
 
-    async def _run_task(self, rt: RunningTask, text: str, think: bool | None = None) -> None:
+    async def _run_task(self, rt: RunningTask, text: str, think: bool | None = None, auto_files: bool = False) -> None:
         try:
-            await self.agent.run(rt.session_id, text, rt.emit, rt.confirm, self.user, think)
+            await self.agent.run(rt.session_id, text, rt.emit, rt.confirm, self.user, think, auto_files)
         except asyncio.CancelledError:
             await rt.emit({"type": "final", "text": "⏹ Задачу скасовано."})
             await rt.emit({"type": "status", "state": "idle"})
@@ -336,10 +338,11 @@ class Connection:
                     rt = RunningTask(self.user.name, str(msg.get("session_id") or "default"))
                     rt.subscribers.add(self)
                     self.hub.tasks[self.user.name] = rt
-                    rt.task = asyncio.create_task(self._run_task(rt, text, think))
+                    auto_files = msg.get("auto_files") is True
+                    rt.task = asyncio.create_task(self._run_task(rt, text, think, auto_files))
                 elif kind == "confirm_response":
                     if rt := self.hub.get(self.user.name):
-                        rt.answer(str(msg.get("id")), bool(msg.get("approved")))
+                        rt.answer(str(msg.get("id")), bool(msg.get("approved")), str(msg.get("scope") or ""))
                 elif kind == "cancel":
                     if rt := self.hub.get(self.user.name):
                         rt.deny_all()
