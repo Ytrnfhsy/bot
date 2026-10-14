@@ -74,7 +74,10 @@ class Config:
     max_tool_output_chars: int = 20000
     # Зір (розуміння зображень): auto — пробувати, і вимкнути, якщо модель не вміє; on; off
     vision: str = "auto"
-    max_images_in_context: int = 3  # скільки останніх повідомлень із картинками передавати моделі
+    max_images_in_context: int = 3
+    # зменшення картинок перед моделлю (пікселів): звичайний перегляд і «детальний» (view_image detail=high)
+    image_max_pixels: int = 1_000_000
+    image_max_pixels_high: int = 2_500_000  # скільки останніх повідомлень із картинками передавати моделі
     # довгі розмови: старі повідомлення стискаються моделлю в підсумок, а не відкидаються наосліп
     summarize: bool = True
     language: str = "українська"
@@ -136,6 +139,8 @@ class Config:
             max_tool_output_chars=int(_env("MAX_TOOL_OUTPUT_CHARS", str(d.max_tool_output_chars))),
             vision=_env("VISION", d.vision).lower(),
             max_images_in_context=int(_env("MAX_IMAGES_IN_CONTEXT", str(d.max_images_in_context))),
+            image_max_pixels=int(_env("IMAGE_MAX_PIXELS", str(d.image_max_pixels))),
+            image_max_pixels_high=int(_env("IMAGE_MAX_PIXELS_HIGH", str(d.image_max_pixels_high))),
             summarize=_env_bool("SUMMARIZE", d.summarize),
             language=_env("LANGUAGE", d.language),
             timezone=_env("TIMEZONE", d.timezone),

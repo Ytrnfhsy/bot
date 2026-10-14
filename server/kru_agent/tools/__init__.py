@@ -27,6 +27,7 @@ class ToolContext:
     denied_tools: frozenset[str] = frozenset()  # недоступні цьому користувачу
     vision_ok: bool = True  # чи може поточна модель бачити зображення
     pending_images: list[str] = field(default_factory=list)  # картинки, які view_image просить показати моделі
+    pending_high: bool = False  # view_image(detail="high") — показати їх у більшій роздільності
     memory: Any = None  # semantic.MemoryIndex — пошук пам'яті за змістом (None — лише за словами)
     llm: Any = None  # модель — для інструментів, яким треба «подумати» (deep_research)
     progress: Callable[[str], Awaitable[None]] | None = None  # проміжний стан довгого інструмента

@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-MAX_SIDE = 1568  # довша сторона після зменшення: деталі видно, а токенів — помірно
+MAX_SIDE = 1568  # довша сторона не більше цього
+# Скільки пікселів лишати. Модель «бачить» ~1 токен на 28×28 пікселів, а візуальний модуль ще й тимчасово
+# займає VRAM пропорційно розміру: 1 Мп ≈ 1300 токенів — досить для фото, схем і більшості скриншотів.
+MAX_PIXELS = 1_000_000
+MAX_PIXELS_HIGH = 2_500_000  # «детальний» перегляд: дрібний текст на великому скриншоті
+MAX_SIDE_HIGH = 2560
 MAX_BYTES = 20 * 1024 * 1024
 
 _RAW_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
@@ -30,7 +35,13 @@ def find_image_refs(text: str) -> list[str]:
     return seen
 
 
-def load_image(path: Path) -> dict[str, Any]:
+def fit_size(w: int, h: int, max_pixels: int = MAX_PIXELS, max_side: int = MAX_SIDE) -> tuple[int, int]:
+    """Розмір після зменшення: не більше max_pixels пікселів і max_side по довшій стороні (пропорції ті самі)."""
+    scale = min(1.0, (max_pixels / max(1, w * h)) ** 0.5, max_side / max(w, h, 1))
+    return max(1, int(w * scale)), max(1, int(h * scale))
+
+
+def load_image(path: Path, max_pixels: int = MAX_PIXELS) -> dict[str, Any]:
     """{"mime", "data"(base64)}; велике зображення зменшується, рідкісні формати → PNG."""
     data = path.read_bytes()
     if len(data) > MAX_BYTES:
@@ -45,8 +56,10 @@ def load_image(path: Path) -> dict[str, Any]:
 
     with Image.open(io.BytesIO(data)) as im:
         im.seek(0)  # перший кадр gif
-        if max(im.size) > MAX_SIDE:
-            im.thumbnail((MAX_SIDE, MAX_SIDE))
+        side = MAX_SIDE if max_pixels <= MAX_PIXELS else MAX_SIDE_HIGH
+        size = fit_size(*im.size, max_pixels=max_pixels, max_side=side)
+        if size != im.size:
+            im = im.resize(size, Image.LANCZOS)
         has_alpha = im.mode in {"RGBA", "LA", "P"}
         im = im.convert("RGBA" if has_alpha else "RGB")
         buf = io.BytesIO()
