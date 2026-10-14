@@ -20,12 +20,15 @@ from .storage import Storage
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
 from .tools.plan import SUBAGENT_DENIED, format_plan
+
+AUTO_FILE_TOOLS = frozenset({"write_file", "edit_file"})  # що можна дозволити без запиту (лише в робочій теці)
 from .users import ADMIN_ONLY_TOOLS, OWNER, User, workspace_for
 
 log = logging.getLogger("kru.agent")
 
 EmitFunc = Callable[[dict[str, Any]], Awaitable[None]]
-ConfirmFunc = Callable[[str, str, dict[str, Any]], Awaitable[bool]]  # (tool, summary, args) -> approved
+# (tool, summary, args) -> True/False, або "task" — дозволити цей інструмент до кінця задачі
+ConfirmFunc = Callable[[str, str, dict[str, Any]], Awaitable[bool | str]]
 
 SYSTEM_PROMPT = """Your name is {name}. You are a capable autonomous assistant agent running on the user's server.
 When asked who you are, introduce yourself as {name}.{persona}
@@ -46,6 +49,9 @@ How to work:
 - Use run_python for calculations and data processing instead of computing in your head.
 - Before editing a file, read it. Prefer edit_file for small changes.
 - run_shell, run_python, write_file and edit_file require user approval; if the user declines, adapt or ask.
+- To read, list or search files use read_file / list_dir / search_files (no approval needed) — never run_shell
+  with cat/grep/head/sed for that. For big texts read in chunks (start_line/max_lines) and write results with
+  write_file (append=true for the next parts).
 - Big tasks (3+ distinct steps: research + code + report, multi-file changes, etc.): FIRST call update_plan with
   a short checklist, then work through it, marking the current step in_progress and finished steps done
   (always send the whole list). The user sees this checklist live. Skip the plan for simple questions.
@@ -502,9 +508,11 @@ class Agent:
         confirm: ConfirmFunc,
         user: User | None = None,
         think: bool | None = None,
+        auto_files: bool = False,
     ) -> str:
         """think — чи міркувати моделі перед відповіддю (None — як налаштовано на сервері моделі)."""
         ctx = self.make_context(user)
+        ctx.auto_files = auto_files
         lock = self._session_locks.setdefault(f"{ctx.owner}:{session_id}", asyncio.Lock())
         async with lock:
             history = self.storage.load_session(session_id, ctx.owner)
@@ -656,9 +664,11 @@ class Agent:
         summary = tool.describe(args) if tool else f"{name}({args})"
         await emit({"type": "tool_call", "id": call_id, "name": name, "args": args, "summary": summary})
 
-        if tool and tool.dangerous and not self.config.auto_approve:
+        if tool and tool.dangerous and not self.config.auto_approve and not self._auto_approved(name, args, ctx):
             await emit({"type": "status", "state": "waiting_confirm"})
             approved = await confirm(name, summary, args)
+            if approved == "task" and name in AUTO_FILE_TOOLS:  # «дозволяти до кінця задачі»
+                ctx.approved_tools.add(name)
             if not approved:
                 msg = "Користувач ВІДХИЛИВ цю дію. Не повторюй її; запропонуй альтернативу або спитай, як діяти."
                 await emit({"type": "tool_result", "id": call_id, "name": name, "ok": False, "preview": "відхилено"})
@@ -683,6 +693,19 @@ class Agent:
         output = truncate(output, self.config.max_tool_output_chars)
         await emit({"type": "tool_result", "id": call_id, "name": name, "ok": ok, "preview": output[:500]})
         return output
+
+    @staticmethod
+    def _auto_approved(name: str, args: dict[str, Any], ctx: ToolContext) -> bool:
+        """Запис файлів без запиту — лише якщо користувач дозволив і лише в його робочій теці
+        (старі версії зберігаються в .kru-backup). Shell і Python завжди питають."""
+        if name not in AUTO_FILE_TOOLS or not (ctx.auto_files or name in ctx.approved_tools):
+            return False
+        try:
+            path = ctx.resolve_path(str(args.get("path", "")))
+        except ToolError:
+            return False
+        ws = ctx.workspace.resolve()
+        return path != ws and ws in path.parents
 
     def reset_session(self, session_id: str, owner: str = OWNER) -> None:
         self.storage.clear_session(session_id, owner)

@@ -62,6 +62,7 @@ QPushButton#flat { background: transparent; color: #5B6B82; padding: 0; border-r
 QPushButton#flat:hover { background: #E7EEF8; }
 QPushButton#flat:pressed { background: #D5E2F2; }
 QPushButton#allow { background: #5BE49B; color: #0E3B22; }
+QPushButton#allowTask { background: #DDF7E8; color: #0E3B22; }
 QPushButton#deny { background: #FFE1E1; color: #C92A2A; }
 #confirm { background: #FFF6E9; border: 1px solid #FFC98A; border-radius: 12px; }
 QLabel#confirmTitle { color: #B35C00; font-weight: 700; }
@@ -136,6 +137,9 @@ def make_icon(kind: str, size: int = 18) -> QIcon:
     return QIcon(pm)
 
 
+TASK_SCOPE_TOOLS = {"write_file", "edit_file"}  # що можна дозволити «до кінця задачі»
+
+
 class InputBox(QPlainTextEdit):
     submitted = Signal()
     image_pasted = Signal(str)  # шлях до тимчасового PNG
@@ -175,7 +179,7 @@ class ChatPanel(QWidget):
     history_rename = Signal(str, str)  # (id, поточна назва)
     new_chat_requested = Signal()
     chats_requested = Signal()
-    confirm_answered = Signal(str, bool)
+    confirm_answered = Signal(str, bool, str)  # id, дозволено, scope ("task" — до кінця задачі)
     closed = Signal()
 
     WIDTH = 408
@@ -267,15 +271,23 @@ class ChatPanel(QWidget):
         bl = QHBoxLayout()
         self.btn_allow = QPushButton("Дозволити", objectName="allow")
         self.btn_deny = QPushButton("Відхилити", objectName="deny")
+        # запис файлів можна дозволити одразу для всієї задачі (наприклад, переклад великого тексту частинами)
+        self.btn_allow_task = QPushButton("До кінця задачі", objectName="allowTask")
+        self.btn_allow_task.setToolTip(
+            "Дозволяти цю дію без запитів до кінця поточної задачі — лише для файлів у робочій теці агента; "
+            "попередні версії файлів зберігаються в .kru-backup"
+        )
         self.btn_allow.clicked.connect(lambda: self._answer(True))
         self.btn_deny.clicked.connect(lambda: self._answer(False))
+        self.btn_allow_task.clicked.connect(lambda: self._answer(True, "task"))
         bl.addStretch(1)
         bl.addWidget(self.btn_deny)
+        bl.addWidget(self.btn_allow_task)
         bl.addWidget(self.btn_allow)
         cl.addLayout(bl)
         self.confirm_box.hide()
         lay.addWidget(self.confirm_box)
-        self._confirm_queue: list[tuple[str, str]] = []
+        self._confirm_queue: list[tuple[str, str, str]] = []  # (id, опис, інструмент)
 
         # вбудований запит (зберегти? / назва чату / видалити?) — замість окремих вікон
         self.ask_box = QFrame(objectName="ask")
@@ -695,8 +707,8 @@ class ChatPanel(QWidget):
         self.draft = ""
         self._render()
 
-    def ask_confirm(self, cid: str, summary: str) -> None:
-        self._confirm_queue.append((cid, summary))
+    def ask_confirm(self, cid: str, summary: str, tool: str = "") -> None:
+        self._confirm_queue.append((cid, summary, tool))
         if len(self._confirm_queue) == 1:
             self._show_confirm()
 
@@ -712,6 +724,7 @@ class ChatPanel(QWidget):
             self._render()  # стрічка знову може бути вищою
         else:
             self.confirm_text.setPlainText(self._confirm_queue[0][1])
+            self.btn_allow_task.setVisible(self._confirm_queue[0][2] in TASK_SCOPE_TOOLS)
             self.confirm_text.moveCursor(QTextCursor.MoveOperation.Start)
             self.confirm_box.show()
             self._size_confirm_text()
@@ -730,15 +743,19 @@ class ChatPanel(QWidget):
         width = max(100, self.WIDTH - 2 * self.MARGIN - 60)
         for line in self.confirm_text.toPlainText().split("\n"):
             lines += max(1, -(-fm.horizontalAdvance(line) // width))  # з урахуванням переносу рядків
-        content = lines * fm.lineSpacing() + 14
+        content = lines * fm.lineSpacing() + 26  # + рамка й внутрішні відступи поля
         cap = max(90, min(320, int(self._screen_height() * 0.33)))
-        self.confirm_text.setFixedHeight(max(36, min(cap, content)))
+        self.confirm_text.setFixedHeight(max(48, min(cap, content)))
 
-    def _answer(self, approved: bool) -> None:
+    def _answer(self, approved: bool, scope: str = "") -> None:
         if not self._confirm_queue:
             return
-        cid, _ = self._confirm_queue.pop(0)
-        self.confirm_answered.emit(cid, approved)
+        cid, _summary, tool = self._confirm_queue.pop(0)
+        self.confirm_answered.emit(cid, approved, scope)
+        if scope == "task":  # інші вже чергові запити на той самий інструмент — теж дозволити
+            for item in [i for i in self._confirm_queue if i[2] == tool]:
+                self._confirm_queue.remove(item)
+                self.confirm_answered.emit(item[0], True, scope)
         self._show_confirm()
 
     def _submit(self) -> None:

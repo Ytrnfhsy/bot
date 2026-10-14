@@ -272,6 +272,28 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     step(50, lambda: check("scheduled_notify", notify_flow))
+
+    def allow_task_flow():
+        sent = []
+        orig = win.conn.send
+        win.conn.send = lambda msg: sent.append(msg) or True
+        try:
+            win.on_event({"type": "confirm_request", "id": "c1", "tool": "write_file", "summary": "Записати файл a.txt"})
+            win.on_event({"type": "confirm_request", "id": "c2", "tool": "write_file", "summary": "Записати файл b.txt"})
+            QApplication.processEvents()
+            need(win.panel.btn_allow_task.isVisible(), "немає кнопки «До кінця задачі» для запису файлу")
+            win.panel.btn_allow_task.click()
+            win.on_event({"type": "confirm_request", "id": "c3", "tool": "run_shell", "summary": "Виконати команду"})
+            QApplication.processEvents()
+            need(not win.panel.btn_allow_task.isVisible(), "для shell кнопки «До кінця задачі» бути не повинно")
+            win.panel._answer(False)
+        finally:
+            win.conn.send = orig
+        replies = [(m["id"], m["approved"], m.get("scope")) for m in sent if m["type"] == "confirm_response"]
+        need(replies == [("c1", True, "task"), ("c2", True, "task"), ("c3", False, None)], f"відповіді: {replies}")
+        return replies
+
+    step(50, lambda: check("allow_for_task", allow_task_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())
