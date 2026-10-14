@@ -90,6 +90,9 @@ class Config:
     shell_timeout: int = 120
     python_timeout: int = 120
     searxng_url: str = ""
+    # Telegram: токен бота від @BotFather; чат прив'язується командою `kru telegram link`
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""  # необов'язково: чат власника без прив'язки
 
     # Пам'ять за змістом: окрема маленька модель ембедингів (deploy/qwen36 → сервіс embed). Порожньо — вимкнено.
     embed_url: str = "http://127.0.0.1:8086"
@@ -141,6 +144,8 @@ class Config:
             shell_timeout=int(_env("SHELL_TIMEOUT", str(d.shell_timeout))),
             python_timeout=int(_env("PYTHON_TIMEOUT", str(d.python_timeout))),
             searxng_url=_env("SEARXNG_URL", d.searxng_url),
+            telegram_bot_token=_env("TELEGRAM_BOT_TOKEN", d.telegram_bot_token),
+            telegram_chat_id=_env("TELEGRAM_CHAT_ID", d.telegram_chat_id),
             embed_url=_env("EMBED_URL", d.embed_url),
             embed_model=_env("EMBED_MODEL", d.embed_model),
             embed_query_prefix=_env("EMBED_QUERY_PREFIX", d.embed_query_prefix).replace("\\n", "\n"),

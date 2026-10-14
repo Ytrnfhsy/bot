@@ -59,6 +59,17 @@ class Storage:
                 " id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, messages TEXT NOT NULL,"
                 " created_at REAL NOT NULL, updated_at REAL NOT NULL)"
             )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS schedules ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, task TEXT NOT NULL,"
+                " next_run REAL NOT NULL, repeat TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,"
+                " created_at REAL NOT NULL, last_run REAL, last_status TEXT NOT NULL DEFAULT '',"
+                " last_chat TEXT NOT NULL DEFAULT '')"
+            )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS telegram ("
+                " owner TEXT PRIMARY KEY, chat_id TEXT NOT NULL, linked_at REAL NOT NULL)"
+            )
             had_fts = self._db.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'memories_fts'"
             ).fetchone() is not None
@@ -281,3 +292,62 @@ class Storage:
             return self._db.execute(
                 "UPDATE sessions SET title = ?, auto_title = 0 WHERE id = ?", (title, _key(owner, session_id))
             ).rowcount > 0
+
+    # ---------- заплановані завдання ----------
+    _SCHED_COLS = "id, owner, task, next_run, repeat, enabled, created_at, last_run, last_status, last_chat"
+
+    def add_schedule(self, owner: str, task: str, next_run: float, repeat: str = "") -> int:
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "INSERT INTO schedules(owner, task, next_run, repeat, created_at) VALUES (?, ?, ?, ?, ?)",
+                (owner, task.strip(), next_run, repeat, time.time()),
+            )
+            return int(cur.lastrowid)
+
+    def list_schedules(self, owner: str, include_done: bool = False) -> list[dict[str, Any]]:
+        where = "owner = ?" + ("" if include_done else " AND enabled = 1")
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {self._SCHED_COLS} FROM schedules WHERE {where} ORDER BY next_run", (owner,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def due_schedules(self, now: float) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {self._SCHED_COLS} FROM schedules WHERE enabled = 1 AND next_run <= ? ORDER BY next_run",
+                (now,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_schedule(self, sched_id: int, **fields: Any) -> None:
+        allowed = {"next_run", "enabled", "last_run", "last_status", "last_chat"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return
+        with self._lock, self._db:
+            self._db.execute(
+                f"UPDATE schedules SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
+                (*sets.values(), sched_id),
+            )
+
+    def cancel_schedule(self, sched_id: int, owner: str) -> bool:
+        with self._lock, self._db:
+            return self._db.execute(
+                "UPDATE schedules SET enabled = 0, last_status = 'скасовано' WHERE id = ? AND owner = ? AND enabled = 1",
+                (sched_id, owner),
+            ).rowcount > 0
+
+    # ---------- Telegram ----------
+    def set_telegram_chat(self, owner: str, chat_id: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO telegram(owner, chat_id, linked_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(owner) DO UPDATE SET chat_id = excluded.chat_id, linked_at = excluded.linked_at",
+                (owner, str(chat_id), time.time()),
+            )
+
+    def telegram_chat(self, owner: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT chat_id FROM telegram WHERE owner = ?", (owner,)).fetchone()
+        return row["chat_id"] if row else None

@@ -134,10 +134,10 @@ class ToolRegistry:
 
 
 def build_registry() -> ToolRegistry:
-    from . import files, memory, plan, python_exec, research, shell, system, vision, web
+    from . import files, memory, plan, python_exec, research, schedule, shell, system, telegram, vision, web
 
     reg = ToolRegistry()
-    for module in (web, research, files, shell, python_exec, memory, plan, system, vision):
+    for module in (web, research, files, shell, python_exec, memory, plan, schedule, telegram, system, vision):
         for tool in module.TOOLS:
             reg.register(tool)
     return reg

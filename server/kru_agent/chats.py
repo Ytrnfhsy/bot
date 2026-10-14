@@ -34,6 +34,8 @@ def transcript(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
             if content.startswith("TOOL RESULT") or content.startswith("[view_image]"):
                 continue  # службові повідомлення JSON-протоколу / view_image
             text = content
+            if content.startswith("⏰ Заплановане завдання") and "\n" in content:
+                text = "⏰ " + content.split("\n", 1)[1]  # службову інструкцію не показуємо
             if m.get("images"):
                 text += "\n" + "\n".join(f"📎 {p}" for p in m["images"])
             out.append({"role": "user", "text": text})

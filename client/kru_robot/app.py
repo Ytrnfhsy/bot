@@ -85,6 +85,8 @@ TOOL_ACTIVITY = {
     "deep_research": "📚 Досліджую тему…",
     "delegate": "🤝 Працює субагент…",
     "update_plan": "📋 Оновлюю план…",
+    "schedule_task": "⏰ Планую завдання…",
+    "send_telegram": "✈️ Надсилаю в Telegram…",
     "read_file": "📖 Читаю файл…",
     "list_dir": "📂 Переглядаю файли…",
     "search_files": "📂 Шукаю у файлах…",
@@ -734,8 +736,13 @@ class RobotWindow(QWidget):
         elif t == "tool_result":
             if not ev.get("ok"):
                 self.panel.add_entry("tool", f"✗ {ev.get('name')}: {str(ev.get('preview', ''))[:140]}")
+        elif t == "notify":
+            self._on_notify(ev)
         elif t == "confirm_request":
-            self.panel.ask_confirm(ev["id"], ev.get("summary", ""))
+            summary = ev.get("summary", "")
+            if ev.get("scheduled"):  # дозволу просить заплановане завдання, а не поточний чат
+                summary = f"{ev['scheduled']}\n\n{summary}"
+            self.panel.ask_confirm(ev["id"], summary)
             self.robot.set_state("waiting")
             self.show_panel()
         elif t == "final":
@@ -752,6 +759,24 @@ class RobotWindow(QWidget):
         elif t == "error":
             self.panel.add_entry("error", ev.get("message", "помилка"))
             self.robot.set_state("sad", 3.0)
+
+    def _on_notify(self, ev: dict) -> None:
+        """Заплановане завдання виконано: сповіщення з коротким результатом і кнопкою «Відкрити чат»."""
+        title, body = str(ev.get("title", "⏰ Завдання")), " ".join(str(ev.get("text", "")).split())
+        preview = body[:280] + ("…" if len(body) > 280 else "")
+        self.robot.set_state("sad" if ev.get("error") else "happy", 2.5)
+        if self.tray is not None:
+            self.tray.showMessage(title, preview or "Готово")
+        chat_id = ev.get("chat_id")
+
+        def answer(key: str, _text: str) -> None:
+            if key == "open" and chat_id:
+                self.open_chat(chat_id)
+
+        self.show_panel()
+        buttons = [("ok", "Гаразд", "secondary")] + ([("open", "Відкрити чат", "primary")] if chat_id else [])
+        self.panel.ask(f"{title} — {'не вдалося' if ev.get('error') else 'виконано'}\n\n{preview}", buttons, answer,
+                       default="open" if chat_id else "ok")
 
     def _back_to_idle(self) -> None:
         if self.robot.state == "happy" and not self.busy:
