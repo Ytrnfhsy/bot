@@ -118,7 +118,18 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
     step(300, lambda: check("window", window_check))
     step(50, lambda: win.on_robot_clicked())
-    step(700, lambda: check("panel_show", lambda: (need(win.panel.shown, "панель не з'явилась"),
+
+    def wait_panel_shown(timeout: float = 3.0) -> None:
+        """Дочекатися кінця анімації появи (на повільній машині CI вона може затягнутися)."""
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not (win.panel.shown and win.panel.windowOpacity() > 0.95):
+            QApplication.processEvents()
+            time.sleep(0.02)
+
+    step(300, wait_panel_shown)
+    step(50, lambda: check("panel_show", lambda: (need(win.panel.shown, "панель не з'явилась"),
                                                    need(win.panel.windowOpacity() > 0.95, f"прозорість {win.panel.windowOpacity()}"),
                                                    win.panel.grab().save(str(report.with_name("selftest-panel.png"))),
                                                    "ok")[-1]))
