@@ -6,7 +6,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import Tool, ToolContext
+from . import Tool, ToolContext, preview
 from .shell import run_process
 
 
@@ -46,6 +46,6 @@ TOOLS = [
         },
         func=run_python,
         dangerous=True,
-        summarize=lambda a: f"Виконати Python-код:\n{str(a.get('code', ''))[:1500]}",
+        summarize=lambda a: f"Виконати Python-код:\n{preview(a.get('code', ''))}",
     ),
 ]

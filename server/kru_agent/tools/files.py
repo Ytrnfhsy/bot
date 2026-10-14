@@ -7,7 +7,7 @@ import fnmatch
 import os
 import re
 
-from . import Tool, ToolContext, ToolError, truncate
+from . import Tool, ToolContext, ToolError, preview, truncate
 
 _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic"}
 
@@ -180,7 +180,7 @@ TOOLS = [
         func=write_file,
         dangerous=True,
         summarize=lambda a: f"{'Дописати у' if a.get('append') else 'Записати'} файл {a.get('path')} "
-        f"({len(str(a.get('content', '')))} символів):\n{str(a.get('content', ''))[:600]}",
+        f"({len(str(a.get('content', '')))} символів):\n{preview(a.get('content', ''))}",
     ),
     Tool(
         name="edit_file",
@@ -196,7 +196,7 @@ TOOLS = [
         },
         func=edit_file,
         dangerous=True,
-        summarize=lambda a: f"Змінити файл {a.get('path')}:\n- {str(a.get('old_text'))[:300]}\n+ {str(a.get('new_text'))[:300]}",
+        summarize=lambda a: f"Змінити файл {a.get('path')}:\n- {preview(a.get('old_text'), 8000)}\n+ {preview(a.get('new_text'), 8000)}",
     ),
     Tool(
         name="list_dir",
