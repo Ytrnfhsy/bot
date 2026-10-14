@@ -3,8 +3,9 @@
 Протокол WebSocket (/ws?token=...), JSON-повідомлення.
 
 Клієнт → сервер:
-  {"type": "task", "text": "...", "session_id": "default", "think": true, "auto_files": false}
-      think — міркувати чи ні; auto_files — запис файлів у робочій теці без запиту (копії в .kru-backup)
+  {"type": "task", "text": "...", "session_id": "default", "think": true, "auto_files": false, "tz": "Europe/Kyiv"}
+      think — міркувати чи ні; auto_files — запис файлів у робочій теці без запиту (копії в .kru-backup);
+      tz — часовий пояс користувача (IANA, напр. "Europe/Kyiv"): час у розмові й розкладі — саме в ньому
   {"type": "confirm_response", "id": "<confirm id>", "approved": true, "scope": "task"}
       scope "task" — дозволяти цей інструмент до кінця задачі (лише запис файлів у робочій теці)
   {"type": "cancel"}
@@ -241,9 +242,10 @@ class Connection:
             except Exception:  # noqa: BLE001
                 self.closed = True
 
-    async def _run_task(self, rt: RunningTask, text: str, think: bool | None = None, auto_files: bool = False) -> None:
+    async def _run_task(self, rt: RunningTask, text: str, think: bool | None = None, auto_files: bool = False,
+                        tz: str | None = None) -> None:
         try:
-            await self.agent.run(rt.session_id, text, rt.emit, rt.confirm, self.user, think, auto_files)
+            await self.agent.run(rt.session_id, text, rt.emit, rt.confirm, self.user, think, auto_files, tz)
         except asyncio.CancelledError:
             await rt.emit({"type": "final", "text": "⏹ Задачу скасовано."})
             await rt.emit({"type": "status", "state": "idle"})
@@ -339,7 +341,8 @@ class Connection:
                     rt.subscribers.add(self)
                     self.hub.tasks[self.user.name] = rt
                     auto_files = msg.get("auto_files") is True
-                    rt.task = asyncio.create_task(self._run_task(rt, text, think, auto_files))
+                    tz = msg.get("tz") if isinstance(msg.get("tz"), str) else None
+                    rt.task = asyncio.create_task(self._run_task(rt, text, think, auto_files, tz))
                 elif kind == "confirm_response":
                     if rt := self.hub.get(self.user.name):
                         rt.answer(str(msg.get("id")), bool(msg.get("approved")), str(msg.get("scope") or ""))
@@ -385,7 +388,8 @@ async def run_scheduled(agent: Agent, hub: TaskHub, users: UserStore, item: dict
     rt.task = asyncio.current_task()
     hub.tasks[user.name] = rt
     try:
-        answer = await agent.run(chat_id, SCHEDULED_PREFIX + item["task"], rt.emit, rt.confirm, user)
+        answer = await agent.run(chat_id, SCHEDULED_PREFIX + item["task"], rt.emit, rt.confirm, user,
+                                 tz=item.get("tz") or None)
         agent.storage.rename_chat(chat_id, title, user.name)
         await hub.notify(user.name, {"type": "notify", "title": title, "text": answer[:800], "chat_id": chat_id})
         return answer

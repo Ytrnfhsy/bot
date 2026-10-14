@@ -17,6 +17,7 @@ from .images import find_image_refs, is_image, load_image
 from .llm import ChatResult, OllamaClient, OpenAICompatClient, ToolsNotSupported, VisionNotSupported, create_llm
 from .semantic import Embedder, MemoryIndex
 from .storage import Storage
+from .timezones import describe_tz, get_tz, server_tz
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
 from .tools.plan import PLAN_TOOLS, SUBAGENT_DENIED, format_plan
@@ -35,7 +36,8 @@ SYSTEM_PROMPT = """Your name is {name}. You are a capable autonomous assistant a
 When asked who you are, introduce yourself as {name}.{persona}
 You solve tasks step by step using tools, and you finish with a clear, well-structured answer.
 
-Current date/time: {now}
+Current date/time (the user's local time, timezone {tz}): {now}
+All times the user mentions are in this timezone — use them as is, never convert to UTC yourself.
 Workspace directory (files, shell and python run here): {workspace}
 Always answer in the user's language (default: {language}).
 
@@ -268,7 +270,8 @@ class Agent:
                 + turn.summary + "\n"
             )
         prompt = SYSTEM_PROMPT.format(
-            now=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z (%A)"),
+            now=datetime.now(ctx.tz).strftime("%Y-%m-%d %H:%M (%A)"),
+            tz=describe_tz(ctx.tz or server_tz(), ctx.tz_name),
             workspace=ctx.workspace,
             language=self.config.language,
             name=self.config.agent_name,
@@ -520,10 +523,12 @@ class Agent:
         user: User | None = None,
         think: bool | None = None,
         auto_files: bool = False,
+        tz: str | None = None,
     ) -> str:
         """think — чи міркувати моделі перед відповіддю (None — як налаштовано на сервері моделі)."""
         ctx = self.make_context(user)
         ctx.auto_files = auto_files
+        self._apply_tz(ctx, tz)
         lock = self._session_locks.setdefault(f"{ctx.owner}:{session_id}", asyncio.Lock())
         async with lock:
             history = self.storage.load_session(session_id, ctx.owner)
@@ -709,6 +714,17 @@ class Agent:
         output = truncate(output, self.config.max_tool_output_chars)
         await emit({"type": "tool_result", "id": call_id, "name": name, "ok": ok, "preview": output[:500]})
         return output
+
+    def _apply_tz(self, ctx: ToolContext, tz: str | None) -> None:
+        """Пояс користувача: від клієнта (і запам'ятати) → збережений → KRU_TIMEZONE → пояс сервера."""
+        if get_tz(tz):
+            if self.storage.user_tz(ctx.owner) != tz:
+                self.storage.set_user_tz(ctx.owner, tz)
+            name = tz
+        else:
+            name = self.storage.user_tz(ctx.owner) or self.config.timezone
+        ctx.tz = get_tz(name)
+        ctx.tz_name = name if ctx.tz else ""
 
     @staticmethod
     def _auto_approved(name: str, args: dict[str, Any], ctx: ToolContext) -> bool:

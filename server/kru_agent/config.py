@@ -78,6 +78,9 @@ class Config:
     # довгі розмови: старі повідомлення стискаються моделлю в підсумок, а не відкидаються наосліп
     summarize: bool = True
     language: str = "українська"
+    # часовий пояс користувачів за замовчуванням (IANA, напр. Europe/Kyiv); порожньо — пояс сервера.
+    # Робот передає пояс свого ПК сам — цей параметр лише запасний (CLI, API).
+    timezone: str = ""
     agent_name: str = "Kru"
     persona: str = ""  # характер/стиль, напр. "привітний, з легким гумором"
 
@@ -135,6 +138,7 @@ class Config:
             max_images_in_context=int(_env("MAX_IMAGES_IN_CONTEXT", str(d.max_images_in_context))),
             summarize=_env_bool("SUMMARIZE", d.summarize),
             language=_env("LANGUAGE", d.language),
+            timezone=_env("TIMEZONE", d.timezone),
             agent_name=_env("AGENT_NAME", d.agent_name),
             persona=_env("PERSONA", d.persona),
             workspace=Path(_env("WORKSPACE", str(d.workspace))).expanduser(),

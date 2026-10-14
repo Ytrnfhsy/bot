@@ -30,6 +30,8 @@ class ToolContext:
     memory: Any = None  # semantic.MemoryIndex — пошук пам'яті за змістом (None — лише за словами)
     llm: Any = None  # модель — для інструментів, яким треба «подумати» (deep_research)
     progress: Callable[[str], Awaitable[None]] | None = None  # проміжний стан довгого інструмента
+    tz: Any = None  # tzinfo користувача (None — пояс сервера)
+    tz_name: str = ""  # його IANA-назва, напр. Europe/Kyiv
     auto_files: bool = False  # запис файлів у робочій теці без запиту (налаштування користувача)
     approved_tools: set[str] = field(default_factory=set)  # «дозволяти до кінця задачі»
     plan_hook: Callable[[list[dict[str, str]]], Awaitable[None]] | None = None  # update_plan → чек-лист чату

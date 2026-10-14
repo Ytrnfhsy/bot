@@ -61,6 +61,8 @@ def run_selftest(app: QApplication, report_path: str) -> int:
     check("settings_path", lambda: (need(str(config_path()).startswith(tmp), str(config_path())), str(config_path()))[1])
     check("ipc_name", lambda: appmod._ipc_name())
     check("export_dir", lambda: str(appmod.RobotWindow.export_dir()))
+    check("timezone", lambda: (need("/" in appmod.local_timezone() or appmod.local_timezone() == "UTC",
+                                    f"пояс: {appmod.local_timezone()!r}"), appmod.local_timezone())[1])
 
     log("синхронні перевірки готові; створюю вікно робота")
     # локальний TCP-сервер: перевіряємо, що робот справді відкриває WebSocket-з'єднання
@@ -116,7 +118,18 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
     step(300, lambda: check("window", window_check))
     step(50, lambda: win.on_robot_clicked())
-    step(700, lambda: check("panel_show", lambda: (need(win.panel.shown, "панель не з'явилась"),
+
+    def wait_panel_shown(timeout: float = 3.0) -> None:
+        """Дочекатися кінця анімації появи (на повільній машині CI вона може затягнутися)."""
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not (win.panel.shown and win.panel.windowOpacity() > 0.95):
+            QApplication.processEvents()
+            time.sleep(0.02)
+
+    step(300, wait_panel_shown)
+    step(50, lambda: check("panel_show", lambda: (need(win.panel.shown, "панель не з'явилась"),
                                                    need(win.panel.windowOpacity() > 0.95, f"прозорість {win.panel.windowOpacity()}"),
                                                    win.panel.grab().save(str(report.with_name("selftest-panel.png"))),
                                                    "ok")[-1]))
