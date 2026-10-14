@@ -240,6 +240,23 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return result
 
     step(50, lambda: check("big_confirm", big_confirm_flow))
+
+    def plan_flow():
+        steps = [{"title": "Знайти дані", "status": "done"}, {"title": "Порахувати", "status": "in_progress"},
+                 {"title": "Написати звіт", "status": "pending"}]
+        win.panel.set_show_tools(False)
+        win.on_event({"type": "plan", "steps": steps})
+        win.on_event({"type": "tool_call", "name": "delegate", "args": {"task": "Прочитай файли"}, "summary": "x"})
+        win.on_event({"type": "tool_call", "name": "read_file", "args": {"path": "a"}, "summary": "a", "sub": True})
+        win.panel._render()
+        md = win.panel.view.toMarkdown()
+        need(win.panel.plan.isVisible() and "1/3" in win.panel.plan.text(), f"чек-лист: {win.panel.plan.text()[:120]}")
+        need("Доручаю субагенту" in md and "read_file" not in md, f"стрічка: {md[:200]}")
+        win.new_chat()
+        need(not win.panel.plan.isVisible(), "чек-лист лишився в новому чаті")
+        return "ok"
+
+    step(50, lambda: check("plan_checklist", plan_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())

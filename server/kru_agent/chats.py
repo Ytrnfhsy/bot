@@ -12,6 +12,10 @@ from .storage import default_title  # noqa: F401 — частина API моду
 def _tool_line(tc: dict[str, Any]) -> str:
     fn = tc.get("function", {})
     args = fn.get("arguments", {})
+    if fn.get("name") == "update_plan":
+        return "📋 План оновлено"
+    if fn.get("name") == "delegate" and isinstance(args, dict):
+        return f"🤝 Доручено субагенту: {str(args.get('task', ''))[:200]}"
     if fn.get("name") == "remember" and isinstance(args, dict):
         return f"🧠 Запам'ятав: {str(args.get('content', ''))[:200]}"
     if isinstance(args, dict):

@@ -30,6 +30,8 @@ class ToolContext:
     memory: Any = None  # semantic.MemoryIndex — пошук пам'яті за змістом (None — лише за словами)
     llm: Any = None  # модель — для інструментів, яким треба «подумати» (deep_research)
     progress: Callable[[str], Awaitable[None]] | None = None  # проміжний стан довгого інструмента
+    plan_hook: Callable[[list[dict[str, str]]], Awaitable[None]] | None = None  # update_plan → чек-лист чату
+    delegate_hook: Callable[[str, str], Awaitable[str]] | None = None  # delegate → субагент
 
     async def report(self, text: str) -> None:
         if self.progress is not None:
@@ -132,10 +134,10 @@ class ToolRegistry:
 
 
 def build_registry() -> ToolRegistry:
-    from . import files, memory, python_exec, research, shell, system, vision, web
+    from . import files, memory, plan, python_exec, research, shell, system, vision, web
 
     reg = ToolRegistry()
-    for module in (web, research, files, shell, python_exec, memory, system, vision):
+    for module in (web, research, files, shell, python_exec, memory, plan, system, vision):
         for tool in module.TOOLS:
             reg.register(tool)
     return reg

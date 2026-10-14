@@ -67,7 +67,8 @@ class Config:
     request_timeout: float = 1200.0  # з міркуваннями відповідь може йти довго
 
     # Агент
-    max_steps: int = 30
+    max_steps: int = 30  # задача з планом (update_plan) отримує більше: ~8 кроків на пункт, до 150
+    sub_max_steps: int = 20  # кроків у субагента (delegate)
     # контекст Qwen3.6 у compose — 65536 токенів: ~120k символів історії + промпт і результати інструментів
     max_history_chars: int = 120000
     max_tool_output_chars: int = 20000
@@ -124,6 +125,7 @@ class Config:
             keep_alive=_env("KEEP_ALIVE", d.keep_alive),
             request_timeout=float(_env("REQUEST_TIMEOUT", str(d.request_timeout))),
             max_steps=int(_env("MAX_STEPS", str(d.max_steps))),
+            sub_max_steps=int(_env("SUB_MAX_STEPS", str(d.sub_max_steps))),
             max_history_chars=int(_env("MAX_HISTORY_CHARS", str(d.max_history_chars))),
             max_tool_output_chars=int(_env("MAX_TOOL_OUTPUT_CHARS", str(d.max_tool_output_chars))),
             vision=_env("VISION", d.vision).lower(),

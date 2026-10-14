@@ -8,7 +8,7 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
@@ -19,6 +19,7 @@ from .semantic import Embedder, MemoryIndex
 from .storage import Storage
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
+from .tools.plan import SUBAGENT_DENIED, format_plan
 from .users import ADMIN_ONLY_TOOLS, OWNER, User, workspace_for
 
 log = logging.getLogger("kru.agent")
@@ -45,13 +46,18 @@ How to work:
 - Use run_python for calculations and data processing instead of computing in your head.
 - Before editing a file, read it. Prefer edit_file for small changes.
 - run_shell, run_python, write_file and edit_file require user approval; if the user declines, adapt or ask.
+- Big tasks (3+ distinct steps: research + code + report, multi-file changes, etc.): FIRST call update_plan with
+  a short checklist, then work through it, marking the current step in_progress and finished steps done
+  (always send the whole list). The user sees this checklist live. Skip the plan for simple questions.
+- delegate: hand a self-contained subtask that needs lots of reading/searching (several files or pages) to a
+  sub-agent with a fresh context; you get only its result. Describe the subtask fully — it cannot see this chat.
 - Long-term memory: when the user tells you something durable — about themselves, their preferences, family/people,
   plans, projects, decisions or setup (e.g. "my daughter is 5", "I prefer short answers", "the server runs Fedora") —
   save it right away with `remember` as one short self-contained fact, without asking. Do not save trivia, one-off
   requests or secrets (passwords, tokens, keys). If `remember` shows a similar memory that is now outdated or
   contradicts the new fact, `forget` the old one. Use `recall` (it searches by meaning) when past context may help.
 - When the task is done, reply with the final answer only (no tool call). Be concise but complete; use Markdown.
-{vision}{memories}{summary}"""
+{vision}{memories}{summary}{plan}"""
 
 JSON_PROTOCOL = """
 TOOLS — you call them by replying with ONLY a JSON object in a ```json code block, exactly one per message:
@@ -193,6 +199,8 @@ class Turn:
     summary: str = ""
     summary_upto: int = 0  # скільки перших повідомлень history охоплює summary
     memories: list[dict[str, Any]] = field(default_factory=list)
+    plan: list[dict[str, str]] = field(default_factory=list)  # чек-лист великої задачі (update_plan)
+    subagent: bool = False  # це підзадача, доручена субагенту (delegate)
 
 
 class Agent:
@@ -263,10 +271,57 @@ class Agent:
             ),
             memories=memories,
             summary=summary,
+            plan=self._plan_prompt(turn),
         )
         if not self.native_tools:
             prompt += JSON_PROTOCOL.format(catalog=self.registry.text_catalog(ctx.denied_tools))
         return prompt
+
+    def _plan_prompt(self, turn: Turn) -> str:
+        if turn.subagent:
+            return (
+                "\nYou are a SUB-AGENT: the main agent delegated one subtask to you (the user message). Do only it, "
+                "then reply with a concise but complete result — facts, numbers, file paths, conclusions. The main "
+                "agent sees ONLY your final answer, not your tool calls.\n"
+            )
+        if not turn.plan:
+            return ""
+        return (
+            "\nCurrent plan of this task (keep it updated with update_plan; finish the in_progress step first):\n"
+            + format_plan(turn.plan) + "\n"
+        )
+
+    def _step_limit(self, turn: Turn) -> int:
+        """Кроків на задачу: велика задача з планом отримує більше — по ~8 на кожен пункт."""
+        if turn.subagent:
+            return self.config.sub_max_steps
+        if not turn.plan:
+            return self.config.max_steps
+        return max(self.config.max_steps, min(150, 8 * len(turn.plan) + 10))
+
+    async def _delegate(self, turn: Turn, task: str, context: str, emit: EmitFunc, confirm: ConfirmFunc) -> str:
+        """Субагент: чистий контекст, ті самі інструменти (без плану й делегування), результат — лише текст."""
+        ctx = turn.ctx
+        sub_ctx = replace(
+            ctx, denied_tools=ctx.denied_tools | SUBAGENT_DENIED, pending_images=[],
+            plan_hook=None, delegate_hook=None, progress=None,
+        )
+        passthrough = {"tool_call", "tool_result", "confirm_request", "progress", "vision"}
+
+        async def sub_emit(ev: dict[str, Any]) -> None:
+            kind = ev.get("type")
+            if kind in passthrough:
+                await emit({**ev, "sub": True})
+            elif kind == "status" and ev.get("state") in {"working", "waiting_confirm"}:
+                await emit(ev)
+            elif kind == "status" and ev.get("state") == "thinking":
+                await emit({"type": "progress", "tool": "delegate", "text": f"субагент думає (крок {ev.get('step', 1)})"})
+
+        text = task + (f"\n\nКонтекст від основного агента:\n{context}" if context else "")
+        sub = Turn("", [{"role": "user", "content": text}], text, sub_ctx, think=turn.think, subagent=True)
+        await emit({"type": "progress", "tool": "delegate", "text": "субагент починає: " + task[:80]})
+        answer = await self._loop(sub, sub_emit, confirm)
+        return f"Результат субагента:\n{answer}"
 
     def _trim_history(self, history: list[dict[str, Any]], budget: int | None = None) -> list[dict[str, Any]]:
         """Жорстке обрізання з початку — запасний варіант, коли підсумок не допоміг або вимкнений."""
@@ -311,7 +366,8 @@ class Agent:
                     summary = ""
                 if summary:
                     turn.summary, turn.summary_upto, start = summary, cut, cut
-                    self.storage.save_summary(turn.session_id, summary, cut, turn.ctx.owner)
+                    if turn.session_id:  # у субагента історія тимчасова
+                        self.storage.save_summary(turn.session_id, summary, cut, turn.ctx.owner)
                     budget = self._budget(summary)
         return self._trim_history(history[start:], budget)
 
@@ -466,6 +522,21 @@ class Agent:
             persist()
             summary, upto = self.storage.load_summary(session_id, ctx.owner)
             turn = Turn(session_id, history, user_text, ctx, persist, think, summary, upto)
+            turn.plan = self.storage.load_plan(session_id, ctx.owner)
+            if turn.plan and all(s["status"] in {"done", "skipped"} for s in turn.plan):
+                turn.plan = []  # попередню велику задачу завершено — нова починається з чистого аркуша
+                self.storage.save_plan(session_id, [], ctx.owner)
+                await emit({"type": "plan", "steps": []})
+
+            async def plan_hook(steps: list[dict[str, str]]) -> None:
+                turn.plan = steps
+                self.storage.save_plan(session_id, steps, ctx.owner)
+                await emit({"type": "plan", "steps": steps})
+
+            async def delegate_hook(task: str, context: str) -> str:
+                return await self._delegate(turn, task, context, emit, confirm)
+
+            ctx.plan_hook, ctx.delegate_hook = plan_hook, delegate_hook
             try:
                 turn.memories = await self.memory.search(user_text, ctx.owner, limit=6)
             except Exception:  # noqa: BLE001 — без спогадів теж можна працювати
@@ -477,7 +548,9 @@ class Agent:
 
     async def _loop(self, turn: Turn, emit: EmitFunc, confirm: ConfirmFunc) -> str:
         history, ctx = turn.history, turn.ctx
-        for step in range(1, self.config.max_steps + 1):
+        step = 0
+        while step < self._step_limit(turn):
+            step += 1
             await emit({"type": "status", "state": "thinking", "step": step})
             result = await self._call_llm(turn, emit)
 
@@ -509,7 +582,7 @@ class Agent:
             turn.persist()
 
         answer = (
-            f"Я зробив {self.config.max_steps} кроків і не встиг завершити задачу. "
+            f"Я зробив {step} кроків і не встиг завершити задачу. "
             "Уточни, будь ласка, або попроси продовжити."
         )
         history.append({"role": "assistant", "content": answer})
@@ -620,7 +693,8 @@ class Agent:
         chat = self.storage.load_chat(session_id, owner)
         if chat is None:
             raise ValueError("Чат не знайдено — можливо, його видалили")
-        return {"id": chat["id"], "title": chat["title"], "transcript": transcript(chat["messages"])}
+        return {"id": chat["id"], "title": chat["title"], "transcript": transcript(chat["messages"]),
+                "plan": self.storage.load_plan(session_id, owner)}
 
     def rename_chat(self, session_id: str, title: str, owner: str = OWNER) -> dict[str, Any]:
         title = " ".join(str(title or "").split())[:120]
