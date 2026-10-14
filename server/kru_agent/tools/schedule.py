@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 
 from . import Tool, ToolContext, ToolError
@@ -23,15 +24,19 @@ async def schedule_task(ctx: ToolContext, task: str, when: str, repeat: str = ""
     rep = REPEAT_ALIASES.get(str(repeat or "").strip().lower())
     if rep is None:
         raise ToolError(f"repeat має бути одним із: {', '.join(k or 'none' for k in REPEATS)}")
+    # час — у поясі користувача (не сервера): «о 14:00» означає 14:00 за його годинником
+    now = datetime.now(ctx.tz).replace(tzinfo=None)
     try:
-        at = parse_when(when)
+        at = parse_when(when, now)
     except ValueError as e:
         raise ToolError(str(e)) from e
-    if at.timestamp() < datetime.now().timestamp() - 60:
-        raise ToolError(f"Час {at:%Y-%m-%d %H:%M} уже минув — вкажи майбутній")
-    sid = await asyncio.to_thread(ctx.storage.add_schedule, ctx.owner, task, at.timestamp(), rep)
+    ts = at.replace(tzinfo=ctx.tz).timestamp() if ctx.tz else at.timestamp()
+    if ts < time.time() - 60:
+        raise ToolError(f"Час {at:%Y-%m-%d %H:%M} уже минув (зараз {now:%Y-%m-%d %H:%M}) — вкажи майбутній")
+    sid = await asyncio.to_thread(ctx.storage.add_schedule, ctx.owner, task, ts, rep, ctx.tz_name)
+    zone = f" ({ctx.tz_name})" if ctx.tz_name else ""
     return (
-        f"Заплановано #{sid}: {at:%Y-%m-%d %H:%M (%A)}, {REPEATS[rep]}.\n"
+        f"Заплановано #{sid}: {at:%Y-%m-%d %H:%M (%A)}{zone}, {REPEATS[rep]}.\n"
         "Завдання виконається автоматично в окремому чаті «⏰ …»; персонаж покаже сповіщення."
     )
 
@@ -52,7 +57,8 @@ TOOLS = [
     Tool(
         name="schedule_task",
         description=(
-            "Планує завдання на конкретний час (локальний час сервера): у цей момент агент сам виконає task — "
+            "Планує завдання на конкретний час (місцевий час користувача — той, що в системному промпті): у цей "
+            "момент агент сам виконає task — "
             "наприклад «знайди курс долара і надішли мені в Telegram». task пиши повністю й самодостатньо: при "
             "виконанні не буде цієї розмови. when: «2026-10-14 18:00», «18:00» (найближче), «+30m», «+2h», «+1d». "
             "repeat: none | hourly | daily | weekdays | weekly."

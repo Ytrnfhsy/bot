@@ -87,6 +87,16 @@ class SettingsDialog(QDialog):
 
 
 # що показувати замість технічної назви інструмента, коли дії агента приховані
+def local_timezone() -> str:
+    """Часовий пояс цього ПК (IANA, напр. Europe/Kyiv): агент бачить і планує час саме в ньому."""
+    from PySide6.QtCore import QTimeZone
+
+    try:
+        return bytes(QTimeZone.systemTimeZoneId()).decode()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 TOOL_ACTIVITY = {
     "web_search": "🔎 Шукаю в інтернеті…",
     "fetch_url": "🌐 Читаю сторінку…",
@@ -321,7 +331,8 @@ class RobotWindow(QWidget):
     def send_task(self, text: str) -> None:
         self.touch()
         if not self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
-                           "think": self.settings.think, "auto_files": self.settings.auto_files}):
+                           "think": self.settings.think, "auto_files": self.settings.auto_files,
+                           "tz": local_timezone()}):
             # немає з'єднання: пробуємо підключитися зараз і надішлемо задачу, щойно вийде
             self._pending_task = text
             self.conn.reconnect_now()
@@ -631,7 +642,8 @@ class RobotWindow(QWidget):
         text, self._pending_task = getattr(self, "_pending_task", None), None
         self._sent_on_connect = bool(text)  # тоді hello не перезавантажує чат: задача щойно пішла
         if text and self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
-                           "think": self.settings.think, "auto_files": self.settings.auto_files}):
+                           "think": self.settings.think, "auto_files": self.settings.auto_files,
+                           "tz": local_timezone()}):
             if text != self.settings.last_task:
                 self.settings.last_task = text
                 self.settings.save()

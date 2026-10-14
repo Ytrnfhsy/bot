@@ -13,6 +13,8 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
+from .timezones import get_tz
+
 log = logging.getLogger("kru.scheduler")
 
 REPEATS = {
@@ -47,12 +49,15 @@ def parse_when(when: str, now: datetime | None = None) -> datetime:
     return dt
 
 
-def next_after(ts: float, repeat: str, now: float | None = None) -> float | None:
-    """Наступний запуск після ts (і після now), None — одноразове завдання."""
+def next_after(ts: float, repeat: str, now: float | None = None, tz=None) -> float | None:
+    """Наступний запуск після ts (і після now), None — одноразове завдання.
+
+    tz — пояс завдання: «щодня о 8:00» лишається 8:00 за місцевим часом і після переходу на літній/зимовий.
+    """
     if not repeat:
         return None
     now = time.time() if now is None else now
-    dt = datetime.fromtimestamp(ts)
+    dt = datetime.fromtimestamp(ts, tz)
     while True:
         if repeat == "hourly":
             dt += timedelta(hours=1)
@@ -68,11 +73,12 @@ def next_after(ts: float, repeat: str, now: float | None = None) -> float | None
 
 
 def describe(item: dict[str, Any]) -> str:
-    when = datetime.fromtimestamp(item["next_run"]).strftime("%Y-%m-%d %H:%M (%a)")
+    tz = get_tz(item.get("tz"))
+    when = datetime.fromtimestamp(item["next_run"], tz).strftime("%Y-%m-%d %H:%M (%a)")
     repeat = REPEATS.get(item.get("repeat", ""), item.get("repeat", ""))
     last = ""
     if item.get("last_run"):
-        last = f"; востаннє {datetime.fromtimestamp(item['last_run']):%d.%m %H:%M} — {item.get('last_status') or '?'}"
+        last = f"; востаннє {datetime.fromtimestamp(item['last_run'], tz):%d.%m %H:%M} — {item.get('last_status') or '?'}"
     return f"#{item['id']} · {when} · {repeat} · {item['task']}{last}"
 
 
@@ -120,7 +126,7 @@ class Scheduler:
                 continue  # власник зараз зайнятий іншою задачею — запустимо на наступному колі
             late = now - item["next_run"]
             if late > MISSED_GRACE:
-                nxt = next_after(item["next_run"], item["repeat"], now)
+                nxt = next_after(item["next_run"], item["repeat"], now, get_tz(item.get("tz")))
                 log.info("Завдання #%s пропущено (запізнення %.0f год)", item["id"], late / 3600)
                 self.storage.update_schedule(item["id"], next_run=nxt or item["next_run"], enabled=1 if nxt else 0,
                                              last_status="пропущено (сервер був вимкнений)")
@@ -131,7 +137,7 @@ class Scheduler:
 
     async def _run_one(self, item: dict[str, Any], now: float) -> None:
         chat_id = f"sched-{item['id']}-{uuid.uuid4().hex[:6]}"
-        nxt = next_after(item["next_run"], item["repeat"], now)
+        nxt = next_after(item["next_run"], item["repeat"], now, get_tz(item.get("tz")))
         # наступний запуск фіксуємо одразу — навіть якщо виконання впаде, завдання не зациклиться
         self.storage.update_schedule(item["id"], next_run=nxt or item["next_run"], enabled=1 if nxt else 0,
                                      last_run=now, last_status="виконується", last_chat=chat_id)

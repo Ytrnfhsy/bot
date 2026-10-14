@@ -295,7 +295,9 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
             async def run_one(text: str) -> None:
                 global _current
                 done.clear()
-                task = {"type": "task", "text": text, "session_id": printer.session}
+                from .timezones import local_tz_name
+
+                task = {"type": "task", "text": text, "session_id": printer.session, "tz": local_tz_name()}
                 if args.no_think:
                     task["think"] = False
                 await ws.send(json.dumps(task))

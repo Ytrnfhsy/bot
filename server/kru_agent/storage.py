@@ -67,6 +67,9 @@ class Storage:
                 " last_chat TEXT NOT NULL DEFAULT '')"
             )
             self._db.execute(
+                "CREATE TABLE IF NOT EXISTS user_prefs (owner TEXT PRIMARY KEY, tz TEXT NOT NULL DEFAULT '')"
+            )
+            self._db.execute(
                 "CREATE TABLE IF NOT EXISTS telegram ("
                 " owner TEXT PRIMARY KEY, chat_id TEXT NOT NULL, linked_at REAL NOT NULL)"
             )
@@ -130,6 +133,8 @@ class Storage:
                 (_key("owner", row["id"]), row["id"], default_title(messages), _user_count(messages),
                  row["updated_at"], row["id"]),
             )
+        if "tz" not in self._columns("schedules"):
+            self._db.execute("ALTER TABLE schedules ADD COLUMN tz TEXT NOT NULL DEFAULT ''")
         self._db.execute("CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner, updated_at)")
         if "saved_chats" in {r["name"] for r in self._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
             for row in self._db.execute("SELECT * FROM saved_chats").fetchall():
@@ -294,13 +299,13 @@ class Storage:
             ).rowcount > 0
 
     # ---------- заплановані завдання ----------
-    _SCHED_COLS = "id, owner, task, next_run, repeat, enabled, created_at, last_run, last_status, last_chat"
+    _SCHED_COLS = "id, owner, task, next_run, repeat, enabled, created_at, last_run, last_status, last_chat, tz"
 
-    def add_schedule(self, owner: str, task: str, next_run: float, repeat: str = "") -> int:
+    def add_schedule(self, owner: str, task: str, next_run: float, repeat: str = "", tz: str = "") -> int:
         with self._lock, self._db:
             cur = self._db.execute(
-                "INSERT INTO schedules(owner, task, next_run, repeat, created_at) VALUES (?, ?, ?, ?, ?)",
-                (owner, task.strip(), next_run, repeat, time.time()),
+                "INSERT INTO schedules(owner, task, next_run, repeat, created_at, tz) VALUES (?, ?, ?, ?, ?, ?)",
+                (owner, task.strip(), next_run, repeat, time.time(), tz),
             )
             return int(cur.lastrowid)
 
@@ -337,6 +342,19 @@ class Storage:
                 "UPDATE schedules SET enabled = 0, last_status = 'скасовано' WHERE id = ? AND owner = ? AND enabled = 1",
                 (sched_id, owner),
             ).rowcount > 0
+
+    # ---------- налаштування користувача ----------
+    def user_tz(self, owner: str) -> str:
+        with self._lock:
+            row = self._db.execute("SELECT tz FROM user_prefs WHERE owner = ?", (owner,)).fetchone()
+        return row["tz"] if row else ""
+
+    def set_user_tz(self, owner: str, tz: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO user_prefs(owner, tz) VALUES (?, ?) ON CONFLICT(owner) DO UPDATE SET tz = excluded.tz",
+                (owner, tz),
+            )
 
     # ---------- Telegram ----------
     def set_telegram_chat(self, owner: str, chat_id: str) -> None:

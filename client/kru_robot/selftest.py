@@ -61,6 +61,8 @@ def run_selftest(app: QApplication, report_path: str) -> int:
     check("settings_path", lambda: (need(str(config_path()).startswith(tmp), str(config_path())), str(config_path()))[1])
     check("ipc_name", lambda: appmod._ipc_name())
     check("export_dir", lambda: str(appmod.RobotWindow.export_dir()))
+    check("timezone", lambda: (need("/" in appmod.local_timezone() or appmod.local_timezone() == "UTC",
+                                    f"пояс: {appmod.local_timezone()!r}"), appmod.local_timezone())[1])
 
     log("синхронні перевірки готові; створюю вікно робота")
     # локальний TCP-сервер: перевіряємо, що робот справді відкриває WebSocket-з'єднання
