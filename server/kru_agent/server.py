@@ -56,6 +56,7 @@ from pydantic import BaseModel
 from . import __version__
 from .agent import Agent
 from .config import Config
+from .scheduler import Scheduler
 from .users import User, UserStore, workspace_for
 
 log = logging.getLogger("kru.server")
@@ -76,6 +77,12 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
     async def lifespan(app: FastAPI):
         app.state.agent = agent or Agent(cfg)
         app.state.hub = TaskHub()
+        app.state.scheduler = Scheduler(
+            app.state.agent.storage,
+            lambda item, chat_id: run_scheduled(app.state.agent, app.state.hub, users, item, chat_id),
+            lambda owner: app.state.hub.get(owner) is not None,
+        )
+        app.state.scheduler.start()
         health = await app.state.agent.llm.health()
         if not health.get("ok"):
             log.warning("LLM-сервер недоступний: %s", health.get("error"))
@@ -87,6 +94,7 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
         if not cfg.token and not users.list():
             log.warning("KRU_TOKEN не задано і користувачів немає — сервер доступний без авторизації!")
         yield
+        await app.state.scheduler.stop()
         await app.state.agent.close()
 
     app = FastAPI(title="Kru", version=__version__, lifespan=lifespan)
@@ -135,9 +143,12 @@ class RunningTask:
 
     CONFIRM_TIMEOUT = 600
 
-    def __init__(self, owner: str, session_id: str) -> None:
+    def __init__(self, owner: str, session_id: str, scheduled: str = "") -> None:
         self.owner = owner
         self.session_id = session_id
+        # заплановане завдання: користувач у цей час у іншому чаті (або його немає) — йому йдуть
+        # лише запити на дозвіл і підсумкове сповіщення, а не весь потік подій
+        self.scheduled = scheduled
         self.task: asyncio.Task | None = None
         self.subscribers: set[Connection] = set()
         self.pending: dict[str, tuple[asyncio.Future[bool], dict[str, Any]]] = {}
@@ -150,6 +161,10 @@ class RunningTask:
     async def emit(self, ev: dict[str, Any]) -> None:
         if ev.get("type") == "status":
             self.last_status = ev
+        if self.scheduled:
+            if ev.get("type") != "confirm_request":
+                return
+            ev = {**ev, "scheduled": self.scheduled}
         for conn in list(self.subscribers):
             await conn.send(ev)
 
@@ -157,6 +172,8 @@ class RunningTask:
         cid = uuid.uuid4().hex[:10]
         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         ev = {"type": "confirm_request", "id": cid, "tool": tool, "summary": summary}
+        if self.scheduled:
+            ev["scheduled"] = self.scheduled
         self.pending[cid] = (fut, ev)
         await self.emit(ev)
         try:
@@ -180,7 +197,7 @@ class RunningTask:
     async def attach(self, conn: "Connection") -> None:
         """Підключення (часто після розриву) знову стежить за задачею: поточний стан і відкриті запити."""
         self.subscribers.add(conn)
-        if self.last_status:
+        if self.last_status and not self.scheduled:
             await conn.send(self.last_status)
         for _, ev in list(self.pending.values()):
             await conn.send(ev)
@@ -191,6 +208,11 @@ class TaskHub:
 
     def __init__(self) -> None:
         self.tasks: dict[str, RunningTask] = {}
+        self.connections: dict[str, set[Connection]] = {}  # відкриті підключення кожного користувача
+
+    async def notify(self, owner: str, ev: dict[str, Any]) -> None:
+        for conn in list(self.connections.get(owner, ())):
+            await conn.send(ev)
 
     def get(self, owner: str) -> RunningTask | None:
         rt = self.tasks.get(owner)
@@ -293,6 +315,9 @@ class Connection:
         vision = await self.agent.refresh_vision(force=True)
         await self.send({"type": "hello", "name": cfg.agent_name, "model": cfg.model, "version": __version__,
                          "vision": vision, "user": self.user.name, "role": self.user.role})
+        self.hub.connections.setdefault(self.user.name, set()).add(self)
+        if (rt := self.hub.get(self.user.name)) and rt.scheduled:
+            await rt.attach(self)  # заплановане завдання може чекати на дозвіл
         try:
             while True:
                 msg = await self.ws.receive_json()
@@ -301,8 +326,10 @@ class Connection:
                     text = str(msg.get("text", "")).strip()
                     if not text:
                         continue
-                    if self.hub.get(self.user.name):
-                        await self.send({"type": "error", "message": "Я ще працюю над попередньою задачею. Скасуй її або зачекай."})
+                    if busy := self.hub.get(self.user.name):
+                        msg = (f"Зараз виконується заплановане завдання «{busy.scheduled[:60]}». Зачекай або зупини його (■)."
+                               if busy.scheduled else "Я ще працюю над попередньою задачею. Скасуй її або зачекай.")
+                        await self.send({"type": "error", "message": msg})
                         continue
                     think = msg.get("think")
                     think = think if isinstance(think, bool) else None
@@ -335,6 +362,38 @@ class Connection:
             self.closed = True
             for rt in self.hub.tasks.values():
                 rt.subscribers.discard(self)
+            self.hub.connections.get(self.user.name, set()).discard(self)
+
+
+SCHEDULED_PREFIX = (
+    "⏰ Заплановане завдання (користувач поставив його раніше і зараз, можливо, не біля комп'ютера — "
+    "не став уточнювальних питань, просто виконай; якщо в завданні сказано надіслати в Telegram — надішли):\n"
+)
+
+
+async def run_scheduled(agent: Agent, hub: TaskHub, users: UserStore, item: dict[str, Any], chat_id: str) -> str:
+    """Виконати заплановане завдання від імені його власника в окремому чаті й повідомити про результат."""
+    user = users.get(item["owner"])
+    if user is None:
+        raise RuntimeError("користувача видалено")
+    title = f"⏰ {' '.join(item['task'].split())[:60]}"
+    rt = RunningTask(user.name, chat_id, scheduled=title)
+    rt.subscribers = set(hub.connections.get(user.name, ()))
+    rt.task = asyncio.current_task()
+    hub.tasks[user.name] = rt
+    try:
+        answer = await agent.run(chat_id, SCHEDULED_PREFIX + item["task"], rt.emit, rt.confirm, user)
+        agent.storage.rename_chat(chat_id, title, user.name)
+        await hub.notify(user.name, {"type": "notify", "title": title, "text": answer[:800], "chat_id": chat_id})
+        return answer
+    except Exception as e:
+        await hub.notify(user.name, {"type": "notify", "title": title, "text": f"Не вдалося: {e}", "chat_id": chat_id,
+                                     "error": True})
+        raise
+    finally:
+        rt.deny_all()
+        if hub.tasks.get(user.name) is rt:
+            del hub.tasks[user.name]
 
 
 def run_server(config: Config) -> None:

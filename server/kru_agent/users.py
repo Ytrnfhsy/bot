@@ -78,6 +78,15 @@ class UserStore:
                 return User(u["name"], u.get("role", "user"))
         return None
 
+    def get(self, name: str) -> User | None:
+        """Користувач за іменем (для запланованих завдань); None — видалений."""
+        if name == OWNER:
+            return User(OWNER, "admin")
+        for u in self._load():
+            if u.get("name") == name:
+                return User(name, u.get("role", "user"))
+        return None
+
     # ---------- керування (CLI) ----------
     def list(self) -> list[dict[str, Any]]:
         return [{k: v for k, v in u.items() if k != "token_sha256"} for u in self._load()]

@@ -397,6 +397,53 @@ def _user_command(cfg: Config, args: argparse.Namespace, parser: argparse.Argume
         parser.print_help()
 
 
+async def _telegram_link(cfg: Config, owner: str, wait: int = 180) -> str:
+    """Чекає повідомлення боту й прив'язує цей чат до користувача. Повертає chat_id."""
+    from .storage import Storage
+    from .telegram import TelegramBot
+
+    bot = TelegramBot(cfg.telegram_bot_token)
+    me = await bot.me()
+    old = await bot.updates()  # пропустити старі повідомлення
+    offset = (old[-1]["update_id"] + 1) if old else None
+    print(f"Напиши будь-що боту @{me.get('username')} у Telegram (чекаю {wait // 60} хв)…")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait
+    while loop.time() < deadline:
+        for upd in await bot.updates(offset, timeout=25):
+            offset = upd["update_id"] + 1
+            chat = (upd.get("message") or {}).get("chat") or {}
+            if chat.get("id") is not None:
+                chat_id = str(chat["id"])
+                Storage(cfg.db_path).set_telegram_chat(owner, chat_id)
+                who = chat.get("first_name") or chat.get("title") or chat_id
+                await bot.send(chat_id, f"✅ {cfg.agent_name} підключено! Сюди надходитимуть повідомлення для «{owner}».")
+                print(f"{GREEN}Прив'язано: {who} (chat_id {chat_id}) → користувач {owner}{RESET}")
+                return chat_id
+    raise SystemExit("Не дочекався повідомлення. Спробуй ще раз: kru telegram link")
+
+
+def _telegram_command(cfg: Config, args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    from .storage import Storage
+    from .telegram import TelegramBot, TelegramError
+
+    owner = args.user or "owner"
+    try:
+        if args.telegram_cmd == "link":
+            asyncio.run(_telegram_link(cfg, owner))
+        elif args.telegram_cmd == "test":
+            bot = TelegramBot(cfg.telegram_bot_token)  # спершу — чи є токен бота
+            chat = Storage(cfg.db_path).telegram_chat(owner) or (cfg.telegram_chat_id if owner == "owner" else None)
+            if not chat:
+                raise SystemExit(f"Чат не прив'язано. Спершу: kru telegram link{'' if owner == 'owner' else ' --user ' + owner}")
+            asyncio.run(bot.send(chat, f"👋 Перевірка: {cfg.agent_name} на зв'язку."))
+            print(f"{GREEN}Надіслано.{RESET}")
+        else:
+            parser.print_help()
+    except TelegramError as e:
+        raise SystemExit(str(e)) from e
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="kru", description="Kru — агент на Qwen3.6 з інструментами")
     sub = parser.add_subparsers(dest="cmd")
@@ -427,8 +474,14 @@ def main(argv: list[str] | None = None) -> None:
     p_rev = user_sub.add_parser("revoke", help="видалити користувача (токен перестане працювати)")
     p_rev.add_argument("name")
 
+    p_tg = sub.add_parser("telegram", help="Telegram: прив'язати чат, щоб агент надсилав туди повідомлення")
+    tg_sub = p_tg.add_subparsers(dest="telegram_cmd")
+    for name, help_ in (("link", "прив'язати: напиши боту, і цей чат стане твоїм"), ("test", "надіслати пробне повідомлення")):
+        p = tg_sub.add_parser(name, help=help_)
+        p.add_argument("--user", help="для якого користувача (типово — власник)")
+
     args = parser.parse_args(argv)
-    if args.cmd == "user":
+    if args.cmd in {"user", "telegram"}:
         # ті самі налаштування, що й у сервісу (DATA_DIR, KRU_TOKEN)
         from .config import _load_dotenv
         from pathlib import Path
@@ -454,6 +507,8 @@ def main(argv: list[str] | None = None) -> None:
             _run_interruptible(lambda: _local_chat(cfg, args, once))
     elif args.cmd == "user":
         _user_command(cfg, args, p_user)
+    elif args.cmd == "telegram":
+        _telegram_command(cfg, args, p_tg)
     elif args.cmd == "health":
         from .llm import create_llm
 

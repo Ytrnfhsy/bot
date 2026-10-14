@@ -257,6 +257,21 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     step(50, lambda: check("plan_checklist", plan_flow))
+
+    def notify_flow():
+        opened = []
+        orig = win.open_chat
+        win.open_chat = lambda cid: opened.append(cid)
+        try:
+            win.on_event({"type": "notify", "title": "⏰ Курс долара", "text": "41.5 грн", "chat_id": "sched-1-a"})
+            need(win.panel.ask_box.isVisible() and "Курс долара" in win.panel.ask_text.text(), "сповіщення не видно")
+            win.panel._ask_answer("open")
+            need(opened == ["sched-1-a"], f"чат не відкрився: {opened}")
+        finally:
+            win.open_chat = orig
+        return "ok"
+
+    step(50, lambda: check("scheduled_notify", notify_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())
