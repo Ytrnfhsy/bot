@@ -33,6 +33,7 @@ class ToolContext:
     auto_files: bool = False  # запис файлів у робочій теці без запиту (налаштування користувача)
     approved_tools: set[str] = field(default_factory=set)  # «дозволяти до кінця задачі»
     plan_hook: Callable[[list[dict[str, str]]], Awaitable[None]] | None = None  # update_plan → чек-лист чату
+    plan_get: Callable[[], list[dict[str, str]]] | None = None  # поточний план (для mark_step)
     delegate_hook: Callable[[str, str], Awaitable[str]] | None = None  # delegate → субагент
 
     async def report(self, text: str) -> None:

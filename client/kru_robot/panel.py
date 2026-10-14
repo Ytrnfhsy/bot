@@ -655,8 +655,10 @@ class ChatPanel(QWidget):
         if not busy:
             self.set_activity("")
 
+    PLAN_MAX_ROWS = 9  # довший план показується згорнутим навколо поточного пункту
+
     def set_plan(self, steps: list[dict]) -> None:
-        """Чек-лист великої задачі: ☐ ще ні, ⏳ зараз, ✅ готово."""
+        """Чек-лист великої задачі: ○ ще ні, ▶ зараз, ✓ готово."""
         self.plan_steps = list(steps or [])
         if not self.plan_steps:
             self.plan.hide()
@@ -664,17 +666,33 @@ class ChatPanel(QWidget):
             return
         done = sum(1 for s in self.plan_steps if s.get("status") in {"done", "skipped"})
         rows = [f"<b>📋 План · {done}/{len(self.plan_steps)}</b>"]
-        for step in self.plan_steps:
+        visible = list(self.plan_steps)
+        hidden_done = hidden_left = 0
+        if len(visible) > self.PLAN_MAX_ROWS:
+            # довгий план (книга на 60 розділів): лише 2 останні виконані, поточний і кілька наступних
+            first_open = next((i for i, s in enumerate(visible) if s.get("status") not in {"done", "skipped"}),
+                              len(visible))
+            start = max(0, first_open - 2)
+            end = min(len(visible), start + self.PLAN_MAX_ROWS - 2)
+            hidden_done, hidden_left = start, len(visible) - end
+            visible = visible[start:end]
+        if hidden_done:
+            rows.append(f'<span style="color:#2F9E44"><b>✓</b></span> '
+                        f'<span style="color:#8A8F9C">… ще {hidden_done} виконано</span>')
+        for step in visible:
             title = html.escape(str(step.get("title", "")))
             status = step.get("status")
+            # прості символи замість емодзі: їх показує будь-який шрифт (⏳ і ☐ на KDE малювались квадратиками)
             if status == "done":
-                rows.append(f'<span style="color:#2F9E44">✅</span> <span style="color:#8A8F9C">{title}</span>')
+                rows.append(f'<span style="color:#2F9E44"><b>✓</b></span> <span style="color:#8A8F9C">{title}</span>')
             elif status == "skipped":
-                rows.append(f'<span style="color:#8A8F9C">➖ <s>{title}</s></span>')
+                rows.append(f'<span style="color:#8A8F9C">– <s>{title}</s></span>')
             elif status == "in_progress":
-                rows.append(f"⏳ <b>{title}</b>")
+                rows.append(f'<span style="color:#7A5AF8"><b>▶ {title}</b></span>')
             else:
-                rows.append(f"☐ {title}")
+                rows.append(f'<span style="color:#8A8F9C">○</span> {title}')
+        if hidden_left:
+            rows.append(f'<span style="color:#8A8F9C">… і ще {hidden_left}</span>')
         self.plan.setText("<br>".join(rows))
         # висота з урахуванням переносу рядків (сам layout її не рахує для QLabel із wordWrap)
         width = self.WIDTH - 2 * self.MARGIN - 28

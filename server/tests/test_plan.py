@@ -88,3 +88,56 @@ async def test_subagent_dangerous_action_still_asks_user(cfg):
 def test_normalize_plan():
     plan = normalize_plan(["Простий рядок", {"title": "  Два   пробіли ", "status": "WEIRD"}, {"status": "done"}])
     assert plan == [{"title": "Простий рядок", "status": "pending"}, {"title": "Два пробіли", "status": "pending"}]
+
+
+# ---------------- mark_step: позначити пункт без переписування всього плану ----------------
+CHAPTERS = [{"title": f"Розділ {i}", "status": "in_progress" if i == 1 else "pending"} for i in range(1, 6)]
+
+
+async def test_mark_step_marks_done_and_advances(cfg):
+    llm = FakeLLM([
+        call("update_plan", steps=CHAPTERS),
+        call("write_file", path="ch1.txt", content="переклад 1"),
+        call("mark_step", step=1),
+        call("mark_step", step=[2, 3]),
+        text("Перекладено 3 розділи"),
+    ])
+    agent = Agent(cfg, llm=llm)
+    rec = Recorder()
+    await agent.run("c", "переклади книгу по розділах", rec.emit, rec.confirm)
+    plans = [e["steps"] for e in rec.events if e["type"] == "plan"]
+    assert [s["status"] for s in plans[1]] == ["done", "in_progress", "pending", "pending", "pending"]
+    assert [s["status"] for s in plans[2]] == ["done", "done", "done", "in_progress", "pending"]
+    assert "Залишилось: 2. Зараз: 4. Розділ 4" in llm.calls[4]["messages"][-1]["content"]
+    assert "📋 Виконано пункт плану 1" in [m["text"] for m in transcript(agent.storage.load_chat("c")["messages"])]
+
+
+async def test_mark_step_errors(cfg):
+    agent = Agent(cfg, llm=FakeLLM([]))
+    ctx = agent.make_context()
+    import pytest
+
+    from kru_agent.tools import ToolError
+
+    with pytest.raises(ToolError, match="недоступний"):
+        await agent.registry.call(ctx, "mark_step", {"step": 1})
+    plan = list(CHAPTERS)
+
+    async def hook(steps):
+        plan[:] = steps
+
+    ctx.plan_hook, ctx.plan_get = hook, lambda: plan
+    with pytest.raises(ToolError, match="Немає пункту 9"):
+        await agent.registry.call(ctx, "mark_step", {"step": 9})
+    out = await agent.registry.call(ctx, "mark_step", {"step": [1, 2, 3, 4, 5]})
+    assert "Усі кроки плану виконано" in out
+
+
+async def test_model_is_reminded_to_update_plan(cfg):
+    llm = FakeLLM([call("update_plan", steps=CHAPTERS)] + [call("current_datetime")] * 6 + [text("ok")])
+    agent = Agent(cfg, llm=llm)
+    rec = Recorder()
+    await agent.run("c", "книга", rec.emit, rec.confirm)
+    prompts = [c["messages"][0]["content"] for c in llm.calls]
+    assert not any("REMINDER" in p for p in prompts[:6])  # перші кроки — без нагадувань
+    assert "REMINDER: you have made 5 steps" in prompts[6]
