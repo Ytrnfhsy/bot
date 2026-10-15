@@ -23,7 +23,8 @@ _current: asyncio.Task | None = None  # задача, яку скасовує Ct
 HELP = (
     f"{DIM}Усі чати зберігаються автоматично. Команди: /new — новий чат, /chats — список чатів,\n"
     f"/open N — відкрити чат №N зі списку, /rename назва — перейменувати поточний, /delete N — видалити,\n"
-    f"/export [файл.md] — експорт у Markdown, /exit — вийти, Ctrl+C — скасувати поточну задачу{RESET}"
+    f"/export [файл.md] — експорт у Markdown, /get шлях — завантажити файл від агента в поточну теку,\n"
+    f"/exit — вийти, Ctrl+C — скасувати поточну задачу{RESET}"
 )
 
 
@@ -82,6 +83,7 @@ class Printer:
         self.session = session  # поточний чат
         self.listed: list[str] = []  # id чатів з останнього /chats (для /open N)
         self.export_path: str | None = None  # куди записати наступний chat_export
+        self.workspace = None  # локальний режим: тека агента (файли від нього вже на цьому ПК)
         self.show_thinking = show_thinking
         self.streaming = False
         self.in_thinking = False
@@ -149,6 +151,27 @@ class Printer:
                 print(f"{DIM}👁 зображення: {', '.join(ev.get('images', []))}{RESET}")
             else:
                 print(f"{YELLOW}⚠ Модель зараз не бачить зображень: {ev.get('reason', '')}{RESET}")
+        elif t == "file":
+            self._end_stream()
+            from .tools.files import human_size
+
+            where = (f"{self.workspace / ev['path']}" if self.workspace is not None
+                     else f"завантажити: /get {ev['path']}")
+            print(f"{GREEN}📎 Файл: {ev['name']}{RESET} {DIM}({human_size(ev.get('size', 0))}) — {where}{RESET}")
+        elif t == "file_data":
+            import base64
+
+            name = os.path.basename(str(ev["name"]).replace("\\", "/")) or "file"
+            stem, ext = os.path.splitext(name)
+            path, n = name, 1
+            while os.path.exists(path):
+                n += 1
+                path = f"{stem} ({n}){ext}"
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(ev["data"]))
+            print(f"{GREEN}⬇ Збережено: {os.path.abspath(path)}{RESET}")
+        elif t == "file_error":
+            print(f"{YELLOW}Не вдалося завантажити {ev.get('path')}: {ev.get('message')}{RESET}")
         elif t == "chat_renamed":
             print(f"{GREEN}✏️ Назва: «{ev['title']}»{RESET}")
         elif t == "chat_list":
@@ -163,7 +186,7 @@ class Printer:
             self.session = ev["id"]
             print(f"{GREEN}📂 Відкрито «{ev['title']}» — можна продовжувати розмову{RESET}")
             for item in ev["transcript"][-6:]:
-                who = {"user": "ти", "assistant": "🤖", "tool": "  "}[item["role"]]
+                who = {"user": "ти", "assistant": "🤖"}.get(item["role"], "  ")
                 print(f"{DIM}{who}: {' '.join(item['text'].split())[:150]}{RESET}")
         elif t == "chat_export":
             path = self.export_path or f"{ev['title'][:40].strip() or 'chat'}.md".replace("/", "_")
@@ -190,6 +213,7 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
 
     agent = Agent(cfg)
     printer = Printer(args.thinking, args.session or new_session_id())
+    printer.workspace = cfg.workspace
 
     async def emit(ev: dict[str, Any]) -> None:
         printer(ev)
@@ -326,6 +350,10 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
                 if text in {"/new", "/reset"}:
                     printer.session = new_session_id()
                     print(f"{DIM}Новий чат (попередній збережено){RESET}")
+                    continue
+                if text.startswith("/get "):
+                    await ws.send(json.dumps({"type": "file_get", "id": "cli", "path": text[5:].strip()}))
+                    await asyncio.sleep(1.0)  # файл збереже reader
                     continue
                 if parsed := parse_chat_command(text, printer):
                     msg, printer.export_path = parsed

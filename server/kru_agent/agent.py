@@ -67,7 +67,10 @@ How to work:
   "remind me tomorrow…"), call schedule_task with an exact local time computed from the current date/time above and
   a complete self-contained task (it runs later without this chat). Confirm what and when. list_scheduled /
   cancel_scheduled to review or cancel.
-- send_telegram sends a message to the user's Telegram — use it when asked to send/notify "в телеграм".
+- send_telegram sends a message to the user's Telegram — use it when asked to send/notify "в телеграм"
+  (path= attaches a file from the workspace).
+- When you create a file the user will want to keep (report, document, table, image, archive, translation…),
+  call send_file with it: the user gets a one-click download button. Then answer briefly — don't paste its content.
 - Long-term memory: when the user tells you something durable — about themselves, their preferences, family/people,
   plans, projects, decisions or setup (e.g. "my daughter is 5", "I prefer short answers", "the server runs Fedora") —
   save it right away with `remember` as one short self-contained fact, without asking. Do not save trivia, one-off
@@ -343,7 +346,7 @@ class Agent:
             ctx, denied_tools=ctx.denied_tools | SUBAGENT_DENIED, pending_images=[],
             plan_hook=None, plan_get=None, delegate_hook=None, progress=None,
         )
-        passthrough = {"tool_call", "tool_result", "confirm_request", "progress", "vision"}
+        passthrough = {"tool_call", "tool_result", "confirm_request", "progress", "vision", "file"}
 
         async def sub_emit(ev: dict[str, Any]) -> None:
             kind = ev.get("type")
@@ -722,6 +725,7 @@ class Agent:
             await emit({"type": "progress", "tool": name, "text": text})
 
         ctx.progress = progress
+        ctx.event = emit
         try:
             output = await self.registry.call(ctx, name, args)
             ok = True

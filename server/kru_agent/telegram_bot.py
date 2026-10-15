@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from .telegram import TelegramBot, TelegramError
+from .tools import ToolError
+from .tools.files import shared_file
 from .users import workspace_for
 
 log = logging.getLogger("kru.telegram")
@@ -27,7 +29,7 @@ ACTIVITY = {
     "write_file": "✍️ Записую файл", "edit_file": "✍️ Редагую файл", "run_shell": "⚙️ Виконую команду",
     "run_python": "🧮 Рахую", "remember": "🧠 Запам'ятовую", "recall": "🧠 Пригадую",
     "view_image": "👁 Дивлюся на зображення", "delegate": "🤝 Працює субагент", "schedule_task": "⏰ Планую",
-    "send_telegram": "✈️ Пишу в Telegram",
+    "send_telegram": "✈️ Пишу в Telegram", "send_file": "📎 Надсилаю файл",
 }
 HELP = (
     "Я {name} — твій агент. Просто пиши задачу, як у персонажі на ПК: знайти, порахувати, перекласти, "
@@ -44,9 +46,10 @@ class TelegramSink:
 
     THROTTLE = 3.0  # як часто оновлювати повідомлення з ходом роботи
 
-    def __init__(self, gateway: "TelegramGateway", chat_id: str) -> None:
+    def __init__(self, gateway: "TelegramGateway", chat_id: str, user=None) -> None:
         self.gw = gateway
         self.chat_id = chat_id
+        self.user = user
         self.status_id = 0  # повідомлення «⏳ …», яке оновлюється
         self.status_at = 0.0
         self.closed = False
@@ -69,6 +72,14 @@ class TelegramSink:
                     rows.append([("✅ До кінця задачі", f"c:{ev['id']}:t")])
                 head = f"{ev['scheduled']}\n" if ev.get("scheduled") else ""
                 await bot.send(self.chat_id, f"⚠ {head}Агент просить дозволу:\n\n{ev.get('summary', '')}", rows)
+            elif kind == "file":  # send_file — у Telegram це документ
+                await self._status(f"📎 Надсилаю {ev.get('name', 'файл')}")
+                try:
+                    path = shared_file(self.gw.agent.make_context(self.user), str(ev.get("path", "")))[0]
+                except ToolError as e:
+                    await bot.send(self.chat_id, f"⚠️ {e}")
+                else:
+                    await bot.send_document(self.chat_id, path)
             elif kind == "final":
                 await self._clear_status()
                 await bot.send(self.chat_id, ev.get("text") or "(порожня відповідь)")
@@ -204,7 +215,7 @@ class TelegramGateway:
 
         sid = self._session(owner)
         rt = RunningTask(owner, sid)
-        rt.subscribers.add(TelegramSink(self, chat_id))
+        rt.subscribers.add(TelegramSink(self, chat_id, user))
         rt.task = asyncio.current_task()
         self.hub.tasks[owner] = rt
         typing = asyncio.create_task(self._typing(chat_id))

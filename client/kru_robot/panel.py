@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import html
 
+
+def human_size(n: int) -> str:
+    for unit in ("Б", "КБ", "МБ"):
+        if n < 1024 or unit == "МБ":
+            return f"{n:.0f} {unit}" if unit == "Б" else f"{n:.1f}".removesuffix(".0").replace(".", ",") + f" {unit}"
+        n /= 1024
+    return f"{n} Б"
+
 from PySide6.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
@@ -180,6 +188,7 @@ class ChatPanel(QWidget):
     new_chat_requested = Signal()
     chats_requested = Signal()
     confirm_answered = Signal(str, bool, str)  # id, дозволено, scope ("task" — до кінця задачі)
+    file_requested = Signal(str, str)  # (id кнопки, шлях на сервері) — завантажити файл від агента
     closed = Signal()
 
     WIDTH = 408
@@ -237,7 +246,9 @@ class ChatPanel(QWidget):
 
         # стрічка розмови
         self.view = QTextBrowser()
-        self.view.setOpenExternalLinks(True)
+        self.view.setOpenLinks(False)  # посилання відкриваємо самі: серед них — кнопки файлів від агента
+        self.view.anchorClicked.connect(self._on_link)
+        self.files: dict[str, dict] = {}  # кнопки файлів у стрічці: id → {path, name, size, state, saved, error}
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.view.setMinimumHeight(0)
         self.view.setMaximumHeight(420)
@@ -711,6 +722,67 @@ class ChatPanel(QWidget):
         self.draft = ""
         self._schedule()
 
+    def add_file(self, path: str, name: str, size: int | None = None) -> str:
+        """Файл, який агент передав (send_file): рядок стрічки з кнопкою «Завантажити»."""
+        self._file_seq = getattr(self, "_file_seq", 0) + 1
+        fid = str(self._file_seq)  # не з нуля після clear(): запізніла відповідь не потрапить на чужу кнопку
+        self.files[fid] = {"path": path, "name": name, "size": size, "state": "", "saved": "", "error": ""}
+        self.add_entry("file", fid)
+        return fid
+
+    def download_file(self, fid: str) -> None:
+        info = self.files.get(fid)
+        if info and info["state"] != "loading":
+            info["state"] = "loading"
+            self._schedule()
+            self.file_requested.emit(fid, info["path"])
+
+    def file_saved(self, fid: str, local_path: str) -> None:
+        if info := self.files.get(fid):
+            info.update(state="saved", saved=local_path)
+            self._schedule()
+
+    def file_failed(self, fid: str, message: str) -> None:
+        if info := self.files.get(fid):
+            info.update(state="error", error=message)
+            self._schedule()
+
+    def _on_link(self, url) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        scheme, fid = url.scheme(), url.path()
+        info = self.files.get(fid)
+        if scheme == "kru-file":
+            self.download_file(fid)
+        elif scheme in {"kru-open", "kru-folder"} and info and info["saved"]:
+            from pathlib import Path
+
+            target = Path(info["saved"])
+            if not target.exists():  # файл уже перенесли чи видалили — завантажимо знову
+                self.download_file(fid)
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.parent if scheme == "kru-folder" else target)))
+        elif scheme in {"http", "https", "mailto", "file"}:
+            QDesktopServices.openUrl(url)
+
+    def _file_markdown(self, fid: str) -> str:
+        info = self.files.get(fid)
+        if not info:
+            return ""
+        name = "".join("\\" + ch if ch in "\\`*_[]()#<>!|~" else ch for ch in info["name"])
+        size = f" · {human_size(info['size'])}" if info.get("size") is not None else ""
+        state = info["state"]
+        if state == "loading":
+            action = "⏳ завантажую…"
+        elif state == "saved":
+            action = f"✓ збережено — [відкрити](kru-open:{fid}) · [теку](kru-folder:{fid})"
+        elif state == "error":
+            action = f"⚠ {html.escape(info['error'][:120])} — [ще раз](kru-file:{fid})"
+        else:
+            action = f"[⬇ Завантажити на ПК](kru-file:{fid})"
+        return f"📎 **{name}**{size} — {action}"
+
     def append_draft(self, text: str) -> None:
         self.draft += text
         self._schedule()
@@ -722,6 +794,7 @@ class ChatPanel(QWidget):
 
     def clear(self) -> None:
         self.entries.clear()
+        self.files.clear()
         self.draft = ""
         self._render()
 
@@ -805,6 +878,8 @@ class ChatPanel(QWidget):
                 parts.append(f"<small>{html.escape(text)}</small>")
             elif role == "error":
                 parts.append(f"⚠️ *{text}*")
+            elif role == "file":
+                parts.append(self._file_markdown(text))
             else:
                 parts.append(text)
         if self.draft:

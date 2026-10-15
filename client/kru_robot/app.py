@@ -106,6 +106,7 @@ TOOL_ACTIVITY = {
     "mark_step": "📋 Відмічаю виконане…",
     "schedule_task": "⏰ Планую завдання…",
     "send_telegram": "✈️ Надсилаю в Telegram…",
+    "send_file": "📎 Передаю файл…",
     "read_file": "📖 Читаю файл…",
     "list_dir": "📂 Переглядаю файли…",
     "search_files": "📂 Шукаю у файлах…",
@@ -160,6 +161,7 @@ class RobotWindow(QWidget):
         self.panel.image_pasted.connect(lambda path: self.upload_files([path]))
         self.panel.cancel_requested.connect(self.cancel_task)
         self.panel.confirm_answered.connect(self.answer_confirm)
+        self.panel.file_requested.connect(self.download_file)
         self.conn.event.connect(self.on_event)
         self.conn.connected.connect(self.on_connected)
         self.conn.disconnected.connect(self.on_disconnected)
@@ -583,6 +585,46 @@ class RobotWindow(QWidget):
             answer,
         )
 
+    @staticmethod
+    def download_dir():
+        from pathlib import Path
+
+        from PySide6.QtCore import QStandardPaths
+
+        # системна тека «Завантаження» (у Fedora з українською — ~/Завантаження, у Windows — Downloads)
+        down = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+        return Path(down or Path.home()) / "Kru"
+
+    def download_file(self, fid: str, path: str) -> None:
+        """Кнопка «⬇ Завантажити» біля файлу від агента: просимо його в сервера (file_get)."""
+        self.touch()
+        if not self.conn.send({"type": "file_get", "id": fid, "path": path}):
+            self.panel.file_failed(fid, "немає зв'язку з сервером")
+
+    def _save_download(self, ev: dict) -> None:
+        import base64
+        import binascii
+        from pathlib import Path
+
+        fid = str(ev.get("id", ""))
+        folder = self.download_dir()
+        name = Path(str(ev.get("name") or "file").replace("\\", "/")).name.lstrip(".") or "file"
+        name = "".join("_" if ch in '<>:"|?*' or ord(ch) < 32 else ch for ch in name)[:150]
+        target, n = folder / name, 1
+        while target.exists():
+            n += 1
+            target = folder / f"{Path(name).stem} ({n}){Path(name).suffix}"
+        try:
+            data = base64.b64decode(str(ev.get("data", "")), validate=True)
+            folder.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except (binascii.Error, ValueError, OSError) as e:
+            self.panel.file_failed(fid, f"не вдалося записати: {e}")
+            return
+        self.panel.file_saved(fid, str(target))
+        self.panel.set_activity(f"⬇ Збережено: {str(target).replace(str(Path.home()), '~', 1)}")
+        self.robot.set_state("happy", 1.5)
+
     def _on_chat_event(self, ev: dict) -> None:
         t = ev["type"]
         restoring, self._restoring = self._restoring, False
@@ -601,7 +643,10 @@ class RobotWindow(QWidget):
             self._switch_chat(ev["id"], ev["title"])
             self.panel.clear()
             for item in ev["transcript"]:
-                self.panel.add_entry(item["role"], item["text"])
+                if isinstance(item.get("file"), dict):  # файл від агента — знову кнопка завантаження
+                    self.panel.add_file(str(item["file"].get("path", "")), str(item["file"].get("name", "файл")))
+                else:
+                    self.panel.add_entry(item["role"], item["text"])
             self.panel.set_plan(ev.get("plan", []))
             if ev.get("running"):  # задача в цьому чаті ще йде (наприклад, після розриву зв'язку)
                 self.busy = True
@@ -678,6 +723,16 @@ class RobotWindow(QWidget):
             return
         if t == "uploaded":
             self._on_uploaded(ev)
+            return
+        if t == "file":  # агент передав файл (send_file) — кнопка завантаження в стрічці
+            self.panel.clear_draft()
+            self.panel.add_file(str(ev.get("path", "")), str(ev.get("name", "файл")), ev.get("size"))
+            return
+        if t == "file_data":
+            self._save_download(ev)
+            return
+        if t == "file_error":
+            self.panel.file_failed(str(ev.get("id", "")), str(ev.get("message", "помилка")))
             return
         if t == "upload_error":
             self._pending_uploads = getattr(self, "_pending_uploads", {})

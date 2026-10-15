@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any
 
-from .agent import strip_think
+from .agent import parse_json_tool_call, strip_think
 from .storage import default_title  # noqa: F401 — частина API модуля
 
 
@@ -27,12 +29,42 @@ def _tool_line(tc: dict[str, Any]) -> str:
     return f"🔧 {fn.get('name', '?')}: {brief}"
 
 
-def transcript(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Історія агента → [{"role": user|assistant|tool, "text"}] для показу в роботі/експорту."""
-    out: list[dict[str, str]] = []
+SENT_FILE = "Користувач отримав кнопку завантаження"  # початок результату send_file, коли файл передано
+
+
+def _arg_path(args: Any) -> str:
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return ""
+    return str(args.get("path") or "") if isinstance(args, dict) else ""
+
+
+def _sent_file(pending: list[str], content: str) -> dict[str, Any] | None:
+    """Результат send_file → рядок стрічки з кнопкою завантаження (якщо файл справді передано)."""
+    path = pending.pop(0) if pending else ""
+    if not path or not content.startswith(SENT_FILE):
+        return None
+    name = PurePosixPath(path.replace("\\", "/")).name
+    return {"role": "tool", "text": f"📎 Файл: {name}", "file": {"path": path, "name": name}}
+
+
+def transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Історія агента → [{"role": user|assistant|tool, "text"}] для показу в роботі/експорту.
+    Передані файли (send_file) — рядки "tool" з полем file: {path, name} (у панелі це кнопка завантаження)."""
+    out: list[dict[str, Any]] = []
+    files: list[str] = []  # шляхи з викликів send_file, що чекають на свій результат
     for m in messages:
         role, content = m.get("role"), (m.get("content") or "")
-        if role == "user":
+        if role == "tool" and m.get("tool_name") == "send_file":
+            if item := _sent_file(files, content):
+                out.append(item)
+        elif role == "user":
+            if content.startswith("TOOL RESULT (send_file)"):
+                if item := _sent_file(files, content.split("\n", 1)[-1]):
+                    out.append(item)
+                continue
             if content.startswith("TOOL RESULT") or content.startswith("[view_image]"):
                 continue  # службові повідомлення JSON-протоколу / view_image
             text = content
@@ -43,7 +75,14 @@ def transcript(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
             out.append({"role": "user", "text": text})
         elif role == "assistant":
             for tc in m.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                if fn.get("name") == "send_file":
+                    files.append(_arg_path(fn.get("arguments")))
+                    continue  # рядок із кнопкою — коли прийде результат
                 out.append({"role": "tool", "text": _tool_line(tc)})
+            if not m.get("tool_calls") and (call := parse_json_tool_call(content)) and call[0] == "send_file":
+                files.append(_arg_path(call[1]))  # JSON-режим: виклик записано текстом
+                continue
             text = strip_think(content)
             if text and not m.get("tool_calls"):
                 out.append({"role": "assistant", "text": text})
