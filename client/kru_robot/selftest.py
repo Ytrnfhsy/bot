@@ -343,6 +343,16 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return str(saved)
 
     step(50, lambda: check("file_download", file_flow))
+
+    def menu_icons_flow():
+        """Пункти меню — з намальованими іконками й без емодзі в тексті (меню трею KDE емодзі не показує)."""
+        acts = [a for a in win.menu.actions() if not a.isSeparator()]
+        need(all(not a.icon().isNull() for a in acts), "є пункти без іконки")
+        bad = [a.text() for a in acts if any(ord(ch) > 0x2000 and ch not in "…" for ch in a.text())]
+        need(not bad, f"емодзі в меню: {bad}")
+        return len(acts)
+
+    step(50, lambda: check("menu_icons", menu_icons_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())
