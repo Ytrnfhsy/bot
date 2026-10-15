@@ -788,6 +788,12 @@ class Agent:
     def list_chats(self, owner: str = OWNER) -> list[dict[str, Any]]:
         return self.storage.list_chats(owner)
 
+    def search_chats(self, query: str, owner: str = OWNER) -> list[dict[str, Any]]:
+        """Чати, де в назві чи тексті розмови є всі слова запиту (з уривком зі збігом)."""
+        from .chats import search
+
+        return search(self.storage.all_chats(owner), query)
+
     def open_chat(self, session_id: str, owner: str = OWNER) -> dict[str, Any]:
         """Чат для показу; клієнт далі просто пише в нього (session_id = id чату)."""
         from .chats import transcript

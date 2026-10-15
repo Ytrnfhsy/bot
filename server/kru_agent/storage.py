@@ -258,6 +258,17 @@ class Storage:
         return [{"id": r["sid"], "title": r["title"], "count": r["count"], "created_at": r["created_at"],
                  "updated_at": r["updated_at"]} for r in rows]
 
+    def all_chats(self, owner: str = "owner") -> list[dict[str, Any]]:
+        """Усі непорожні чати користувача з повідомленнями (для пошуку), найновіші — першими."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT sid, title, messages, count, created_at, updated_at FROM sessions"
+                " WHERE owner = ? AND count > 0 ORDER BY updated_at DESC",
+                (owner,),
+            ).fetchall()
+        return [{"id": r["sid"], "title": r["title"], "messages": r["messages"], "count": r["count"],
+                 "created_at": r["created_at"], "updated_at": r["updated_at"]} for r in rows]
+
     def load_chat(self, session_id: str, owner: str = "owner") -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute(

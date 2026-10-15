@@ -153,6 +153,30 @@ def run_selftest(app: QApplication, report_path: str) -> int:
                                {"id": "інший", "title": "Інший", "updated_at": 0, "count": 2}], current)
         need(win.panel.history_shown and win.panel.history_list.count() == 2, "сторінка історії")
         need(win.panel.history_list.item(0).text().startswith("● Тест"), "поточний чат не позначено")
+        # пошук: одразу — за назвою, потім — відповідь сервера з уривком тексту
+        sent = []
+        orig = win.conn.send
+        win.conn.send = lambda msg: sent.append(msg) or True
+        try:
+            box = win.panel.history_search_box
+            need(box.isVisible(), "немає поля пошуку")
+            box.setText("інш")
+            need(win.panel.history_list.count() == 1, "локальний фільтр за назвою не спрацював")
+            win.panel._search_timer.timeout.emit()  # не чекаємо паузи
+            need({"type": "chat_search", "query": "інш"} in sent, f"запит пошуку: {sent}")
+            win.on_event({"type": "chat_search", "query": "застарілий", "chats": []})  # ігнорується
+            need(win.panel.history_list.count() == 1, "застаріла відповідь перебила результат")
+            win.on_event({"type": "chat_search", "query": "інш", "chats": [
+                {"id": "інший", "title": "Інший", "updated_at": 0, "count": 2, "snippet": "щось інше тут"},
+                {"id": "x", "title": "Третій", "updated_at": 0, "count": 1, "snippet": "та інші"}]})
+            need(win.panel.history_list.count() == 2 and "щось інше тут" in win.panel.history_list.item(0).text(),
+                 "результати сервера не показано")
+            box.setText("немає такого")
+            need(win.panel.history_empty.isVisible() and "Нічого" in win.panel.history_empty.text(), "порожній пошук")
+            box.clear()
+            need(win.panel.history_list.count() == 2, "після очищення має бути повний список")
+        finally:
+            win.conn.send = orig
         win.panel.show_chat()
         need(not win.panel.history_shown, "назад до чату")
         win.panel.add_entry("user", "привіт")

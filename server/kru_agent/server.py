@@ -16,6 +16,7 @@
   Чати зберігаються автоматично (session_id — це id чату; новий чат = новий session_id від клієнта):
   {"type": "chat_list"} | {"type": "chat_open", "id"} | {"type": "chat_delete", "id"}
   {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
+  {"type": "chat_search", "query": "відпустка море"}  — пошук за назвою й текстом розмов
   {"type": "ping"}
 
 Задача не скасовується, коли з'єднання рветься: вона доробляється на сервері, а після перепідключення
@@ -40,6 +41,7 @@
   {"type": "chat_opened", "id", "title", "transcript": [{role, text, file?: {path, name}}], "plan": [...], "running": bool}
       running — у цьому чаті ще виконується задача (наприклад, після розриву з'єднання): далі прийдуть її події
   {"type": "chat_export", "title", "markdown"}
+  {"type": "chat_search", "query", "chats": [{id, title, count, created_at, updated_at, snippet}]}
   {"type": "chat_error", "message"}
   {"type": "error", "message": "..."}
   {"type": "pong"}
@@ -340,6 +342,10 @@ class Connection:
                 ag.delete_chat(chat_id, owner)
             elif kind == "chat_export":
                 await self.send({"type": "chat_export", **ag.export_chat(chat_id, owner)})
+            elif kind == "chat_search":
+                query = str(msg.get("query") or "")[:200]
+                found = await asyncio.to_thread(ag.search_chats, query, owner)
+                await self.send({"type": "chat_search", "query": query, "chats": found})
             if kind in {"chat_list", "chat_delete", "chat_rename", "chat_save"}:
                 await self.send({"type": "chat_list", "chats": ag.list_chats(owner)})
         except (ValueError, TypeError, KeyError) as e:
@@ -385,7 +391,8 @@ class Connection:
                 elif kind == "reset":
                     self.agent.reset_session(str(msg.get("session_id") or "default"), self.user.name)
                     await self.send({"type": "final", "text": "🧹 Розмову очищено."})
-                elif kind in {"chat_save", "chat_rename", "chat_list", "chat_open", "chat_delete", "chat_export"}:
+                elif kind in {"chat_save", "chat_rename", "chat_list", "chat_open", "chat_delete", "chat_export",
+                              "chat_search"}:
                     await self._chats(kind, msg)
                 elif kind == "upload":
                     await self._save_upload(msg)
