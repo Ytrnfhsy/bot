@@ -22,6 +22,7 @@ class ToolContext:
     config: Config
     storage: Storage
     owner: str = "owner"  # чия пам'ять і чати
+    session_id: str = ""  # поточний чат (search_chat / read_chat)
     workspace: Path | None = None  # None — KRU_WORKSPACE
     allow_outside: bool | None = None  # None — KRU_ALLOW_OUTSIDE_WORKSPACE
     denied_tools: frozenset[str] = frozenset()  # недоступні цьому користувачу
@@ -144,10 +145,12 @@ class ToolRegistry:
 
 
 def build_registry() -> ToolRegistry:
-    from . import files, memory, plan, python_exec, research, schedule, shell, system, telegram, vision, web
+    from . import (files, history, memory, plan, python_exec, research, schedule, shell, system, telegram, vision,
+                   web)
 
     reg = ToolRegistry()
-    for module in (web, research, files, shell, python_exec, memory, plan, schedule, telegram, system, vision):
+    for module in (web, research, files, shell, python_exec, memory, history, plan, schedule, telegram, system,
+                   vision):
         for tool in module.TOOLS:
             reg.register(tool)
     return reg
