@@ -93,6 +93,15 @@ class Config:
     # робочі теки інших користувачів: <USERS_WORKSPACE>/<ім'я>/
     users_workspace: Path = field(default_factory=lambda: Path.home() / "kru-users")
     auto_approve: bool = False
+    # Пісочниця для run_shell/run_python: off — на самому сервері (з підтвердженням); docker — в одноразовому
+    # контейнері, що бачить лише робочу теку (deploy/sandbox.sh build). У пісочниці дозвіл не питається
+    # (KRU_SANDBOX_CONFIRM=true — питати й там), а звичайні користувачі теж отримують shell і Python.
+    sandbox: str = "off"
+    sandbox_image: str = "kru-sandbox"
+    sandbox_network: str = "bridge"  # none — без інтернету (pip install тоді не працює)
+    sandbox_memory: str = "2g"
+    sandbox_cpus: float = 2.0
+    sandbox_confirm: bool = False
     shell_timeout: int = 120
     python_timeout: int = 120
     searxng_url: str = ""
@@ -151,6 +160,12 @@ class Config:
             allow_outside_workspace=_env_bool("ALLOW_OUTSIDE_WORKSPACE", d.allow_outside_workspace),
             users_workspace=Path(_env("USERS_WORKSPACE", str(d.users_workspace))).expanduser(),
             auto_approve=_env_bool("AUTO_APPROVE", d.auto_approve),
+            sandbox=_env("SANDBOX", d.sandbox).lower(),
+            sandbox_image=_env("SANDBOX_IMAGE", d.sandbox_image),
+            sandbox_network=_env("SANDBOX_NETWORK", d.sandbox_network),
+            sandbox_memory=_env("SANDBOX_MEMORY", d.sandbox_memory),
+            sandbox_cpus=float(_env("SANDBOX_CPUS", str(d.sandbox_cpus))),
+            sandbox_confirm=_env_bool("SANDBOX_CONFIRM", d.sandbox_confirm),
             shell_timeout=int(_env("SHELL_TIMEOUT", str(d.shell_timeout))),
             python_timeout=int(_env("PYTHON_TIMEOUT", str(d.python_timeout))),
             searxng_url=_env("SEARXNG_URL", d.searxng_url),

@@ -18,6 +18,11 @@ async def run_python(ctx: ToolContext, code: str, timeout: int = 0) -> str:
         script = Path(f.name)
     try:
         t = int(timeout) or ctx.config.python_timeout
+        from .. import sandbox
+
+        if sandbox.enabled(ctx.config):
+            rel = script.relative_to(ctx.workspace).as_posix()
+            return await sandbox.run(ctx, ["python", "-u", f"{sandbox.WORKDIR}/{rel}"], min(t, 3600))
         return await run_process(
             [sys.executable, "-u", str(script)],
             str(ctx.workspace),

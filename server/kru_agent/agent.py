@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable
 from .config import Config
 from .images import find_image_refs, is_image, load_image
 from .llm import ChatResult, OllamaClient, OpenAICompatClient, ToolsNotSupported, VisionNotSupported, create_llm
+from . import sandbox
 from .semantic import Embedder, MemoryIndex
 from .storage import Storage
 from .timezones import describe_tz, get_tz, server_tz
@@ -22,6 +23,7 @@ from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncat
 from .tools.memory import format_memories
 from .tools.plan import PLAN_TOOLS, SUBAGENT_DENIED, format_plan
 
+SANDBOX_TOOLS = frozenset({"run_shell", "run_python"})  # виконуються в пісочниці, якщо її увімкнено
 PLAN_NUDGE_STEPS = 5  # стільки кроків без оновлення плану — і модель отримує нагадування
 AUTO_FILE_TOOLS = frozenset({"write_file", "edit_file"})  # що можна дозволити без запиту (лише в робочій теці)
 from .users import ADMIN_ONLY_TOOLS, OWNER, User, workspace_for
@@ -51,7 +53,7 @@ How to work:
   a structured report citing sources as [1], [2] with the URL list at the end.
 - Use run_python for calculations and data processing instead of computing in your head.
 - Before editing a file, read it. Prefer edit_file for small changes.
-- run_shell, run_python, write_file and edit_file require user approval; if the user declines, adapt or ask.
+{approval}
 - To read, list or search files use read_file / list_dir / search_files (no approval needed) — never run_shell
   with cat/grep/head/sed for that. For big texts read in chunks (start_line/max_lines) and write results with
   write_file (append=true for the next parts).
@@ -251,7 +253,8 @@ class Agent:
             owner=user.name,
             workspace=ws,
             allow_outside=self.config.allow_outside_workspace and user.is_admin,
-            denied_tools=frozenset() if user.is_admin else ADMIN_ONLY_TOOLS,
+            # у пісочниці shell і Python безпечні й для звичайних користувачів (бачать лише свою теку)
+            denied_tools=frozenset() if user.is_admin or sandbox.enabled(self.config) else ADMIN_ONLY_TOOLS,
             vision_ok=self.vision,
             memory=self.memory,
             llm=self.llm,
@@ -289,6 +292,15 @@ class Agent:
             memories=memories,
             summary=summary,
             plan=self._plan_prompt(turn),
+            approval=(
+                "- run_shell and run_python run in an isolated Docker SANDBOX: only the workspace is visible (as "
+                "/workspace, the current directory), no access to the host system; `pip install <pkg>` works and "
+                "persists. They need no approval — use them freely for calculations, data and file processing. "
+                "write_file and edit_file may require user approval; if the user declines, adapt or ask."
+                if sandbox.enabled(self.config) else
+                "- run_shell, run_python, write_file and edit_file require user approval; if the user declines, "
+                "adapt or ask."
+            ),
         )
         if not self.native_tools:
             prompt += JSON_PROTOCOL.format(catalog=self.registry.text_catalog(ctx.denied_tools))
@@ -693,7 +705,8 @@ class Agent:
         summary = tool.describe(args) if tool else f"{name}({args})"
         await emit({"type": "tool_call", "id": call_id, "name": name, "args": args, "summary": summary})
 
-        if tool and tool.dangerous and not self.config.auto_approve and not self._auto_approved(name, args, ctx):
+        if (tool and tool.dangerous and not self.config.auto_approve and not self._auto_approved(name, args, ctx)
+                and not self._sandboxed(name)):
             await emit({"type": "status", "state": "waiting_confirm"})
             approved = await confirm(name, summary, args)
             if approved == "task" and name in AUTO_FILE_TOOLS:  # «дозволяти до кінця задачі»
@@ -733,6 +746,10 @@ class Agent:
             name = self.storage.user_tz(ctx.owner) or self.config.timezone
         ctx.tz = get_tz(name)
         ctx.tz_name = name if ctx.tz else ""
+
+    def _sandboxed(self, name: str) -> bool:
+        """Команда піде в ізольовану пісочницю — дозвіл не потрібен (якщо не KRU_SANDBOX_CONFIRM)."""
+        return name in SANDBOX_TOOLS and sandbox.enabled(self.config) and not self.config.sandbox_confirm
 
     @staticmethod
     def _auto_approved(name: str, args: dict[str, Any], ctx: ToolContext) -> bool:
