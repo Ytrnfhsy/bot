@@ -53,6 +53,9 @@ class ToolContext:
     def resolve_path(self, path: str) -> Path:
         """Шлях відносно робочої директорії; заборона виходу за її межі (якщо не дозволено)."""
         ws = self.workspace.resolve()
+        if path == "/workspace" or path.startswith("/workspace/"):
+            # так робоча тека називалась у пісочниці раніше — це той самий каталог
+            path = path[len("/workspace"):].lstrip("/") or "."
         p = Path(path).expanduser()
         full = (p if p.is_absolute() else ws / p).resolve()
         if not self.allow_outside and full != ws and ws not in full.parents:

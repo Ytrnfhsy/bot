@@ -168,6 +168,8 @@ async def fetch_page(url: str, timeout: float = 30) -> tuple[str, str, str]:
 
     ctype = r.headers.get("content-type", "").lower()
     title = ""
+    if ctype.startswith(("image/", "video/", "audio/")) or ctype in {"application/zip", "application/octet-stream"}:
+        raise ToolError(f"Це файл ({ctype.split(';')[0]}), а не сторінка — щоб зберегти його, виклич download_url")
     if "pdf" in ctype or url.lower().endswith(".pdf"):
         text = await asyncio.to_thread(_pdf_to_text, r.content)
     elif "html" in ctype or "<html" in r.text[:500].lower():
@@ -175,6 +177,65 @@ async def fetch_page(url: str, timeout: float = 30) -> tuple[str, str, str]:
     else:
         text = r.text
     return str(r.url), title, text
+
+
+MAX_DOWNLOAD = 50 * 1024 * 1024
+_CTYPE_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
+              "application/pdf": ".pdf", "image/svg+xml": ".svg", "application/zip": ".zip", "text/csv": ".csv"}
+
+
+def _download_name(url: str, headers: Any, ctype: str) -> str:
+    from email.message import Message
+    from pathlib import PurePosixPath
+    from urllib.parse import unquote, urlparse
+
+    msg = Message()
+    msg["content-disposition"] = headers.get("content-disposition", "")
+    name = msg.get_filename() or unquote(PurePosixPath(urlparse(url).path).name)
+    name = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", name).strip(" .")[:120] or "download"
+    if "." not in name and ctype in _CTYPE_EXT:
+        name += _CTYPE_EXT[ctype]
+    return name
+
+
+async def download_url(ctx: ToolContext, url: str, path: str = "") -> str:
+    """Файл з інтернету (картинка, PDF, архів…) → у робочу теку; наявні файли не перезаписуються."""
+    from .files import human_size
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True, headers=headers) as client:
+            async with client.stream("GET", url) as r:
+                if r.status_code >= 400:
+                    raise ToolError(f"HTTP {r.status_code} для {url}")
+                ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                if int(r.headers.get("content-length") or 0) > MAX_DOWNLOAD:
+                    raise ToolError("Файл більший за 50 МБ")
+                data = bytearray()
+                async for chunk in r.aiter_bytes():
+                    data += chunk
+                    if len(data) > MAX_DOWNLOAD:
+                        raise ToolError("Файл більший за 50 МБ")
+                final_url, resp_headers = str(r.url), r.headers
+    except httpx.HTTPError as e:
+        raise ToolError(f"Не вдалося завантажити {url}: {e}") from e
+    target = ctx.resolve_path(path) if path else ctx.resolve_path("downloads") / _download_name(final_url, resp_headers, ctype)
+    if path and (target.is_dir() or path.endswith(("/", "\\"))):
+        target = target / _download_name(final_url, resp_headers, ctype)
+    stem, suffix, n = target.stem, target.suffix, 1
+    while target.exists():
+        n += 1
+        target = target.with_name(f"{stem}-{n}{suffix}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(target.write_bytes, bytes(data))
+    ws = ctx.workspace.resolve()
+    shown = target.relative_to(ws).as_posix() if ws in target.resolve().parents else str(target)
+    note = ""
+    if ctype.startswith("text/html"):
+        note = "\nУВАГА: сервер віддав HTML-сторінку, а не файл — перевір посилання (потрібне пряме посилання на файл)."
+    return f"Завантажено: {shown} ({human_size(len(data))}, {ctype or 'невідомий тип'}){note}"
 
 
 async def fetch_url(ctx: ToolContext, url: str, offset: int = 0, max_chars: int = 0) -> str:
@@ -225,5 +286,22 @@ TOOLS = [
             "required": ["url"],
         },
         func=fetch_url,
+    ),
+    Tool(
+        name="download_url",
+        description=(
+            "Завантажує файл з інтернету (картинку, PDF, архів, таблицю…) у робочу теку — типово в downloads/. "
+            "Потім його можна показати собі (view_image), передати користувачу (send_file) чи в Telegram "
+            "(send_telegram з path). Потрібне пряме посилання на файл. До 50 МБ, наявні файли не перезаписує."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Пряме посилання на файл"},
+                "path": {"type": "string", "description": "Куди зберегти (необов'язково), напр. 'images/photo.jpg'"},
+            },
+            "required": ["url"],
+        },
+        func=download_url,
     ),
 ]

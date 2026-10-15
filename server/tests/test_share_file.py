@@ -97,10 +97,10 @@ async def test_telegram_gets_document(cfg):
     (cfg.workspace / "звіт.txt").write_text("дані")
     docs = []
 
-    async def send_document(chat_id, path, caption=""):
+    async def send_file(chat_id, path, caption=""):
         docs.append((str(chat_id), path.name, path.read_text()))
 
-    bot.send_document = send_document
+    bot.send_file = send_file
     await gw.handle(msg("надішли звіт"))
     assert docs == [(CHAT, "звіт.txt", "дані")] and bot.texts()[-1] == "Надіслав звіт"
 
@@ -112,8 +112,8 @@ async def test_send_telegram_with_attachment(cfg, monkeypatch):
         calls.append(("message", params["text"]))
         return {"message_id": 5}
 
-    async def fake_doc(self, chat_id, path, caption=""):
-        calls.append(("document", path.name, caption))
+    async def fake_doc(self, chat_id, path, caption="", kind="document"):
+        calls.append((kind, path.name, caption))
 
     monkeypatch.setattr(TelegramBot, "_call", fake_call)
     monkeypatch.setattr(TelegramBot, "send_document", fake_doc)
@@ -146,3 +146,69 @@ def test_transcript_json_mode_file():
     out = transcript(msgs)
     assert out[1] == {"role": "tool", "text": "📎 Файл: b.zip", "file": {"path": "./a/b.zip", "name": "b.zip"}}
     assert [i["role"] for i in out] == ["user", "tool", "assistant"]
+
+
+async def test_telegram_images_go_as_photo(monkeypatch, tmp_path):
+    from kru_agent.telegram import TelegramError
+
+    sent = []
+
+    async def fake_doc(self, chat_id, path, caption="", kind="document"):
+        sent.append((kind, path.name))
+        if kind == "photo" and path.name == "weird.png":
+            raise TelegramError("PHOTO_INVALID_DIMENSIONS")
+
+    monkeypatch.setattr(TelegramBot, "send_document", fake_doc)
+    bot = TelegramBot("t")
+    for name in ("a.jpg", "weird.png", "b.pdf"):
+        (tmp_path / name).write_bytes(b"x")
+        await bot.send_file("1", tmp_path / name)
+    assert sent == [("photo", "a.jpg"), ("photo", "weird.png"), ("document", "weird.png"), ("document", "b.pdf")]
+
+
+def _mock_http(monkeypatch, handler):
+    import httpx
+
+    real = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+
+async def test_download_url(cfg, monkeypatch):
+    import httpx
+
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 100
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/big"):
+            return httpx.Response(200, headers={"content-length": str(MAX_SHARE + 1)}, content=b"")
+        if request.url.path.endswith("/page"):
+            return httpx.Response(200, headers={"content-type": "text/html"}, content=b"<html></html>")
+        assert "Mozilla" in request.headers["user-agent"]  # Wikimedia відхиляє запити без нормального User-Agent
+        return httpx.Response(200, headers={"content-type": "image/png"}, content=png)
+
+    _mock_http(monkeypatch, handler)
+    agent = Agent(cfg, llm=FakeLLM([]))
+    ctx = agent.make_context()
+    url = "https://upload.wikimedia.org/wikipedia/commons/4/48/Volodymyr_Zelenskyy_in_2024.png"
+    out = await agent.registry.call(ctx, "download_url", {"url": url})
+    assert out.startswith("Завантажено: downloads/Volodymyr_Zelenskyy_in_2024.png")
+    assert (cfg.workspace / "downloads" / "Volodymyr_Zelenskyy_in_2024.png").read_bytes() == png
+    out = await agent.registry.call(ctx, "download_url", {"url": url})  # не перезаписує
+    assert "Volodymyr_Zelenskyy_in_2024-2.png" in out
+    out = await agent.registry.call(ctx, "download_url", {"url": "https://x.org/img?id=5", "path": "pics/"})
+    assert "pics/img.png" in out
+    assert "HTML-сторінку" in await agent.registry.call(ctx, "download_url", {"url": "https://x.org/page"})
+    with pytest.raises(ToolError, match="50 МБ"):
+        await agent.registry.call(ctx, "download_url", {"url": "https://x.org/big"})
+    with pytest.raises(ToolError, match="поза робочою"):
+        await agent.registry.call(ctx, "download_url", {"url": url, "path": "../../x.png"})
+    with pytest.raises(ToolError, match="download_url"):
+        await agent.registry.call(ctx, "fetch_url", {"url": url})
+    # і далі — одразу в Telegram / на ПК
+    assert (await agent.registry.call(ctx, "send_file", {"path": "downloads/Volodymyr_Zelenskyy_in_2024.png"})
+            ).startswith("Файл")

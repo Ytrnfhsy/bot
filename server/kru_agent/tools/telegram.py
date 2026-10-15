@@ -33,7 +33,7 @@ async def send_telegram(ctx: ToolContext, text: str = "", path: str = "") -> str
             short = len(text) <= 1000
             if text.strip() and not short:
                 await bot.send(chat, text)
-            await bot.send_document(chat, file, text if short else "")
+            await bot.send_file(chat, file, text if short else "")
             return f"Надіслано в Telegram (з файлом {file.name})"
         await bot.send(chat, text)
         parts = len(split_message(text))

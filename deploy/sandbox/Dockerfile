@@ -1,6 +1,6 @@
 # Пісочниця для run_shell / run_python агента Kru: Python і типові бібліотеки та утиліти.
 # Збирається командою ../sandbox.sh build. Кожна команда агента — одноразовий контейнер, який бачить лише
-# робочу теку користувача (/workspace); бібліотеки з pip install лягають у /workspace/.kru-py.
+# робочу теку користувача (за тим самим шляхом, що й на сервері); бібліотеки з pip install лягають у <тека>/.kru-py.
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
