@@ -33,7 +33,7 @@ ACTIVITY = {
 }
 HELP = (
     "Я {name} — твій агент. Просто пиши задачу, як у персонажі на ПК: знайти, порахувати, перекласти, "
-    "нагадати…\n\nФото й файли теж можна надсилати.\n\n/new — новий чат\n/stop — зупинити задачу\n/help — довідка"
+    "нагадати…\n\nФото й файли теж можна надсилати.\n\n/new — новий чат\n/stop — зупинити задачу\n/retry — виконати останню задачу заново\n/help — довідка"
 )
 
 
@@ -189,7 +189,10 @@ class TelegramGateway:
                 return await self.bot.send(chat_id, "⏹ Зупиняю задачу.")
             return await self.bot.send(chat_id, "Зараз нічого не виконується.")
 
-        files = await self._save_files(msg, user)
+        retry = cmd == "/retry"
+        if retry:
+            text = "/retry"  # сам текст задачі агент візьме з чату
+        files = [] if retry else await self._save_files(msg, user)
         if files:
             text = (text + "\n" if text else "Подивись, будь ласка:\n") + "\n".join(files)
         if not text:
@@ -197,7 +200,7 @@ class TelegramGateway:
         if busy := self.hub.get(owner):
             what = f"заплановане завдання «{busy.scheduled[:60]}»" if busy.scheduled else "іншу задачу"
             return await self.bot.send(chat_id, f"⏳ Зараз виконую {what}. Зачекай або надішли /stop.")
-        await self._run(owner, user, chat_id, text)
+        await self._run(owner, user, chat_id, text, retry)
 
     def _session(self, owner: str) -> str:
         sid = self.agent.storage.telegram_session(owner)
@@ -210,7 +213,7 @@ class TelegramGateway:
     def _new_session() -> str:
         return f"tg-{uuid.uuid4().hex[:10]}"
 
-    async def _run(self, owner: str, user, chat_id: str, text: str) -> None:
+    async def _run(self, owner: str, user, chat_id: str, text: str, retry: bool = False) -> None:
         from .server import RunningTask
 
         sid = self._session(owner)
@@ -220,12 +223,15 @@ class TelegramGateway:
         self.hub.tasks[owner] = rt
         typing = asyncio.create_task(self._typing(chat_id))
         try:
-            await self.agent.run(sid, text, rt.emit, rt.confirm, user, tz=self.agent.storage.user_tz(owner) or None)
+            await self.agent.run(sid, text, rt.emit, rt.confirm, user, tz=self.agent.storage.user_tz(owner) or None,
+                                 retry=retry)
             if chat := self.agent.storage.load_chat(sid, owner):
                 if not chat["title"].startswith("✈️"):
                     self.agent.storage.rename_chat(sid, "✈️ " + chat["title"], owner)
         except asyncio.CancelledError:
             await self.bot.send(chat_id, "⏹ Задачу зупинено.")
+        except ValueError as e:  # /retry у порожньому чаті
+            await self.bot.send(chat_id, f"⚠️ {e}")
         except Exception as e:  # noqa: BLE001
             log.exception("Telegram: задача впала")
             await self.bot.send(chat_id, f"⚠️ Помилка: {e}")

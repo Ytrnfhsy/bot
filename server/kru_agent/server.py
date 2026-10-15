@@ -4,6 +4,7 @@
 
 Клієнт → сервер:
   {"type": "task", "text": "...", "session_id": "default", "think": true, "auto_files": false, "tz": "Europe/Kyiv"}
+      retry: true — «Повторити»: останнє повідомлення чату виконується заново, попередня спроба прибирається
       think — міркувати чи ні; auto_files — запис файлів у робочій теці без запиту (копії в .kru-backup);
       tz — часовий пояс користувача (IANA, напр. "Europe/Kyiv"): час у розмові й розкладі — саме в ньому
   {"type": "confirm_response", "id": "<confirm id>", "approved": true, "scope": "task"}
@@ -257,9 +258,12 @@ class Connection:
                 self.closed = True
 
     async def _run_task(self, rt: RunningTask, text: str, think: bool | None = None, auto_files: bool = False,
-                        tz: str | None = None) -> None:
+                        tz: str | None = None, retry: bool = False) -> None:
         try:
-            await self.agent.run(rt.session_id, text, rt.emit, rt.confirm, self.user, think, auto_files, tz)
+            await self.agent.run(rt.session_id, text, rt.emit, rt.confirm, self.user, think, auto_files, tz, retry)
+        except ValueError as e:  # «Повторити» в порожньому чаті
+            await rt.emit({"type": "error", "message": str(e)})
+            await rt.emit({"type": "status", "state": "idle"})
         except asyncio.CancelledError:
             await rt.emit({"type": "final", "text": "⏹ Задачу скасовано."})
             await rt.emit({"type": "status", "state": "idle"})
@@ -355,7 +359,8 @@ class Connection:
                 kind = msg.get("type")
                 if kind == "task":
                     text = str(msg.get("text", "")).strip()
-                    if not text:
+                    retry = msg.get("retry") is True
+                    if not text and not retry:
                         continue
                     if busy := self.hub.get(self.user.name):
                         msg = (f"Зараз виконується заплановане завдання «{busy.scheduled[:60]}». Зачекай або зупини його (■)."
@@ -369,7 +374,7 @@ class Connection:
                     self.hub.tasks[self.user.name] = rt
                     auto_files = msg.get("auto_files") is True
                     tz = msg.get("tz") if isinstance(msg.get("tz"), str) else None
-                    rt.task = asyncio.create_task(self._run_task(rt, text, think, auto_files, tz))
+                    rt.task = asyncio.create_task(self._run_task(rt, text, think, auto_files, tz, retry))
                 elif kind == "confirm_response":
                     if rt := self.hub.get(self.user.name):
                         rt.answer(str(msg.get("id")), bool(msg.get("approved")), str(msg.get("scope") or ""))
