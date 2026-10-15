@@ -20,7 +20,7 @@ if [[ ${REFRESH} == 0 ]]; then
   echo "==> Системні залежності (потрібен sudo)"
   # xcb-util-cursor потрібен Qt6 для X11/XWayland; решта — для прозорих вікон і шрифтів
   sudo dnf install -y python3 python3-pip xcb-util-cursor xcb-util-wm xcb-util-keysyms \
-      libxkbcommon-x11 mesa-libEGL google-noto-emoji-color-fonts || true
+      libxkbcommon-x11 mesa-libEGL google-noto-color-emoji-fonts || true
 fi
 if [[ ${REFRESH} == 0 || ! -x "${VENV}/bin/kru-robot" ]]; then
   echo "==> Віртуальне середовище: ${VENV}"
@@ -34,6 +34,16 @@ export QT_QPA_PLATFORM="\${QT_QPA_PLATFORM:-xcb}"
 exec "${VENV}/bin/kru-robot" "\$@"
 LAUNCHER
 chmod +x "${BIN}/kru-robot"
+
+echo "==> Шрифт емодзі (значки в меню й чаті)"
+FONT_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/kru-robot/fonts"
+if [[ ! -s "${FONT_DIR}/NotoColorEmoji.ttf" ]]; then
+  mkdir -p "${FONT_DIR}"
+  curl -fsSL --retry 2 -o "${FONT_DIR}/NotoColorEmoji.ttf.part" \
+      "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf" \
+    && mv "${FONT_DIR}/NotoColorEmoji.ttf.part" "${FONT_DIR}/NotoColorEmoji.ttf" \
+    || { rm -f "${FONT_DIR}/NotoColorEmoji.ttf.part"; echo "   (не вдалося завантажити — буде системний шрифт емодзі, якщо є)"; }
+fi
 
 echo "==> Іконка програми"
 QT_QPA_PLATFORM=offscreen "${VENV}/bin/python" -m kru_robot.icon "${HOME}/.local/share/icons"

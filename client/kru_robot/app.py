@@ -927,6 +927,9 @@ def main() -> None:
     app.setDesktopFileName("kru-robot")  # панель задач KDE/GNOME бере іконку з kru-robot.desktop
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
+    from .emoji import setup_emoji_font
+
+    setup_emoji_font(app)  # інакше на Fedora значки 🔧 💬 📋 у меню й чаті можуть бути порожніми
     if "--selftest" in sys.argv:  # перевірка на чистій системі (CI): вікно, панель, клавіша, автозапуск
         from .selftest import run_selftest
 
