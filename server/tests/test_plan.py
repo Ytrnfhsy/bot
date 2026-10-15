@@ -4,7 +4,7 @@ from kru_agent.agent import Agent
 from kru_agent.chats import transcript
 from kru_agent.tools.plan import normalize_plan
 
-from .conftest import FakeLLM, call, text
+from .conftest import FakeLLM, call, text, prompt
 from .test_agent import Recorder
 
 PLAN = [{"title": "Знайти дані", "status": "in_progress"}, {"title": "Написати звіт", "status": "pending"}]
@@ -20,9 +20,9 @@ async def test_plan_is_shown_saved_and_kept_in_prompt(cfg):
 
     plans = [e["steps"] for e in rec.events if e["type"] == "plan"]
     assert plans == [PLAN, DONE]
-    # модель бачить поточний план у системному промпті на кожному кроці
-    assert "⏳ 1. Знайти дані" in llm.calls[1]["messages"][0]["content"]
-    assert "✅ 2. Написати звіт" in llm.calls[3]["messages"][0]["content"]
+    # модель бачить поточний план на кожному кроці
+    assert "⏳ 1. Знайти дані" in prompt(llm.calls[1])
+    assert "✅ 2. Написати звіт" in prompt(llm.calls[3])
     assert agent.open_chat("c")["plan"] == DONE
     assert "📋 План оновлено" in [m["text"] for m in transcript(agent.storage.load_chat("c")["messages"])]
 
@@ -31,7 +31,7 @@ async def test_plan_is_shown_saved_and_kept_in_prompt(cfg):
     rec2 = Recorder()
     await agent.run("c", "дрібниця", rec2.emit, rec2.confirm)
     assert {"type": "plan", "steps": []} in rec2.events and agent.open_chat("c")["plan"] == []
-    assert "Current plan" not in llm.calls[-1]["messages"][0]["content"]
+    assert "Current plan" not in prompt(llm.calls[-1])
 
 
 async def test_unfinished_plan_survives_and_gives_more_steps(cfg):
@@ -64,7 +64,7 @@ async def test_delegate_runs_subagent_with_fresh_context(cfg):
     assert "delegate" not in sub_tools and "update_plan" not in sub_tools and "read_file" in sub_tools
     # основний агент отримує лише результат, а не сирий вміст файлу
     main_last = llm.calls[3]["messages"]
-    assert main_last[-1]["content"] == "Результат субагента:\nЧисло: 42"
+    assert main_last[-1]["content"].startswith("Результат субагента:\nЧисло: 42")
     assert not any("секрет: 42" in str(m.get("content")) for m in main_last)
     # у стрічці видно дії субагента, але не його «фінальну» відповідь як окреме повідомлення
     sub_calls = [e for e in rec.events if e["type"] == "tool_call" and e.get("sub")]
@@ -138,6 +138,6 @@ async def test_model_is_reminded_to_update_plan(cfg):
     agent = Agent(cfg, llm=llm)
     rec = Recorder()
     await agent.run("c", "книга", rec.emit, rec.confirm)
-    prompts = [c["messages"][0]["content"] for c in llm.calls]
+    prompts = [prompt(c) for c in llm.calls]
     assert not any("REMINDER" in p for p in prompts[:6])  # перші кроки — без нагадувань
     assert "REMINDER: you have made 5 steps" in prompts[6]

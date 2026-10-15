@@ -24,7 +24,7 @@ async def test_retry_replaces_last_attempt(cfg):
     assert answer == "Краща відповідь"
     # модель отримала ту саму задачу, а попередньої спроби (виклик інструмента й відповідь) у контексті немає
     sent = llm.calls[-1]["messages"]
-    assert sent[-1] == {"role": "user", "content": "А який там час?"}
+    assert sent[-1]["role"] == "user" and sent[-1]["content"].startswith("А який там час?")
     assert not any("Погана" in str(m.get("content")) for m in sent)
     roles = [(m["role"], m.get("content")) for m in agent.storage.load_session("s")]
     assert roles == [("user", "Столиця Австралії?"), ("assistant", "Канберра"),

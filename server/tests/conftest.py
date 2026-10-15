@@ -39,6 +39,11 @@ def text(t: str) -> ChatResult:
     return ChatResult(content=t)
 
 
+def prompt(call_: dict[str, Any]) -> str:
+    """Усе, що побачила модель за один виклик: системний промпт, розмова й примітка з часом/планом у кінці."""
+    return "\n".join(str(m.get("content") or "") for m in call_["messages"])
+
+
 @pytest.fixture
 def cfg(tmp_path) -> Config:
     c = Config(workspace=tmp_path / "ws", data_dir=tmp_path / "data", users_workspace=tmp_path / "users",

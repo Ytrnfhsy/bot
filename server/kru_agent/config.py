@@ -80,6 +80,10 @@ class Config:
     image_max_pixels_high: int = 2_500_000  # скільки останніх повідомлень із картинками передавати моделі
     # довгі розмови: старі повідомлення стискаються моделлю в підсумок, а не відкидаються наосліп
     summarize: bool = True
+    # контекст, зручний для кешу llama-server: системний промпт не змінюється від кроку до кроку
+    # (час, план, спогади й нагадування — приміткою в кінці), тож уже оброблений початок розмови
+    # не перераховується. false — як раніше (усе в системному промпті)
+    cache_friendly: bool = True
     language: str = "українська"
     # часовий пояс користувачів за замовчуванням (IANA, напр. Europe/Kyiv); порожньо — пояс сервера.
     # Робот передає пояс свого ПК сам — цей параметр лише запасний (CLI, API).
@@ -152,6 +156,7 @@ class Config:
             image_max_pixels=int(_env("IMAGE_MAX_PIXELS", str(d.image_max_pixels))),
             image_max_pixels_high=int(_env("IMAGE_MAX_PIXELS_HIGH", str(d.image_max_pixels_high))),
             summarize=_env_bool("SUMMARIZE", d.summarize),
+            cache_friendly=_env_bool("CACHE_FRIENDLY", d.cache_friendly),
             language=_env("LANGUAGE", d.language),
             timezone=_env("TIMEZONE", d.timezone),
             agent_name=_env("AGENT_NAME", d.agent_name),
