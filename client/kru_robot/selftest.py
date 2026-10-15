@@ -368,6 +368,38 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return len(acts)
 
     step(50, lambda: check("menu_icons", menu_icons_flow))
+
+    def retry_flow():
+        """«↻ Повторити» під відповіддю: прибирає попередню спробу й просить сервер виконати задачу заново."""
+        sent = []
+        orig = win.conn.send
+        win.conn.send = lambda msg: sent.append(msg) or True
+        try:
+            win.new_chat()
+            win.panel.set_show_tools(True)
+            win.busy = False
+            win.panel.set_busy(False)
+            win.panel.add_entry("user", "Знайди фото")
+            win.panel.add_entry("tool", "🔧 web_search: фото")
+            win.panel.add_entry("assistant", "⏹ Задачу скасовано.")
+            win.panel._render()
+            need("Повторити" in win.panel.view.toMarkdown(), "немає кнопки «Повторити»")
+            win.panel._on_link(QUrl("kru-retry:last"))
+            msg = next((m for m in sent if m.get("type") == "task"), None)
+            need(msg and msg.get("retry") is True and msg.get("text") == "Знайди фото", f"запит: {msg}")
+            need([r for r, _ in win.panel.entries] == ["user"], f"стрічка: {win.panel.entries}")
+            win.panel._render()
+            need("Повторити" not in win.panel.view.toMarkdown(), "кнопка видна, поки агент працює")
+            win.panel._on_link(QUrl("kru-retry:last"))  # повторний клік, поки працює, — нічого не шле
+            need(sum(1 for m in sent if m.get("type") == "task") == 1, "задачу надіслано двічі")
+        finally:
+            win.conn.send = orig
+            win.busy = False
+            win.panel.set_busy(False)
+            win.new_chat()
+        return "ok"
+
+    step(50, lambda: check("retry_button", retry_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())

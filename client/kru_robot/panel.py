@@ -189,6 +189,7 @@ class ChatPanel(QWidget):
     chats_requested = Signal()
     confirm_answered = Signal(str, bool, str)  # id, дозволено, scope ("task" — до кінця задачі)
     file_requested = Signal(str, str)  # (id кнопки, шлях на сервері) — завантажити файл від агента
+    retry_requested = Signal()  # «↻ Повторити» під відповіддю — виконати останню задачу заново
     closed = Signal()
 
     WIDTH = 408
@@ -665,6 +666,20 @@ class ChatPanel(QWidget):
         self.btn_send.setVisible(not busy)
         if not busy:
             self.set_activity("")
+        if busy != getattr(self, "busy", False):
+            self.busy = busy
+            self._schedule()  # «↻ Повторити» — лише коли агент вільний
+
+    def last_user_text(self) -> str:
+        return next((text for role, text in reversed(self.entries) if role == "user"), "")
+
+    def trim_to_last_task(self) -> None:
+        """Перед «Повторити»: прибрати зі стрічки попередню спробу (відповідь, дії), лишивши саму задачу."""
+        last = max((i for i, (role, _) in enumerate(self.entries) if role == "user"), default=None)
+        if last is not None:
+            del self.entries[last + 1:]
+        self.draft = ""
+        self._schedule()
 
     PLAN_MAX_ROWS = 9  # довший план показується згорнутим навколо поточного пункту
 
@@ -753,7 +768,9 @@ class ChatPanel(QWidget):
 
         scheme, fid = url.scheme(), url.path()
         info = self.files.get(fid)
-        if scheme == "kru-file":
+        if scheme == "kru-retry":
+            self.retry_requested.emit()
+        elif scheme == "kru-file":
             self.download_file(fid)
         elif scheme in {"kru-open", "kru-folder"} and info and info["saved"]:
             from pathlib import Path
@@ -884,6 +901,8 @@ class ChatPanel(QWidget):
                 parts.append(text)
         if self.draft:
             parts.append(self.draft + " ▍")
+        elif not getattr(self, "busy", False) and any(role == "user" for role, _ in self.entries):
+            parts.append("[↻ Повторити](kru-retry:last)")  # як у ChatGPT/Gemini: та сама задача ще раз
         self.view.setMarkdown("\n\n".join(parts))
         visible = bool(parts) and not self.history_shown
         self.view.setVisible(visible)

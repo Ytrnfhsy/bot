@@ -162,6 +162,7 @@ class RobotWindow(QWidget):
         self.panel.cancel_requested.connect(self.cancel_task)
         self.panel.confirm_answered.connect(self.answer_confirm)
         self.panel.file_requested.connect(self.download_file)
+        self.panel.retry_requested.connect(self.retry_task)
         self.conn.event.connect(self.on_event)
         self.conn.connected.connect(self.on_connected)
         self.conn.disconnected.connect(self.on_disconnected)
@@ -355,6 +356,26 @@ class RobotWindow(QWidget):
             self.settings.save()
         self.busy = True
         self.panel.set_busy(True)
+        self.robot.set_state("thinking")
+
+    def retry_task(self) -> None:
+        """«↻ Повторити»: сервер прибирає попередню спробу з чату й виконує останню задачу заново."""
+        self.touch()
+        text = self.panel.last_user_text()
+        if self.busy or not text:
+            return
+        # text — для старого сервера, який не знає retry (він просто виконає задачу ще раз)
+        if not self.conn.send({"type": "task", "text": text, "retry": True, "session_id": self.settings.session_id,
+                               "think": self.settings.think, "auto_files": self.settings.auto_files,
+                               "tz": local_timezone()}):
+            self.conn.reconnect_now()
+            self.panel.set_activity("📡 Немає зв'язку з сервером — повтори, коли з'єднаюсь")
+            return
+        self.panel.trim_to_last_task()
+        self.panel.set_plan([])
+        self.busy = True
+        self.panel.set_busy(True)
+        self.panel.set_activity("↻ Повторюю задачу…")
         self.robot.set_state("thinking")
 
     def _pending_timeout(self) -> None:

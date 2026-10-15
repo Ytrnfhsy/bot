@@ -24,6 +24,7 @@ HELP = (
     f"{DIM}Усі чати зберігаються автоматично. Команди: /new — новий чат, /chats — список чатів,\n"
     f"/open N — відкрити чат №N зі списку, /rename назва — перейменувати поточний, /delete N — видалити,\n"
     f"/export [файл.md] — експорт у Markdown, /get шлях — завантажити файл від агента в поточну теку,\n"
+    f"/retry — виконати останню задачу заново (попередня відповідь прибирається),\n"
     f"/exit — вийти, Ctrl+C — скасувати поточну задачу{RESET}"
 )
 
@@ -253,12 +254,16 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
                     printer(ev)
                 continue
             global _current
-            _current = asyncio.create_task(agent.run(printer.session, text, emit, confirm, think=False if args.no_think else None))
+            retry = text == "/retry"
+            _current = asyncio.create_task(agent.run(printer.session, "" if retry else text, emit, confirm,
+                                                     think=False if args.no_think else None, retry=retry))
             try:
                 await asyncio.wait({_current})
                 _current.result()
             except asyncio.CancelledError:
                 print(f"\n{DIM}⏹ скасовано{RESET}")
+            except ValueError as e:  # /retry у порожньому чаті
+                print(f"{YELLOW}{e}{RESET}")
             except Exception as e:  # noqa: BLE001
                 print(f"{RED}Помилка: {e}{RESET}")
     finally:
@@ -322,6 +327,8 @@ async def _remote_session(url: str, token: str, args: argparse.Namespace, once: 
                 from .timezones import local_tz_name
 
                 task = {"type": "task", "text": text, "session_id": printer.session, "tz": local_tz_name()}
+                if text == "/retry":
+                    task.update(text="", retry=True)
                 if args.no_think:
                     task["think"] = False
                 await ws.send(json.dumps(task))

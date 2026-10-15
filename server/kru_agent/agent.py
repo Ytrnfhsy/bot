@@ -545,14 +545,25 @@ class Agent:
         think: bool | None = None,
         auto_files: bool = False,
         tz: str | None = None,
+        retry: bool = False,
     ) -> str:
-        """think — чи міркувати моделі перед відповіддю (None — як налаштовано на сервері моделі)."""
+        """think — чи міркувати моделі перед відповіддю (None — як налаштовано на сервері моделі).
+        retry — «Повторити»: останнє повідомлення користувача виконується заново, а попередня спроба
+        (відповідь, кроки, план) прибирається з розмови; user_text тоді не потрібен."""
         ctx = self.make_context(user)
         ctx.auto_files = auto_files
         self._apply_tz(ctx, tz)
         lock = self._session_locks.setdefault(f"{ctx.owner}:{session_id}", asyncio.Lock())
         async with lock:
             history = self.storage.load_session(session_id, ctx.owner)
+            if retry:
+                last = max((i for i, m in enumerate(history) if _is_user_turn(m)), default=None)
+                if last is None:
+                    raise ValueError("У цьому чаті ще немає задачі, яку можна повторити")
+                user_text = history[last]["content"]
+                del history[last:]  # підсумок розмови (summary) ніколи не охоплює останню задачу
+                self.storage.save_plan(session_id, [], ctx.owner)
+                await emit({"type": "plan", "steps": []})
             user_msg: dict[str, Any] = {"role": "user", "content": user_text}
             if refs := self._image_refs(user_text, ctx):
                 await self.refresh_vision()
