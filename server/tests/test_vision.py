@@ -11,7 +11,7 @@ from kru_agent.agent import Agent
 from kru_agent.images import MAX_SIDE, find_image_refs, load_image
 from kru_agent.llm import OllamaClient, OpenAICompatClient, VisionNotSupported
 
-from .conftest import FakeLLM, call, text
+from .conftest import FakeLLM, call, text, real
 from .test_agent import Recorder
 
 
@@ -47,7 +47,7 @@ async def test_image_in_task_is_attached(cfg):
     assert len(imgs) == 1 and imgs[0]["mime"].startswith("image/")
     assert "You can SEE images" in llm.calls[0]["messages"][0]["content"]
     # в історії зберігається лише шлях, не base64
-    assert agent.storage.load_session("s")[0]["images"] == ["uploads/скрін.png"]
+    assert real(agent.storage.load_session("s"))[0]["images"] == ["uploads/скрін.png"]
 
 
 async def test_view_image_tool(cfg):

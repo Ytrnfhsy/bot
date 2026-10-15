@@ -167,9 +167,13 @@ def _normalize_args(raw: Any) -> dict[str, Any]:
     return {}
 
 
+NOTE_PREFIX = "[Context note"  # службова примітка агента (час, план) — не повідомлення користувача
+SERVICE_PREFIXES = ("TOOL RESULT", "[view_image]", NOTE_PREFIX)
+
+
 def _is_user_turn(m: dict[str, Any]) -> bool:
-    """Справжнє повідомлення користувача (не результат інструмента в JSON-протоколі)."""
-    return m.get("role") == "user" and not str(m.get("content") or "").startswith(("TOOL RESULT", "[view_image]"))
+    """Справжнє повідомлення користувача (не результат інструмента в JSON-протоколі й не службова примітка)."""
+    return m.get("role") == "user" and not str(m.get("content") or "").startswith(SERVICE_PREFIXES)
 
 
 def _msg_size(m: dict[str, Any]) -> int:
@@ -194,6 +198,8 @@ def _render_for_summary(msgs: list[dict[str, Any]]) -> str:
     lines = []
     for m in msgs:
         role, content = m.get("role"), strip_think(str(m.get("content") or ""))
+        if role == "user" and content.startswith(NOTE_PREFIX):
+            continue  # службова примітка (час, план) — у підсумку не потрібна
         if role == "user" and _is_user_turn(m):
             lines.append(f"USER: {content[:4000]}")
         elif role == "assistant":
@@ -225,6 +231,9 @@ class Turn:
     subagent: bool = False  # це підзадача, доручена субагенту (delegate)
     steps_since_plan: int = 0  # кроків без оновлення плану — для нагадування моделі
     trim_from: int = 0  # з якого повідомлення history модель бачить розмову (обрізання «стрибками»)
+    note_time: str = ""  # що вже сказано моделі в службових примітках цієї задачі
+    note_plan: str = ""
+    note_reminder: int = 0
 
 
 class Agent:
@@ -283,8 +292,8 @@ class Agent:
                 + turn.summary + "\n"
             )
         prompt = SYSTEM_PROMPT.format(
-            now=(datetime.now(ctx.tz).strftime("%Y-%m-%d (%A); the exact current time is in the context note at the "
-                                               "end of the latest message")
+            now=(datetime.now(ctx.tz).strftime("%Y-%m-%d (%A); the exact current time is in the latest context note "
+                                               "in the conversation")
                  if stable else datetime.now(ctx.tz).strftime("%Y-%m-%d %H:%M (%A)")),
             tz=describe_tz(ctx.tz or server_tz(), ctx.tz_name),
             workspace=ctx.workspace,
@@ -318,25 +327,37 @@ class Agent:
             prompt += JSON_PROTOCOL.format(catalog=self.registry.text_catalog(ctx.denied_tools))
         return prompt
 
-    def _context_note(self, turn: Turn) -> str:
-        """Те, що змінюється від кроку до кроку: дописується в кінець останнього повідомлення (лише в запиті до
-        моделі, в історії не зберігається) — тож не ламає кеш уже обробленої частини розмови."""
+    def _add_context_note(self, turn: Turn) -> None:
+        """Режим cache_friendly: те, що змінюється (час, план, нагадування, спогади), — окремим службовим
+        повідомленням, що ЛИШАЄТЬСЯ в історії. Контекст тоді лише дописується в кінець, і llama-server бере
+        весь попередній промпт із кешу — для гібридних моделей (Qwen3.5/3.6: рекурентні шари) це єдиний спосіб:
+        вони не вміють «відмотати» стан до середини, лише продовжити з кінця попереднього запиту.
+        Нова примітка — лише коли щось змінилося, і лише змінене (план не повторюється щокроку)."""
         ctx = turn.ctx
-        parts = [f"Current local time: {datetime.now(ctx.tz).strftime('%Y-%m-%d %H:%M (%A)')}"]
-        if turn.memories:
+        parts = []
+        now = datetime.now(ctx.tz).strftime("%Y-%m-%d %H:%M (%A)")
+        if now != turn.note_time:
+            parts.append(f"Current local time: {now}")
+        if not turn.note_time and turn.memories:  # перша примітка задачі
             parts.append("Relevant long-term memories (may be useful):\n" + format_memories(turn.memories))
-        if plan := self._plan_prompt(turn).strip():
+        first = not turn.note_time
+        plan = self._plan_text(turn)
+        if plan and plan != turn.note_plan:
             parts.append(plan)
-        return "\n\n[Context note from the system — not written by the user]\n" + "\n\n".join(parts)
-
-    def _with_note(self, msgs: list[dict[str, Any]], turn: Turn) -> list[dict[str, Any]]:
-        """Примітка — у копії останнього повідомлення (запит користувача чи результат інструмента), а не окремим
-        системним повідомленням: шаблон чату Qwen3 дозволяє system лише на самому початку."""
-        if not msgs or not isinstance(msgs[-1].get("content", ""), str):
-            return msgs
-        last = dict(msgs[-1])
-        last["content"] = (last.get("content") or "") + self._context_note(turn)
-        return [*msgs[:-1], last]
+        elif first and not plan and any(str(m.get("content", "")).startswith(NOTE_PREFIX) and "Current plan" in
+                                        str(m.get("content", "")) for m in turn.history):
+            parts.append("There is no active plan for this new task (plans in earlier notes are finished).")
+        elif self._needs_reminder(turn) and turn.note_reminder != turn.steps_since_plan:
+            turn.note_reminder = turn.steps_since_plan
+            parts.append(self._reminder(turn))
+        turn.note_time, turn.note_plan = now, plan or turn.note_plan
+        if parts:
+            note = {"role": "user", "content": f"{NOTE_PREFIX} from the system — not written by the user]\n"
+                    + "\n\n".join(parts)}
+            if first and turn.history and _is_user_turn(turn.history[-1]):
+                turn.history.insert(len(turn.history) - 1, note)  # спершу контекст, потім сама задача
+            else:
+                turn.history.append(note)
 
     def _plan_prompt(self, turn: Turn) -> str:
         if turn.subagent:
@@ -347,18 +368,32 @@ class Agent:
             )
         if not turn.plan:
             return ""
-        text = (
-            "\nCurrent plan of this task (the user sees it as a checklist). Work on the in_progress step; as soon as "
-            "a step is finished call mark_step with its number (the next step becomes in_progress automatically):\n"
-            + format_plan(turn.plan) + "\n"
-        )
-        unfinished = any(s["status"] in {"pending", "in_progress"} for s in turn.plan)
-        if unfinished and turn.steps_since_plan >= PLAN_NUDGE_STEPS:
-            text += (
-                f"REMINDER: you have made {turn.steps_since_plan} steps without updating the plan. If any step above "
-                "is already done, call mark_step for it NOW (you can pass several numbers at once).\n"
-            )
+        text = "\n" + self._plan_text(turn) + "\n"
+        if self._needs_reminder(turn):
+            text += self._reminder(turn) + "\n"
         return text
+
+    @staticmethod
+    def _plan_text(turn: Turn) -> str:
+        if not turn.plan:
+            return ""
+        return (
+            "Current plan of this task (the user sees it as a checklist). Work on the in_progress step; as soon as "
+            "a step is finished call mark_step with its number (the next step becomes in_progress automatically):\n"
+            + format_plan(turn.plan)
+        )
+
+    @staticmethod
+    def _needs_reminder(turn: Turn) -> bool:
+        unfinished = any(s["status"] in {"pending", "in_progress"} for s in turn.plan)
+        return unfinished and turn.steps_since_plan >= PLAN_NUDGE_STEPS
+
+    @staticmethod
+    def _reminder(turn: Turn) -> str:
+        return (
+            f"REMINDER: you have made {turn.steps_since_plan} steps without updating the plan. If any step above "
+            "is already done, call mark_step for it NOW (you can pass several numbers at once)."
+        )
 
     def _step_limit(self, turn: Turn) -> int:
         """Кроків на задачу: велика задача з планом отримує більше — по ~8 на кожен пункт."""
@@ -424,6 +459,8 @@ class Agent:
                 cut += 1  # різати лише перед повідомленням користувача: пари виклик/результат не рвуться
             last_user = max((i for i, m in enumerate(history) if _is_user_turn(m)), default=0)
             cut = min(cut, last_user)  # поточну задачу не підсумовуємо
+            if cut > start and str(history[cut - 1].get("content") or "").startswith(NOTE_PREFIX):
+                cut -= 1  # примітка (час, план) перед задачею лишається з нею
             if cut > start:
                 await emit({"type": "status", "state": "summarizing"})
                 try:
@@ -607,6 +644,8 @@ class Agent:
                 if last is None:
                     raise ValueError("У цьому чаті ще немає задачі, яку можна повторити")
                 user_text = history[last]["content"]
+                if last and str(history[last - 1].get("content", "")).startswith(NOTE_PREFIX):
+                    last -= 1  # і примітку перед задачею — буде нова, з поточним часом
                 del history[last:]  # підсумок розмови (summary) ніколи не охоплює останню задачу
                 self.storage.save_plan(session_id, [], ctx.owner)
                 await emit({"type": "plan", "steps": []})
@@ -715,12 +754,12 @@ class Agent:
             elif self.native_tools:
                 await emit({"type": "token", "text": text})
 
+        if self.config.cache_friendly and not turn.subagent:
+            self._add_context_note(turn)
         while True:
             trimmed = await self._fit_history(turn, emit)
             msgs = trimmed if self.native_tools else self._to_json_protocol(trimmed)
             msgs = self._attach_images(msgs, ctx)
-            if self.config.cache_friendly and not turn.subagent:
-                msgs = self._with_note(msgs, turn)
             messages = [{"role": "system", "content": self._system_prompt(turn)}, *msgs]
             try:
                 extra = {} if think is None else {"think": think}

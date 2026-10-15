@@ -39,6 +39,11 @@ def text(t: str) -> ChatResult:
     return ChatResult(content=t)
 
 
+def real(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Історія без службових приміток агента (час, план) — лише те, що писали користувач, модель та інструменти."""
+    return [m for m in messages if not str(m.get("content") or "").startswith("[Context note")]
+
+
 def prompt(call_: dict[str, Any]) -> str:
     """Усе, що побачила модель за один виклик: системний промпт, розмова й примітка з часом/планом у кінці."""
     return "\n".join(str(m.get("content") or "") for m in call_["messages"])
