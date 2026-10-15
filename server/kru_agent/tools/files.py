@@ -183,6 +183,40 @@ async def search_files(ctx: ToolContext, regex: str, path: str = ".", glob: str 
     return truncate(out, ctx.config.max_tool_output_chars)
 
 
+MAX_SHARE = 50 * 1024 * 1024  # більше Telegram однаково не прийме, а панелі важко передати одним повідомленням
+
+
+def human_size(n: int) -> str:
+    for unit in ("Б", "КБ", "МБ"):
+        if n < 1024 or unit == "МБ":
+            return f"{n:.0f} {unit}" if unit == "Б" else f"{n:.1f}".removesuffix(".0").replace(".", ",") + f" {unit}"
+        n /= 1024
+    return f"{n} Б"
+
+
+def shared_file(ctx: ToolContext, path: str):
+    """Файл, який можна віддати користувачу: (повний шлях, шлях для показу — відносно робочої теки)."""
+    p = ctx.resolve_path(path)
+    if p.is_dir():
+        raise ToolError(f"{path} — це тека. Запакуй її в zip (run_python: shutil.make_archive) і передай архів")
+    if not p.is_file():
+        raise ToolError(f"Файл не знайдено: {path}")
+    if p.stat().st_size > MAX_SHARE:
+        raise ToolError(f"Файл завеликий ({human_size(p.stat().st_size)}); можна передати до 50 МБ — стисни чи поділи його")
+    ws = ctx.workspace.resolve()
+    return p, (p.relative_to(ws).as_posix() if ws in p.parents else str(p))
+
+
+async def send_file(ctx: ToolContext, path: str) -> str:
+    p, shown = shared_file(ctx, path)
+    size = p.stat().st_size
+    if ctx.event is None:
+        return f"Файл {shown} лежить на сервері ({human_size(size)}); кнопки завантаження тут немає — назви шлях."
+    await ctx.event({"type": "file", "path": shown, "name": p.name, "size": size})
+    return (f"Користувач отримав кнопку завантаження файлу {p.name} ({human_size(size)}). "
+            "Не переписуй його вміст у відповідь — достатньо коротко сказати, що в ньому.")
+
+
 _PATH = {"type": "string", "description": "Шлях (відносно робочої директорії)"}
 
 TOOLS = [
@@ -262,5 +296,15 @@ TOOLS = [
             "required": ["regex"],
         },
         func=search_files,
+    ),
+    Tool(
+        name="send_file",
+        description=(
+            "Передає файл з робочої теки користувачу: у чаті з'являється кнопка, що одним кліком зберігає його "
+            "на ПК (у Telegram — надсилається документом). Для готових звітів, документів, таблиць, картинок, "
+            "архівів. Теку спершу запакуй у zip. До 50 МБ."
+        ),
+        parameters={"type": "object", "properties": {"path": _PATH}, "required": ["path"]},
+        func=send_file,
     ),
 ]

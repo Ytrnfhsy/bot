@@ -13,7 +13,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtWidgets import QApplication
 
 
@@ -307,6 +307,42 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return replies
 
     step(50, lambda: check("allow_for_task", allow_task_flow))
+
+    def file_flow():
+        """Файл від агента: кнопка в стрічці → file_get → файл у «Завантаження/Kru» → «відкрити»."""
+        import base64
+
+        sent = []
+        orig, orig_dir = win.conn.send, appmod.RobotWindow.download_dir
+        win.conn.send = lambda msg: sent.append(msg) or True
+        appmod.RobotWindow.download_dir = staticmethod(lambda: Path(tmp) / "Downloads" / "Kru")
+        try:
+            win.panel.set_show_tools(False)
+            win.on_event({"type": "file", "path": "out/звіт_1.md", "name": "звіт_1.md", "size": 2048})
+            win.panel._render()
+            md = win.panel.view.toMarkdown()
+            need("Завантажити" in md and "звіт" in md and "2 КБ" in md, f"кнопки файлу немає: {md[-200:]}")
+            fid = next(k for k, v in win.panel.files.items() if v["path"] == "out/звіт_1.md")
+            win.panel._on_link(QUrl(f"kru-file:{fid}"))
+            req = [m for m in sent if m["type"] == "file_get"]
+            need(req == [{"type": "file_get", "id": fid, "path": "out/звіт_1.md"}], f"запит: {req}")
+            win.on_event({"type": "file_data", "id": fid, "name": "звіт_1.md", "size": 5,
+                          "data": base64.b64encode("Звіт".encode()).decode()})
+            saved = Path(tmp) / "Downloads" / "Kru" / "звіт_1.md"
+            need(saved.read_text(encoding="utf-8") == "Звіт", "файл не збережено")
+            win.panel._render()
+            need("відкрити" in win.panel.view.toMarkdown(), "немає посилання «відкрити»")
+            win.on_event({"type": "file", "path": "x.pdf", "name": "x.pdf", "size": 1})
+            fid2 = str(max(int(k) for k in win.panel.files))
+            win.panel.download_file(fid2)
+            win.on_event({"type": "file_error", "id": fid2, "path": "x.pdf", "message": "Файл не знайдено"})
+            win.panel._render()
+            need("ще раз" in win.panel.view.toMarkdown(), "помилку завантаження не показано")
+        finally:
+            win.conn.send, appmod.RobotWindow.download_dir = orig, orig_dir
+        return str(saved)
+
+    step(50, lambda: check("file_download", file_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())

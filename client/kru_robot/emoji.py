@@ -38,9 +38,14 @@ def setup_emoji_font(app) -> str | None:
     if not families:
         return None
     family = families[0]
-    if hasattr(QFontDatabase, "setApplicationEmojiFontFamilies"):  # Qt ≥ 6.9 — найнадійніше
+    if hasattr(QFontDatabase, "setApplicationEmojiFontFamilies"):  # Qt ≥ 6.9: лише для емодзі
         QFontDatabase.setApplicationEmojiFontFamilies([family])
-    font = app.font()  # і запасним шрифтом для всього інтерфейсу (меню, стрічка, кнопки)
-    font.setFamilies([font.family(), family])
+        return family
+    # старіший Qt: запасний шрифт усього інтерфейсу. Першим — справжня назва основного шрифту, а не
+    # псевдонім на кшталт «Sans Serif»: інакше цифри й пробіли малювалися б шрифтом емодзі
+    from PySide6.QtGui import QFontInfo
+
+    font = app.font()
+    font.setFamilies([QFontInfo(font).family(), family])
     app.setFont(font)
     return family

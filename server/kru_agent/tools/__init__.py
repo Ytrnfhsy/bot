@@ -31,6 +31,7 @@ class ToolContext:
     memory: Any = None  # semantic.MemoryIndex — пошук пам'яті за змістом (None — лише за словами)
     llm: Any = None  # модель — для інструментів, яким треба «подумати» (deep_research)
     progress: Callable[[str], Awaitable[None]] | None = None  # проміжний стан довгого інструмента
+    event: Callable[[dict[str, Any]], Awaitable[None]] | None = None  # подія клієнту (send_file → кнопка файлу)
     tz: Any = None  # tzinfo користувача (None — пояс сервера)
     tz_name: str = ""  # його IANA-назва, напр. Europe/Kyiv
     auto_files: bool = False  # запис файлів у робочій теці без запиту (налаштування користувача)

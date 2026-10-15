@@ -74,6 +74,23 @@ class TelegramBot:
             msg_id = int((res or {}).get("message_id") or 0)
         return msg_id
 
+    async def send_document(self, chat_id: str, path, caption: str = "") -> None:
+        """Файл документом (до 50 МБ — обмеження Telegram для ботів). Підпис — до 1024 символів."""
+        from pathlib import Path
+
+        path = Path(path)
+        try:
+            async with httpx.AsyncClient(timeout=max(self.timeout, 300)) as client:
+                with path.open("rb") as f:
+                    r = await client.post(f"{self.base}/sendDocument",
+                                          data={"chat_id": str(chat_id), "caption": caption[:1024]},
+                                          files={"document": (path.name, f)})
+            data = r.json()
+        except (httpx.HTTPError, ValueError, OSError) as e:
+            raise TelegramError(f"Telegram недоступний: {e}") from e
+        if not data.get("ok"):
+            raise TelegramError(f"Telegram: {data.get('description') or r.status_code}")
+
     async def edit(self, chat_id: str, message_id: int, text: str) -> None:
         """Змінити текст повідомлення (і прибрати кнопки)."""
         await self._call("editMessageText", chat_id=chat_id, message_id=message_id, text=text[:LIMIT],

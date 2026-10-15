@@ -11,6 +11,7 @@
   {"type": "cancel"}
   {"type": "reset", "session_id": "default"}  — видалити розмову
   {"type": "upload", "id": "...", "name": "звіт.pdf", "data": "<base64>"}  — збереже у <тека користувача>/uploads/
+  {"type": "file_get", "id": "...", "path": "звіт.pdf"}  — завантажити файл, який агент передав (send_file)
   Чати зберігаються автоматично (session_id — це id чату; новий чат = новий session_id від клієнта):
   {"type": "chat_list"} | {"type": "chat_open", "id"} | {"type": "chat_delete", "id"}
   {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
@@ -32,8 +33,10 @@
   події субагента (delegate) мають "sub": true
   {"type": "final", "text": "..."}
   {"type": "uploaded", "id", "name", "path", "size"} | {"type": "upload_error", "id", "name", "message"}
+  {"type": "file", "path", "name", "size"}  — агент передав файл (send_file): у чаті — кнопка завантаження
+  {"type": "file_data", "id", "path", "name", "size", "data": "<base64>"} | {"type": "file_error", "id", "path", "message"}
   {"type": "chat_renamed", "id", "title"} | {"type": "chat_list", "chats": [{id, title, count, created_at, updated_at}]}
-  {"type": "chat_opened", "id", "title", "transcript": [{role, text}], "plan": [...], "running": bool}
+  {"type": "chat_opened", "id", "title", "transcript": [{role, text, file?: {path, name}}], "plan": [...], "running": bool}
       running — у цьому чаті ще виконується задача (наприклад, після розриву з'єднання): далі прийдуть її події
   {"type": "chat_export", "title", "markdown"}
   {"type": "chat_error", "message"}
@@ -60,6 +63,8 @@ from . import __version__
 from .agent import Agent
 from .config import Config
 from .scheduler import Scheduler
+from .tools import ToolError
+from .tools.files import shared_file
 from .users import User, UserStore, workspace_for
 
 log = logging.getLogger("kru.server")
@@ -296,6 +301,19 @@ class Connection:
         log.info("Отримано файл %s (%d байт)", rel, len(data))
         await self.send({"type": "uploaded", "id": uid, "name": name, "path": rel, "size": len(data)})
 
+    async def _send_file(self, msg: dict[str, Any]) -> None:
+        """Файл із робочої теки користувача (той, що агент передав через send_file) — на ПК одним кліком."""
+        fid, path = msg.get("id"), str(msg.get("path") or "")
+        try:
+            p, shown = shared_file(self.agent.make_context(self.user), path)
+            data = await asyncio.to_thread(p.read_bytes)
+        except (ToolError, OSError) as e:
+            await self.send({"type": "file_error", "id": fid, "path": path, "message": str(e)})
+            return
+        log.info("Віддаю файл %s (%d байт)", shown, len(data))
+        await self.send({"type": "file_data", "id": fid, "path": shown, "name": p.name, "size": len(data),
+                         "data": base64.b64encode(data).decode("ascii")})
+
     async def _chats(self, kind: str, msg: dict[str, Any]) -> None:
         """Чати (зберігаються автоматично): список / відкрити / перейменувати / видалити / експорт."""
         ag, owner = self.agent, self.user.name
@@ -366,6 +384,8 @@ class Connection:
                     await self._chats(kind, msg)
                 elif kind == "upload":
                     await self._save_upload(msg)
+                elif kind == "file_get":
+                    await self._send_file(msg)
                 elif kind == "ping":
                     await self.send({"type": "pong"})
         except WebSocketDisconnect:
