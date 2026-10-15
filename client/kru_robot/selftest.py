@@ -223,14 +223,29 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         # перевіряємо трохи згодом: на Windows вікно змінює розмір асинхронно (WM_SIZE)
         from PySide6.QtCore import QPoint
 
+        import time
+
         p = overlap_state["panel"]
-        view_bottom = p.view.mapTo(p, QPoint(0, 0)).y() + p.view.height()
-        input_top = p.input.mapTo(p, QPoint(0, 0)).y()
-        result = {"view_bottom": view_bottom, "input_top": input_top, "height": p.height(),
-                  "needed": p.layout().minimumSize().height()}
+
+        def measure() -> dict:
+            view_bottom = p.view.mapTo(p, QPoint(0, 0)).y() + p.view.height()
+            return {"view_bottom": view_bottom, "input_top": p.input.mapTo(p, QPoint(0, 0)).y(),
+                    "height": p.height(), "needed": p.layout().minimumSize().height()}
+
+        def settled(r: dict) -> bool:
+            return r["view_bottom"] <= r["input_top"] and r["height"] >= r["needed"]
+
+        # перевіряємо кінцевий стан, який бачить користувач: на повільному CI Qt інколи ще не переклав
+        # дочірні віджети після зміни розміру вікна — чекаємо до 3 с, поки компонування устаткується
+        deadline = time.monotonic() + 3.0
+        result = measure()
+        while not settled(result) and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.02)
+            result = measure()
         p.hide()
         p.deleteLater()
-        need(view_bottom <= input_top and result["height"] >= result["needed"], f"поле вводу налазить на стрічку: {result}")
+        need(settled(result), f"поле вводу налазить на стрічку: {result}")
         return result
 
     def big_confirm_flow():
@@ -343,6 +358,16 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return str(saved)
 
     step(50, lambda: check("file_download", file_flow))
+
+    def menu_icons_flow():
+        """Пункти меню — з намальованими іконками й без емодзі в тексті (меню трею KDE емодзі не показує)."""
+        acts = [a for a in win.menu.actions() if not a.isSeparator()]
+        need(all(not a.icon().isNull() for a in acts), "є пункти без іконки")
+        bad = [a.text() for a in acts if any(ord(ch) > 0x2000 and ch not in "…" for ch in a.text())]
+        need(not bad, f"емодзі в меню: {bad}")
+        return len(acts)
+
+    step(50, lambda: check("menu_icons", menu_icons_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())

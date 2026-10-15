@@ -224,20 +224,23 @@ class RobotWindow(QWidget):
 
     # ---------------- меню / трей ----------------
     def _build_menu(self) -> None:
+        from .menuicons import menu_icon
+
+        # без емодзі в тексті: меню трею KDE їх не показує — замість них власні іконки
         self.menu = QMenu()
-        self.menu.addAction("💬 Відкрити чат", self.show_panel)
-        self.menu.addAction("📝 Новий чат", self.new_chat)
-        self.menu.addAction("📂 Усі чати…", self.show_chats)
-        self.menu.addAction("✏ Перейменувати чат…", lambda: self.rename_chat(None, self.chat_title))
-        self.menu.addAction("📤 Експорт розмови в Markdown…", lambda: self.export_chat(None))
-        self.menu.addAction("■ Зупинити задачу", self.cancel_task)
+        self.menu.addAction(menu_icon("chat"), "Відкрити чат", self.show_panel)
+        self.menu.addAction(menu_icon("new"), "Новий чат", self.new_chat)
+        self.menu.addAction(menu_icon("chats"), "Усі чати…", self.show_chats)
+        self.menu.addAction(menu_icon("rename"), "Перейменувати чат…", lambda: self.rename_chat(None, self.chat_title))
+        self.menu.addAction(menu_icon("export"), "Експорт розмови в Markdown…", lambda: self.export_chat(None))
+        self.menu.addAction(menu_icon("stop"), "Зупинити задачу", self.cancel_task)
         self.menu.addSeparator()
-        self.menu.addAction("⚙ Налаштування…", self.open_settings)
-        self.act_hide = QAction("🙈 Сховати робота", self)
+        self.menu.addAction(menu_icon("settings"), "Налаштування…", self.open_settings)
+        self.act_hide = QAction(menu_icon("hide"), "Сховати робота", self)
         self.act_hide.triggered.connect(self.toggle_visible)
         self.menu.addAction(self.act_hide)
         self.menu.addSeparator()
-        self.menu.addAction("✕ Вийти", QApplication.quit)
+        self.menu.addAction(menu_icon("quit"), "Вийти", QApplication.quit)
 
     def _connect_character(self) -> None:
         self.robot.clicked.connect(self.on_robot_clicked)
@@ -280,13 +283,17 @@ class RobotWindow(QWidget):
         self.tray.show()
 
     def toggle_visible(self) -> None:
+        from .menuicons import menu_icon
+
         if self.isVisible():
             self.hide()
             self.panel.hide()
-            self.act_hide.setText("🤖 Показати робота")
+            self.act_hide.setText("Показати робота")
+            self.act_hide.setIcon(menu_icon("show"))
         else:
             self.show()
-            self.act_hide.setText("🙈 Сховати робота")
+            self.act_hide.setText("Сховати робота")
+            self.act_hide.setIcon(menu_icon("hide"))
 
     def open_settings(self) -> None:
         dlg = SettingsDialog(self.settings)
