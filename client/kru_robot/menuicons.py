@@ -19,6 +19,7 @@ COLORS = {
     "rename": "#9B6BF2",
     "export": "#14A3A3",
     "stop": "#E5484D",
+    "think": "#9B6BF2",
     "settings": "#8A94A6",
     "hide": "#6E8BB5",
     "show": "#6E8BB5",
@@ -32,6 +33,12 @@ def menu_icon(kind: str, size: int = 32) -> QIcon:
     for px in (16, 24, size, size * 2):
         icon.addPixmap(_draw(kind, px))
     return icon
+
+
+def _ellipse(x: float, y: float, rx: float, ry: float) -> QPainterPath:
+    path = QPainterPath()
+    path.addEllipse(QPointF(x, y), rx, ry)
+    return path
 
 
 def _draw(kind: str, px: int) -> QPixmap:
@@ -114,6 +121,15 @@ def _draw(kind: str, px: int) -> QPixmap:
         p.drawEllipse(QPointF(12, 12), 2.8, 2.8)
         if kind == "hide":
             p.drawLine(QPointF(4, 20), QPointF(20, 4))
+    elif kind == "think":  # хмаринка думок
+        cloud = QPainterPath()
+        cloud.addEllipse(QPointF(9, 10), 5, 4.5)
+        cloud = cloud.united(_ellipse(14.5, 8.5, 5, 4.5)).united(_ellipse(15.5, 13, 5, 3.8)).united(
+            _ellipse(9.5, 14, 5, 3.6))
+        p.drawPath(cloud)
+        p.setBrush(color)
+        p.drawEllipse(QPointF(6.5, 19.5), 1.4, 1.4)
+        p.drawEllipse(QPointF(4, 22), 0.9, 0.9)
     elif kind == "quit":  # кнопка живлення
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawArc(QRectF(4.5, 5, 15, 15), 125 * 16, 290 * 16)
