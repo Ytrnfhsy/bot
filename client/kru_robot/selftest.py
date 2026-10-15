@@ -223,14 +223,29 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         # перевіряємо трохи згодом: на Windows вікно змінює розмір асинхронно (WM_SIZE)
         from PySide6.QtCore import QPoint
 
+        import time
+
         p = overlap_state["panel"]
-        view_bottom = p.view.mapTo(p, QPoint(0, 0)).y() + p.view.height()
-        input_top = p.input.mapTo(p, QPoint(0, 0)).y()
-        result = {"view_bottom": view_bottom, "input_top": input_top, "height": p.height(),
-                  "needed": p.layout().minimumSize().height()}
+
+        def measure() -> dict:
+            view_bottom = p.view.mapTo(p, QPoint(0, 0)).y() + p.view.height()
+            return {"view_bottom": view_bottom, "input_top": p.input.mapTo(p, QPoint(0, 0)).y(),
+                    "height": p.height(), "needed": p.layout().minimumSize().height()}
+
+        def settled(r: dict) -> bool:
+            return r["view_bottom"] <= r["input_top"] and r["height"] >= r["needed"]
+
+        # перевіряємо кінцевий стан, який бачить користувач: на повільному CI Qt інколи ще не переклав
+        # дочірні віджети після зміни розміру вікна — чекаємо до 3 с, поки компонування устаткується
+        deadline = time.monotonic() + 3.0
+        result = measure()
+        while not settled(result) and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.02)
+            result = measure()
         p.hide()
         p.deleteLater()
-        need(view_bottom <= input_top and result["height"] >= result["needed"], f"поле вводу налазить на стрічку: {result}")
+        need(settled(result), f"поле вводу налазить на стрічку: {result}")
         return result
 
     def big_confirm_flow():
