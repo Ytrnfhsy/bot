@@ -79,7 +79,7 @@ class TelegramSink:
                 except ToolError as e:
                     await bot.send(self.chat_id, f"⚠️ {e}")
                 else:
-                    await bot.send_document(self.chat_id, path)
+                    await bot.send_file(self.chat_id, path)
             elif kind == "final":
                 await self._clear_status()
                 await bot.send(self.chat_id, ev.get("text") or "(порожня відповідь)")

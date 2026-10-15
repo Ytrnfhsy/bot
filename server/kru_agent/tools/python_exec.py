@@ -21,8 +21,8 @@ async def run_python(ctx: ToolContext, code: str, timeout: int = 0) -> str:
         from .. import sandbox
 
         if sandbox.enabled(ctx.config):
-            rel = script.relative_to(ctx.workspace).as_posix()
-            return await sandbox.run(ctx, ["python", "-u", f"{sandbox.WORKDIR}/{rel}"], min(t, 3600))
+            # тека в контейнері — за тим самим шляхом, тож скрипт там лежить там само
+            return await sandbox.run(ctx, ["python", "-u", str(script.resolve())], min(t, 3600))
         return await run_process(
             [sys.executable, "-u", str(script)],
             str(ctx.workspace),

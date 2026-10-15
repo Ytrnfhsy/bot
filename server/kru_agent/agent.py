@@ -69,6 +69,8 @@ How to work:
   cancel_scheduled to review or cancel.
 - send_telegram sends a message to the user's Telegram — use it when asked to send/notify "в телеграм"
   (path= attaches a file from the workspace).
+- To get a file from the internet (image, PDF, archive…) use download_url with a direct link — not curl or
+  fetch_url. Use relative paths for workspace files.
 - When you create a file the user will want to keep (report, document, table, image, archive, translation…),
   call send_file with it: the user gets a one-click download button. Then answer briefly — don't paste its content.
 - Long-term memory: when the user tells you something durable — about themselves, their preferences, family/people,
@@ -296,8 +298,8 @@ class Agent:
             summary=summary,
             plan=self._plan_prompt(turn),
             approval=(
-                "- run_shell and run_python run in an isolated Docker SANDBOX: only the workspace is visible (as "
-                "/workspace, the current directory), no access to the host system; `pip install <pkg>` works and "
+                "- run_shell and run_python run in an isolated Docker SANDBOX: only the workspace is visible (at the same "
+                "path as above, the current directory), no access to the host system; `pip install <pkg>` works and "
                 "persists. They need no approval — use them freely for calculations, data and file processing. "
                 "write_file and edit_file may require user approval; if the user declines, adapt or ask."
                 if sandbox.enabled(self.config) else

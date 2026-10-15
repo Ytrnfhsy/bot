@@ -40,7 +40,7 @@ def test_docker_command_is_isolated(cfg):
     joined = " ".join(cmd)
     assert cmd[:2] == ["docker", "run"] and cmd[-2:] == ["python", "-V"]
     for flag in ("--rm", "--read-only", "--cap-drop ALL", "no-new-privileges", "--pids-limit 256",
-                 "--memory 2g", "--pull never", f"{ctx.workspace.resolve()}:/workspace"):
+                 "--memory 2g", "--pull never", f"{ctx.workspace.resolve()}:{ctx.workspace.resolve()}"):
         assert flag in joined
     assert "--privileged" not in joined and "/var/run/docker.sock" not in joined
 
@@ -53,7 +53,10 @@ async def test_sandbox_runs_without_confirmation(cfg, sbx):
     assert rec.confirms == []  # у пісочниці дозвіл не питається
     shell_cmd, py_cmd = sbx[0]["cmd"], sbx[1]["cmd"]
     assert shell_cmd[-3:] == ["bash", "-lc", "ls -la"] and "timeout" in shell_cmd
-    assert py_cmd[-3] == "python" and py_cmd[-1].startswith("/workspace/.kru_tmp/") and py_cmd[-1].endswith(".py")
+    # тека в контейнері — за тим самим шляхом, що й на сервері
+    ws = str(cfg.workspace.resolve())
+    assert py_cmd[-3] == "python" and py_cmd[-1].startswith(f"{ws}/.kru_tmp/") and py_cmd[-1].endswith(".py")
+    assert py_cmd[py_cmd.index("-w") + 1] == ws
     assert "SANDBOX" in llm.calls[0]["messages"][0]["content"]
 
 
@@ -112,3 +115,16 @@ async def test_no_docker_is_an_error_not_host_fallback(cfg, monkeypatch):
     agent = Agent(cfg, llm=FakeLLM([]))
     with pytest.raises(ToolError, match="немає docker"):
         await agent.registry.call(agent.make_context(), "run_shell", {"command": "rm -rf ~"})
+
+
+async def test_legacy_workspace_paths_resolve(cfg):
+    """Шляхи /workspace/… (так тека звалась у пісочниці раніше) — це файли робочої теки, а не «поза нею»."""
+    cfg.sandbox = "docker"
+    agent = Agent(cfg, llm=FakeLLM([]))
+    ctx = agent.make_context()
+    (cfg.workspace / "img").mkdir(parents=True)
+    (cfg.workspace / "img" / "a.png").write_bytes(b"x")
+    assert ctx.resolve_path("/workspace/img/a.png") == (cfg.workspace / "img" / "a.png").resolve()
+    assert ctx.resolve_path("/workspace") == cfg.workspace.resolve()
+    out = await agent.registry.call(ctx, "read_file", {"path": "/workspace/img/a.png"})
+    assert "ПОМИЛКА" not in out

@@ -1,10 +1,12 @@
 """Пісочниця для run_shell / run_python: одноразовий Docker-контейнер, що бачить лише робочу теку користувача.
 
 Без root-прав і можливостей ядра, з обмеженням пам'яті/процесора/кількості процесів, файлова система
-контейнера — лише для читання (крім /workspace і /tmp). Тому команди в ній можна виконувати без запиту
+контейнера — лише для читання (крім робочої теки і /tmp). Тому команди в ній можна виконувати без запиту
 дозволу. Образ: deploy/sandbox.sh build (kru-sandbox — Python і типові бібліотеки/утиліти).
 
-Бібліотеки, які агент ставить через pip, лягають у <тека>/.kru-py і лишаються між запусками.
+Робоча тека в контейнері — за ТИМ САМИМ шляхом, що й на сервері: шляхи з виводу команд (pwd, find…)
+одразу годяться для read_file / send_file / view_image. Бібліотеки, які агент ставить через pip,
+лягають у <тека>/.kru-py і лишаються між запусками.
 """
 
 from __future__ import annotations
@@ -16,8 +18,7 @@ import uuid
 
 from .tools import ToolContext, ToolError
 
-WORKDIR = "/workspace"
-PY_USER = f"{WORKDIR}/.kru-py"
+LEGACY_WORKDIR = "/workspace"  # так тека називалась у контейнері раніше — шляхи зі старих чатів ще трапляються
 
 
 def enabled(config) -> bool:
@@ -27,19 +28,20 @@ def enabled(config) -> bool:
 def docker_command(ctx: ToolContext, inner: list[str], name: str) -> list[str]:
     cfg = ctx.config
     ws = str(ctx.workspace.resolve())
+    py_user = f"{ws}/.kru-py"
     user = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "1000:1000"
     return [
         "docker", "run", "--rm", "--name", name,
         "--pull", "never",  # лише локально зібраний образ — ніколи не тягнути однойменний чужий із Docker Hub
         "--user", user,  # файли в теці — від імені власника, не root
-        "-v", f"{ws}:{WORKDIR}", "-w", WORKDIR,
+        "-v", f"{ws}:{ws}", "-w", ws,
         "--read-only", "--tmpfs", "/tmp:rw,exec,size=512m",
         "--memory", cfg.sandbox_memory, "--cpus", str(cfg.sandbox_cpus), "--pids-limit", "256",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--network", cfg.sandbox_network,
-        "-e", "HOME=/tmp", "-e", f"PYTHONUSERBASE={PY_USER}", "-e", "PIP_USER=1",
+        "-e", "HOME=/tmp", "-e", f"PYTHONUSERBASE={py_user}", "-e", "PIP_USER=1",
         "-e", "PIP_DISABLE_PIP_VERSION_CHECK=1", "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "MPLCONFIGDIR=/tmp",
-        "-e", f"PATH={PY_USER}/bin:/usr/local/bin:/usr/bin:/bin",
+        "-e", f"PATH={py_user}/bin:/usr/local/bin:/usr/bin:/bin",
         cfg.sandbox_image, *inner,
     ]
 

@@ -11,6 +11,8 @@ import httpx
 
 API = "https://api.telegram.org"
 LIMIT = 4000  # Telegram приймає до 4096 символів в одному повідомленні
+PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+PHOTO_MAX = 10 * 1024 * 1024  # більші фото Telegram не приймає — тоді документом
 
 
 class TelegramError(Exception):
@@ -74,17 +76,31 @@ class TelegramBot:
             msg_id = int((res or {}).get("message_id") or 0)
         return msg_id
 
-    async def send_document(self, chat_id: str, path, caption: str = "") -> None:
+    async def send_file(self, chat_id: str, path, caption: str = "") -> None:
+        """Картинку — фото (видно одразу в чаті), решту чи завелике фото — документом."""
+        from pathlib import Path
+
+        path = Path(path)
+        if path.suffix.lower() in PHOTO_EXT and path.stat().st_size <= PHOTO_MAX:
+            try:
+                await self.send_document(chat_id, path, caption, kind="photo")
+                return
+            except TelegramError:
+                pass  # Telegram не прийняв як фото (розміри, формат) — надішлемо файлом
+        await self.send_document(chat_id, path, caption)
+
+    async def send_document(self, chat_id: str, path, caption: str = "", kind: str = "document") -> None:
         """Файл документом (до 50 МБ — обмеження Telegram для ботів). Підпис — до 1024 символів."""
         from pathlib import Path
 
         path = Path(path)
+        method = "sendPhoto" if kind == "photo" else "sendDocument"
         try:
             async with httpx.AsyncClient(timeout=max(self.timeout, 300)) as client:
                 with path.open("rb") as f:
-                    r = await client.post(f"{self.base}/sendDocument",
+                    r = await client.post(f"{self.base}/{method}",
                                           data={"chat_id": str(chat_id), "caption": caption[:1024]},
-                                          files={"document": (path.name, f)})
+                                          files={kind: (path.name, f)})
             data = r.json()
         except (httpx.HTTPError, ValueError, OSError) as e:
             raise TelegramError(f"Telegram недоступний: {e}") from e
