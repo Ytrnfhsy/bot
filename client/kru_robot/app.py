@@ -158,6 +158,7 @@ class RobotWindow(QWidget):
         self.panel.history_export.connect(lambda cid: self.export_chat(cid))
         self.panel.history_delete.connect(self._delete_chat)
         self.panel.history_rename.connect(self.rename_chat)
+        self.panel.history_search.connect(lambda q: self.conn.send({"type": "chat_search", "query": q}))
         self.panel.new_chat_requested.connect(self.new_chat)
         self.panel.image_pasted.connect(lambda path: self.upload_files([path]))
         self.panel.cancel_requested.connect(self.cancel_task)
@@ -672,6 +673,10 @@ class RobotWindow(QWidget):
 
     def _on_chat_event(self, ev: dict) -> None:
         t = ev["type"]
+        if t == "chat_search":  # не чіпає відновлення поточного чату
+            self.panel.set_search_results(ev.get("query", ""), ev.get("chats", []), self.settings.session_id)
+            QTimer.singleShot(0, self.position_panel)
+            return
         restoring, self._restoring = self._restoring, False
         if t == "chat_renamed":
             if ev["id"] == self.settings.session_id:

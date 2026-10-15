@@ -148,6 +148,18 @@ def make_icon(kind: str, size: int = 18) -> QIcon:
 TASK_SCOPE_TOOLS = {"write_file", "edit_file"}  # що можна дозволити «до кінця задачі»
 
 
+class SearchBox(QLineEdit):
+    """Поле пошуку чатів: стрілки ↑/↓ гортають список під ним, не забираючи фокус."""
+
+    step = Signal(int)
+
+    def keyPressEvent(self, e: QKeyEvent) -> None:
+        if e.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+            self.step.emit(1 if e.key() == Qt.Key.Key_Down else -1)
+            return
+        super().keyPressEvent(e)
+
+
 class InputBox(QPlainTextEdit):
     submitted = Signal()
     image_pasted = Signal(str)  # шлях до тимчасового PNG
@@ -185,6 +197,7 @@ class ChatPanel(QWidget):
     history_export = Signal(str)
     history_delete = Signal(str)
     history_rename = Signal(str, str)  # (id, поточна назва)
+    history_search = Signal(str)  # запит до сервера: пошук у тексті чатів
     new_chat_requested = Signal()
     chats_requested = Signal()
     confirm_answered = Signal(str, bool, str)  # id, дозволено, scope ("task" — до кінця задачі)
@@ -325,6 +338,17 @@ class ChatPanel(QWidget):
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(6)
         hl.addWidget(QLabel("Чати", objectName="historyTitle"))
+        self.history_search_box = SearchBox(objectName="askInput")
+        self.history_search_box.step.connect(self._history_step)
+        self.history_search_box.setPlaceholderText("Пошук у чатах — за назвою й текстом розмов…")
+        self.history_search_box.setClearButtonEnabled(True)
+        self.history_search_box.textChanged.connect(self._on_search_text)
+        self.history_search_box.returnPressed.connect(self._open_first_found)
+        hl.addWidget(self.history_search_box)
+        self._all_chats: list[dict] = []
+        self._history_active: str | None = None
+        self._search_timer = QTimer(self, singleShot=True, interval=350)
+        self._search_timer.timeout.connect(self._search_on_server)
         self.history_empty = QLabel("Чатів поки немає.\nКожна розмова з'явиться тут автоматично.",
                                     objectName="historyEmpty")
         self.history_empty.setWordWrap(True)
@@ -332,6 +356,7 @@ class ChatPanel(QWidget):
         self.history_list = QListWidget(objectName="history")
         self.history_list.setMaximumHeight(380)
         self.history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.history_list.setWordWrap(True)  # уривки з пошуку — повністю, у кілька рядків
         self.history_list.itemDoubleClicked.connect(lambda _: self._history_action("open"))
         self.history_list.currentItemChanged.connect(lambda *_: self._history_buttons())
         hl.addWidget(self.history_list)
@@ -583,7 +608,10 @@ class ChatPanel(QWidget):
         for w in (self.view, self.plan, self.activity, self.input_row):
             w.hide()
         self.history_page.show()
-        self.history_list.setFocus()
+        self.history_search_box.blockSignals(True)
+        self.history_search_box.clear()  # щоразу — повний список
+        self.history_search_box.blockSignals(False)
+        self.history_search_box.setFocus()  # можна одразу друкувати запит
         self._fit()
 
     def show_chat(self) -> None:
@@ -601,6 +629,44 @@ class ChatPanel(QWidget):
 
     def set_history(self, chats: list[dict], active: str | None = None) -> None:
         """active — id чату, відкритого зараз (позначається ●)."""
+        self._all_chats, self._history_active = list(chats), active
+        if self.history_search_box.text().strip():
+            self._on_search_text(self.history_search_box.text())  # список оновився — фільтр лишається
+        else:
+            self._fill_history(chats, active)
+
+    def set_search_results(self, query: str, chats: list[dict], active: str | None = None) -> None:
+        """Відповідь сервера на пошук (з уривками тексту); застарілі відповіді ігноруються."""
+        if query.strip() == self.history_search_box.text().strip() and query.strip():
+            self._fill_history(chats, active, searching=True)
+
+    def _on_search_text(self, text: str) -> None:
+        query = text.strip()
+        if not query:
+            self._search_timer.stop()
+            self._fill_history(self._all_chats, self._history_active)
+            return
+        # одразу — збіги в назвах; за мить сервер додасть збіги в тексті розмов
+        words = query.casefold().split()
+        local = [c for c in self._all_chats if all(w in c["title"].casefold() for w in words)]
+        self._fill_history(local, self._history_active, searching=True)
+        self._search_timer.start()
+
+    def _search_on_server(self) -> None:
+        if query := self.history_search_box.text().strip():
+            self.history_search.emit(query)
+
+    def _history_step(self, delta: int) -> None:
+        if n := self.history_list.count():
+            self.history_list.setCurrentRow(max(0, min(n - 1, self.history_list.currentRow() + delta)))
+
+    def _open_first_found(self) -> None:
+        if self.history_list.count():
+            if self.history_list.currentRow() < 0:
+                self.history_list.setCurrentRow(0)
+            self._history_action("open")
+
+    def _fill_history(self, chats: list[dict], active: str | None, searching: bool = False) -> None:
         import time
 
         current = self._history_id()
@@ -608,7 +674,8 @@ class ChatPanel(QWidget):
         for c in chats:
             when = time.strftime("%d.%m.%Y %H:%M", time.localtime(c["updated_at"]))
             mark = "● " if c["id"] == active else ""
-            item = QListWidgetItem(f"{mark}{c['title']}\n{when} · повідомлень: {c['count']}")
+            snippet = f"\n«{c['snippet']}»" if c.get("snippet") else ""
+            item = QListWidgetItem(f"{mark}{c['title']}{snippet}\n{when} · повідомлень: {c['count']}")
             item.setData(Qt.ItemDataRole.UserRole, c["id"])
             item.setData(Qt.ItemDataRole.UserRole + 1, c["title"])
             item.setToolTip(c["title"] + ("\n(поточна розмова)" if mark else ""))
@@ -617,11 +684,14 @@ class ChatPanel(QWidget):
                 self.history_list.setCurrentItem(item)
         if self.history_list.count() and self.history_list.currentRow() < 0:
             self.history_list.setCurrentRow(0)
+        self.history_empty.setText("Нічого не знайдено." if searching else
+                                   "Чатів поки немає.\nКожна розмова з'явиться тут автоматично.")
+        self.history_search_box.setVisible(bool(self._all_chats) or searching)
         self.history_empty.setVisible(not chats)
         self.history_list.setVisible(bool(chats))
         if chats:  # висота — під кількість чатів (до 380 px), без порожнього місця
-            row_h = self.history_list.sizeHintForRow(0) + 4
-            self.history_list.setFixedHeight(min(380, row_h * len(chats) + 8))
+            rows = sum(self.history_list.sizeHintForRow(i) + 4 for i in range(self.history_list.count()))
+            self.history_list.setFixedHeight(min(380, rows + 8))
         self._history_buttons()
         self._fit()
 

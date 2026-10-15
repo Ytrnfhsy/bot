@@ -22,6 +22,7 @@ _current: asyncio.Task | None = None  # задача, яку скасовує Ct
 
 HELP = (
     f"{DIM}Усі чати зберігаються автоматично. Команди: /new — новий чат, /chats — список чатів,\n"
+    f"/search слова — пошук у чатах (за назвою й текстом розмов),\n"
     f"/open N — відкрити чат №N зі списку, /rename назва — перейменувати поточний, /delete N — видалити,\n"
     f"/export [файл.md] — експорт у Markdown, /get шлях — завантажити файл від агента в поточну теку,\n"
     f"/retry — виконати останню задачу заново (попередня відповідь прибирається),\n"
@@ -48,6 +49,8 @@ def parse_chat_command(text: str, printer: "Printer") -> tuple[dict[str, Any], s
 
     if cmd == "/chats":
         return {"type": "chat_list"}, None
+    if cmd == "/search" and arg:
+        return {"type": "chat_search", "query": arg}, None
     if cmd in {"/open", "/delete"} and arg:
         return {"type": "chat_open" if cmd == "/open" else "chat_delete", "id": chat_id(arg)}, None
     if cmd in {"/rename", "/save"} and arg:
@@ -70,6 +73,8 @@ def run_chat_command_locally(agent: Any, msg: dict[str, Any]) -> list[dict[str, 
             agent.delete_chat(cid)
         elif kind == "chat_export":
             events.append({"type": "chat_export", **agent.export_chat(cid)})
+        elif kind == "chat_search":
+            events.append({"type": "chat_search", "query": msg["query"], "chats": agent.search_chats(msg["query"])})
         if kind in {"chat_list", "chat_delete"}:
             events.append({"type": "chat_list", "chats": agent.list_chats()})
         return events
@@ -183,6 +188,17 @@ class Printer:
                 when = time.strftime("%Y-%m-%d %H:%M", time.localtime(c["updated_at"]))
                 mark = " ◀ поточний" if c["id"] == self.session else ""
                 print(f"  {BOLD}{n}.{RESET} {c['title']} {DIM}· {c['count']} повідомл. · {when}{mark}{RESET}")
+        elif t == "chat_search":
+            self.listed = [c["id"] for c in ev["chats"]]
+            if not ev["chats"]:
+                print(f"{DIM}Нічого не знайдено за «{ev['query']}»{RESET}")
+            for n, c in enumerate(ev["chats"], 1):
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(c["updated_at"]))
+                print(f"  {BOLD}{n}.{RESET} {c['title']} {DIM}· {when}{RESET}")
+                if c.get("snippet"):
+                    print(f"     {DIM}{c['snippet']}{RESET}")
+            if ev["chats"]:
+                print(f"{DIM}Відкрити: /open N{RESET}")
         elif t == "chat_opened":
             self.session = ev["id"]
             print(f"{GREEN}📂 Відкрито «{ev['title']}» — можна продовжувати розмову{RESET}")

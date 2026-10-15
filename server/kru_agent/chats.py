@@ -100,3 +100,42 @@ def to_markdown(title: str, messages: list[dict[str, Any]], agent_name: str = "K
         else:
             lines += [f"> {item['text']}", ""]
     return "\n".join(lines).rstrip() + "\n"
+
+
+SNIPPET = 140
+
+
+def _snippet(text: str, word: str) -> str:
+    """Уривок навколо першого збігу (одним рядком)."""
+    flat = " ".join(text.split())
+    pos = flat.casefold().find(word)
+    if pos < 0:
+        return flat[:SNIPPET] + ("…" if len(flat) > SNIPPET else "")
+    start = max(0, pos - SNIPPET // 3)
+    end = min(len(flat), start + SNIPPET)
+    return ("…" if start else "") + flat[start:end] + ("…" if end < len(flat) else "")
+
+
+def search(chats: list[dict[str, Any]], query: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Пошук чатів за назвою й текстом розмови (усі слова запиту, без урахування регістру).
+    Збіги в назві — вище; далі — новіші. До кожного результату — уривок зі збігом."""
+    words = [w for w in query.casefold().split() if w]
+    if not words:
+        return []
+    found: list[tuple[int, float, dict[str, Any]]] = []
+    for chat in chats:
+        title = chat["title"] or ""
+        messages = json.loads(chat["messages"]) if isinstance(chat["messages"], str) else chat["messages"]
+        texts = [item["text"] for item in transcript(messages) if item["role"] in {"user", "assistant"}]
+        haystack = (title + "\n" + "\n".join(texts)).casefold()
+        if not all(w in haystack for w in words):
+            continue
+        in_title = all(w in title.casefold() for w in words)
+        hit = next((t for t in texts if words[0] in t.casefold()), "") or next(
+            (t for t in texts if any(w in t.casefold() for w in words)), "")
+        word = words[0] if words[0] in hit.casefold() else next((w for w in words if w in hit.casefold()), "")
+        info = {k: chat[k] for k in ("id", "title", "count", "created_at", "updated_at")}
+        info["snippet"] = _snippet(hit, word) if hit else ""
+        found.append((0 if in_title else 1, -chat["updated_at"], info))
+    found.sort(key=lambda x: (x[0], x[1]))
+    return [info for *_, info in found[:limit]]
