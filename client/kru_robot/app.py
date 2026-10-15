@@ -140,6 +140,7 @@ class RobotWindow(QWidget):
 
         self.panel = ChatPanel()
         self.panel.show_tools = settings.show_tools
+        self.panel.show_thinking = settings.show_thinking
         self.conn = AgentConnection(settings.server_url, settings.token, self)
         self.busy = False
         self.last_activity = time.monotonic()
@@ -236,12 +237,28 @@ class RobotWindow(QWidget):
         self.menu.addAction(menu_icon("export"), "Експорт розмови в Markdown…", lambda: self.export_chat(None))
         self.menu.addAction(menu_icon("stop"), "Зупинити задачу", self.cancel_task)
         self.menu.addSeparator()
+        self.act_thinking = QAction(menu_icon("think"), "Показувати хід думок", self, checkable=True)
+        self.act_thinking.setChecked(self.settings.show_thinking)
+        self.act_thinking.toggled.connect(self.set_show_thinking)
+        self.menu.addAction(self.act_thinking)
         self.menu.addAction(menu_icon("settings"), "Налаштування…", self.open_settings)
         self.act_hide = QAction(menu_icon("hide"), "Сховати робота", self)
         self.act_hide.triggered.connect(self.toggle_visible)
         self.menu.addAction(self.act_hide)
         self.menu.addSeparator()
         self.menu.addAction(menu_icon("quit"), "Вийти", QApplication.quit)
+
+    def set_show_thinking(self, show: bool) -> None:
+        """Вмикач «Показувати хід думок»: міркування моделі — приглушеним блоком у стрічці."""
+        if self.settings.show_thinking != show:
+            self.settings.show_thinking = show
+            self.settings.save()
+        if self.act_thinking.isChecked() != show:
+            self.act_thinking.setChecked(show)
+        self.panel.set_show_thinking(show)
+        if show and not self.settings.think:
+            self.panel.set_activity("💭 Модель зараз не міркує — увімкни «Думати перед відповіддю» в налаштуваннях")
+        QTimer.singleShot(0, self.position_panel)
 
     def _connect_character(self) -> None:
         self.robot.clicked.connect(self.on_robot_clicked)
@@ -305,7 +322,7 @@ class RobotWindow(QWidget):
         changed_conn = (url, dlg.token.text().strip()) != (s.server_url, s.token)
         s.server_url, s.token = url, dlg.token.text().strip()
         s.think = dlg.think.isChecked()
-        s.show_thinking = dlg.thinking.isChecked()
+        self.set_show_thinking(dlg.thinking.isChecked())
         s.show_tools = dlg.tools.isChecked()
         s.auto_files = dlg.auto_files.isChecked()
         self.panel.set_show_tools(s.show_tools)
@@ -818,9 +835,8 @@ class RobotWindow(QWidget):
             icon = {"deep_research": "📚", "delegate": "🤝"}.get(ev.get("tool"), "🔧")
             self.panel.set_activity(f"{icon} {ev.get('text', '')}"[:120])
         elif t == "thinking":
-            if self.settings.show_thinking:
-                self.thinking_buf = (self.thinking_buf + ev.get("text", ""))[-160:]
-                self.panel.set_activity("💭 " + " ".join(self.thinking_buf.split())[-120:])
+            # записуємо завжди: увімкнеш показ пізніше — міркування цієї розмови теж з'являться
+            self.panel.append_thinking(ev.get("text", ""))
         elif t == "token":
             self.robot.set_state("talking")
             self.panel.append_draft(ev.get("text", ""))

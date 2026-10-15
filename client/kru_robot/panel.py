@@ -879,6 +879,40 @@ class ChatPanel(QWidget):
         if not self._render_timer.isActive():
             self._render_timer.start()
 
+    THINK_SHOWN = 3000  # з довгого міркування в стрічці видно кінець (найсвіжіше)
+    THINK_KEPT = 20000
+
+    def append_thinking(self, text: str) -> None:
+        """Потік міркувань моделі: окремий блок на кожен крок агента; показується, якщо ввімкнено."""
+        if self.entries and self.entries[-1][0] == "thinking":
+            self.entries[-1] = ("thinking", (self.entries[-1][1] + text)[-self.THINK_KEPT:])
+        elif text.strip():
+            self.entries.append(("thinking", text.lstrip()))
+            self.entries = self.entries[-60:]
+        else:
+            return
+        if getattr(self, "show_thinking", False):
+            self._schedule()
+
+    def set_show_thinking(self, show: bool) -> None:
+        """Показувати хід думок моделі в стрічці (приглушено, щоб не сплутати з відповіддю)."""
+        self.show_thinking = show
+        self._render()
+
+    @classmethod
+    def _thinking_html(cls, text: str) -> str:
+        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+        body = "\n".join(lines)
+        if len(body) > cls.THINK_SHOWN:
+            body = "…" + body[-cls.THINK_SHOWN:]
+        body = html.escape(body)
+        # «#» — першим: решта замін самі містять «#»
+        for ch, ent in (("#", "&#35;"), ("*", "&#42;"), ("_", "&#95;"), ("`", "&#96;"), ("[", "&#91;"),
+                        ("]", "&#93;"), ("~", "&#126;"), ("|", "&#124;"), ("\\", "&#92;")):
+            body = body.replace(ch, ent)  # розмітка Markdown у думках не має спрацьовувати
+        body = body.replace("\n", "<br>")
+        return f'<span style="color:#8A94A6; font-style:italic; font-size:small">💭 {body}</span>'
+
     def set_show_tools(self, show: bool) -> None:
         """Показувати технічні рядки дій агента («🔧 read_file: …»). Файли 📎 і спогади 🧠 видно завжди."""
         self.show_tools = show
@@ -897,6 +931,9 @@ class ChatPanel(QWidget):
                 parts.append(f"⚠️ *{text}*")
             elif role == "file":
                 parts.append(self._file_markdown(text))
+            elif role == "thinking":
+                if getattr(self, "show_thinking", False):
+                    parts.append(self._thinking_html(text))
             else:
                 parts.append(text)
         if self.draft:

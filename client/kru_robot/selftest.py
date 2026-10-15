@@ -400,6 +400,34 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     step(50, lambda: check("retry_button", retry_flow))
+
+    def thinking_flow():
+        """Хід думок: записується завжди, показується приглушеним блоком за вмикачем у меню."""
+        was = win.settings.show_thinking
+        try:
+            win.new_chat()
+            win.set_show_thinking(False)
+            win.panel.add_entry("user", "2+2?")
+            for chunk in ("Користувач питає **суму**. ", "Це <просто>: 2+2=4."):
+                win.on_event({"type": "thinking", "text": chunk})
+            win.on_event({"type": "final", "text": "4"})
+            win.panel._render()
+            need("Користувач питає" not in win.panel.view.toPlainText(), "думки видно при вимкненому показі")
+            win.act_thinking.setChecked(True)  # вмикач у меню
+            need(win.settings.show_thinking and win.panel.show_thinking, "вмикач не спрацював")
+            plain = win.panel.view.toPlainText()
+            need("Користувач питає **суму**" in plain and "<просто>" in plain, f"думок не видно: {plain[:200]}")
+            html_text = win.panel.view.toHtml().lower()
+            need("#8a94a6" in html_text and "italic" in html_text, "думки не приглушені")
+            need(plain.index("Користувач") < plain.index("4"), "думки мають бути перед відповіддю")
+            win.act_thinking.setChecked(False)
+            need("Користувач питає" not in win.panel.view.toPlainText(), "не сховались після вимкнення")
+        finally:
+            win.set_show_thinking(was)
+            win.new_chat()
+        return "ok"
+
+    step(50, lambda: check("thinking_toggle", thinking_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())
