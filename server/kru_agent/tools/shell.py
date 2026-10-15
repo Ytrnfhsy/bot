@@ -48,10 +48,12 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
 async def run_shell(ctx: ToolContext, command: str, timeout: int = 0) -> str:
     if not command.strip():
         raise ToolError("Порожня команда")
-    t = int(timeout) or ctx.config.shell_timeout
-    return await run_process(
-        command, str(ctx.workspace), min(t, 3600), ctx.config.max_tool_output_chars, shell=True
-    )
+    t = min(int(timeout) or ctx.config.shell_timeout, 3600)
+    from .. import sandbox
+
+    if sandbox.enabled(ctx.config):
+        return await sandbox.run(ctx, ["bash", "-lc", command], t)
+    return await run_process(command, str(ctx.workspace), t, ctx.config.max_tool_output_chars, shell=True)
 
 
 TOOLS = [
