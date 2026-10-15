@@ -107,6 +107,8 @@ TOOL_ACTIVITY = {
     "schedule_task": "⏰ Планую завдання…",
     "send_telegram": "✈️ Надсилаю в Telegram…",
     "send_file": "📎 Передаю файл…",
+    "search_chat": "🔎 Шукаю в історії чату…",
+    "read_chat": "🔎 Перечитую розмову…",
     "read_file": "📖 Читаю файл…",
     "list_dir": "📂 Переглядаю файли…",
     "search_files": "📂 Шукаю у файлах…",

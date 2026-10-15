@@ -290,6 +290,8 @@ class Agent:
             summary = (
                 "\nSummary of the earlier part of THIS conversation (older messages were compressed to save context):\n"
                 + turn.summary + "\n"
+                "Exact details from that part (numbers, wording, translated terms, code, tool output) are not in the "
+                "summary — when you need them, use search_chat / read_chat instead of guessing.\n"
             )
         prompt = SYSTEM_PROMPT.format(
             now=(datetime.now(ctx.tz).strftime("%Y-%m-%d (%A); the exact current time is in the latest context note "
@@ -635,6 +637,7 @@ class Agent:
         (відповідь, кроки, план) прибирається з розмови; user_text тоді не потрібен."""
         ctx = self.make_context(user)
         ctx.auto_files = auto_files
+        ctx.session_id = session_id
         self._apply_tz(ctx, tz)
         lock = self._session_locks.setdefault(f"{ctx.owner}:{session_id}", asyncio.Lock())
         async with lock:
