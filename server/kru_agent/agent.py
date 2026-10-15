@@ -224,6 +224,7 @@ class Turn:
     plan: list[dict[str, str]] = field(default_factory=list)  # чек-лист великої задачі (update_plan)
     subagent: bool = False  # це підзадача, доручена субагенту (delegate)
     steps_since_plan: int = 0  # кроків без оновлення плану — для нагадування моделі
+    trim_from: int = 0  # з якого повідомлення history модель бачить розмову (обрізання «стрибками»)
 
 
 class Agent:
@@ -267,9 +268,13 @@ class Agent:
 
     # ---------------- побудова контексту ----------------
     def _system_prompt(self, turn: Turn) -> str:
+        """Режим cache_friendly: лише те, що не змінюється протягом задачі (дата без часу; без плану, спогадів
+        і нагадувань — вони в примітці _context_note). Тоді llama-server бере вже оброблений початок
+        розмови з кешу, а не перераховує весь контекст на кожному кроці."""
         ctx = turn.ctx
+        stable = self.config.cache_friendly and not turn.subagent
         memories = ""
-        if turn.memories:
+        if turn.memories and not stable:
             memories = "\nRelevant long-term memories (may be useful):\n" + format_memories(turn.memories) + "\n"
         summary = ""
         if turn.summary and turn.summary_upto:
@@ -278,7 +283,9 @@ class Agent:
                 + turn.summary + "\n"
             )
         prompt = SYSTEM_PROMPT.format(
-            now=datetime.now(ctx.tz).strftime("%Y-%m-%d %H:%M (%A)"),
+            now=(datetime.now(ctx.tz).strftime("%Y-%m-%d (%A); the exact current time is in the context note at the "
+                                               "end of the latest message")
+                 if stable else datetime.now(ctx.tz).strftime("%Y-%m-%d %H:%M (%A)")),
             tz=describe_tz(ctx.tz or server_tz(), ctx.tz_name),
             workspace=ctx.workspace,
             language=self.config.language,
@@ -296,7 +303,7 @@ class Agent:
             ),
             memories=memories,
             summary=summary,
-            plan=self._plan_prompt(turn),
+            plan="" if stable else self._plan_prompt(turn),
             approval=(
                 "- run_shell and run_python run in an isolated Docker SANDBOX: only the workspace is visible (at the same "
                 "path as above, the current directory), no access to the host system; `pip install <pkg>` works and "
@@ -310,6 +317,26 @@ class Agent:
         if not self.native_tools:
             prompt += JSON_PROTOCOL.format(catalog=self.registry.text_catalog(ctx.denied_tools))
         return prompt
+
+    def _context_note(self, turn: Turn) -> str:
+        """Те, що змінюється від кроку до кроку: дописується в кінець останнього повідомлення (лише в запиті до
+        моделі, в історії не зберігається) — тож не ламає кеш уже обробленої частини розмови."""
+        ctx = turn.ctx
+        parts = [f"Current local time: {datetime.now(ctx.tz).strftime('%Y-%m-%d %H:%M (%A)')}"]
+        if turn.memories:
+            parts.append("Relevant long-term memories (may be useful):\n" + format_memories(turn.memories))
+        if plan := self._plan_prompt(turn).strip():
+            parts.append(plan)
+        return "\n\n[Context note from the system — not written by the user]\n" + "\n\n".join(parts)
+
+    def _with_note(self, msgs: list[dict[str, Any]], turn: Turn) -> list[dict[str, Any]]:
+        """Примітка — у копії останнього повідомлення (запит користувача чи результат інструмента), а не окремим
+        системним повідомленням: шаблон чату Qwen3 дозволяє system лише на самому початку."""
+        if not msgs or not isinstance(msgs[-1].get("content", ""), str):
+            return msgs
+        last = dict(msgs[-1])
+        last["content"] = (last.get("content") or "") + self._context_note(turn)
+        return [*msgs[:-1], last]
 
     def _plan_prompt(self, turn: Turn) -> str:
         if turn.subagent:
@@ -411,7 +438,26 @@ class Agent:
                     if turn.session_id:  # у субагента історія тимчасова
                         self.storage.save_summary(turn.session_id, summary, cut, turn.ctx.owner)
                     budget = self._budget(summary)
-        return self._trim_history(history[start:], budget)
+        if not self.config.cache_friendly:
+            return self._trim_history(history[start:], budget)
+        # обрізання «стрибками»: коли не влазить — відкидаємо з запасом (до 70% бюджету), щоб наступні кроки
+        # мали той самий початок розмови (кеш llama-server), а не зсувалися на одне повідомлення щоразу
+        begin = max(start, turn.trim_from)
+        rest = sum(_msg_size(m) for m in history[begin:])
+        if rest > budget:
+            cut = begin
+            while rest > budget * 0.7 and cut < len(history) - 1:
+                rest -= _msg_size(history[cut])
+                cut += 1
+            # різати лише перед повідомленням користувача чи відповіддю моделі: пари виклик/результат не рвуться
+            while cut < len(history) - 1 and not (_is_user_turn(history[cut]) or history[cut].get("role") == "assistant"):
+                cut += 1
+            turn.trim_from = begin = cut
+        last_user = max((i for i, m in enumerate(history) if _is_user_turn(m)), default=-1)
+        if last_user >= 0 and begin > last_user:
+            # саму задачу користувача не відкидаємо ніколи — лише найстаріші кроки її виконання
+            return [history[last_user], *history[begin:]]
+        return self._trim_history(history[begin:], budget)  # страховка: одне величезне повідомлення
 
     async def _summarize(self, previous: str, msgs: list[dict[str, Any]]) -> str:
         text = _render_for_summary(msgs)
@@ -673,6 +719,8 @@ class Agent:
             trimmed = await self._fit_history(turn, emit)
             msgs = trimmed if self.native_tools else self._to_json_protocol(trimmed)
             msgs = self._attach_images(msgs, ctx)
+            if self.config.cache_friendly and not turn.subagent:
+                msgs = self._with_note(msgs, turn)
             messages = [{"role": "system", "content": self._system_prompt(turn)}, *msgs]
             try:
                 extra = {} if think is None else {"think": think}

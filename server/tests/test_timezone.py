@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from kru_agent.agent import Agent
 from kru_agent.scheduler import describe, next_after
 
-from .conftest import FakeLLM, call, text
+from .conftest import FakeLLM, call, text, prompt
 from .test_agent import Recorder
 from .test_server import _client, _until
 
@@ -20,10 +20,10 @@ async def test_prompt_shows_user_local_time_and_tz_is_remembered(cfg):
     agent = Agent(cfg, llm=llm)
     rec = Recorder()
     await agent.run("s", "котра година?", rec.emit, rec.confirm, tz="Europe/Kyiv")
-    prompt = llm.calls[0]["messages"][0]["content"]
-    assert "timezone Europe/Kyiv, UTC+0" in prompt
-    assert datetime.now(KYIV).strftime("%Y-%m-%d %H:") in prompt
-    assert "never convert to UTC" in prompt
+    seen = prompt(llm.calls[0])
+    assert "timezone Europe/Kyiv, UTC+0" in seen
+    assert datetime.now(KYIV).strftime("%Y-%m-%d %H:") in seen
+    assert "never convert to UTC" in seen
     # наступна задача без tz (напр. із CLI) — береться запам'ятований пояс користувача
     await agent.run("s", "а зараз?", rec.emit, rec.confirm)
     assert "Europe/Kyiv" in llm.calls[1]["messages"][0]["content"]

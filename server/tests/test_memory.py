@@ -7,7 +7,7 @@ from kru_agent.chats import transcript
 from kru_agent.semantic import Embedder, MemoryIndex, normalize
 from kru_agent.users import User
 
-from .conftest import FakeLLM, call, text
+from .conftest import FakeLLM, call, text, prompt
 from .test_agent import Recorder
 
 # «Смисли» для фейкової моделі ембедингів: слова з однієї групи — про одне й те саме
@@ -101,7 +101,7 @@ async def test_relevant_memories_searched_once_per_task(cfg):
     agent.storage.add_memory("Влітку їду на море")
     rec = Recorder()
     await agent.run("s", "спланую відпустку", rec.emit, rec.confirm)
-    assert all("Влітку їду на море" in c["messages"][0]["content"] for c in llm.calls)
+    assert all("Влітку їду на море" in prompt(c) for c in llm.calls)
     assert sum(1 for _, q in fake.calls if q) == 1  # запит ембедиться раз на задачу, а не на кожен крок
 
 
