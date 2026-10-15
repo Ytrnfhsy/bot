@@ -24,13 +24,14 @@ def _key(owner: str, sid: str) -> str:
 def _user_count(messages: list[dict[str, Any]]) -> int:
     return sum(
         1 for m in messages
-        if m.get("role") == "user" and not str(m.get("content") or "").startswith(("TOOL RESULT", "[view_image]"))
+        if m.get("role") == "user"
+        and not str(m.get("content") or "").startswith(("TOOL RESULT", "[view_image]", "[Context note"))
     )
 
 
 def default_title(messages: list[dict[str, Any]]) -> str:
     for m in messages:
-        if m.get("role") == "user" and m.get("content"):
+        if m.get("role") == "user" and m.get("content") and not str(m["content"]).startswith("[Context note"):
             first = " ".join(str(m["content"]).split())
             return first[:60] + ("…" if len(first) > 60 else "")
     return "Нова розмова"

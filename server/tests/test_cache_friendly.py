@@ -15,15 +15,6 @@ from .test_memory import with_fake_embedder
 PLAN = [{"title": "Знайти дані", "status": "in_progress"}, {"title": "Написати звіт", "status": "pending"}]
 
 
-def _shared_prefix(a: list[dict], b: list[dict]) -> int:
-    n = 0
-    for x, y in zip(a, b):
-        if x != y:
-            break
-        n += 1
-    return n
-
-
 async def test_prefix_is_stable_between_steps(cfg):
     script = [call("update_plan", steps=PLAN), call("current_datetime"), call("mark_step", step=1),
               call("current_datetime")] + [call("current_datetime")] * 6 + [text("готово")]
@@ -37,16 +28,22 @@ async def test_prefix_is_stable_between_steps(cfg):
     calls = [c["messages"] for c in llm.calls]
     assert len({m[0]["content"] for m in calls}) == 1  # системний промпт не змінюється взагалі
     for prev, cur in zip(calls, calls[1:]):
-        # усе, що вже надсилалось (крім останнього повідомлення з приміткою), — без змін
-        assert _shared_prefix(prev, cur) >= len(prev) - 1
-    # шаблон Qwen3: system — лише першим; примітка — всередині останнього повідомлення
+        # кожен запит ПОВНІСТЮ починається з попереднього — лише дописується в кінець.
+        # Для гібридних моделей (Qwen3.5/3.6) це умова, щоб llama-server узяв попередній стан із кешу
+        assert cur[:len(prev)] == prev
+    # шаблон Qwen3: system — лише першим
     assert all(m["role"] != "system" for c in calls for m in c[1:])
-    last = calls[-1][-1]["content"]
-    assert "Context note" in last and "Current local time:" in last and "Current plan" in last
-    assert "REMINDER" in prompt(llm.calls[-1])  # нагадування про план — теж у примітці
-    assert "Звіти користувач любить короткі" in last and "любить короткі" not in calls[-1][0]["content"]
-    # примітка лише в запиті до моделі — в історії чату її немає
-    assert not any("Context note" in str(m.get("content")) for m in agent.storage.load_session("c"))
+    notes = [m["content"] for m in calls[-1] if str(m.get("content")).startswith("[Context note")]
+    first = notes[0]
+    assert "Current local time:" in first and "Звіти користувач любить короткі" in first
+    assert "любить короткі" not in calls[-1][0]["content"]
+    assert calls[0][-1]["content"] == "зроби звіт" and calls[0][-2]["content"] == first  # спершу контекст, потім задача
+    assert any("⏳ 1. Знайти дані" in n for n in notes) and any("✅ 1. Знайти дані" in n for n in notes)
+    assert any("REMINDER" in n for n in notes)
+    # план не повторюється щокроку — лише коли змінився
+    assert sum("Current plan" in n for n in notes) == 2
+    # у стрічці чату примітки не видно
+    assert all("Context note" not in item["text"] for item in agent.open_chat("c")["transcript"])
 
 
 async def test_trimming_jumps_instead_of_sliding(cfg, monkeypatch):
@@ -62,7 +59,7 @@ async def test_trimming_jumps_instead_of_sliding(cfg, monkeypatch):
     monkeypatch.setattr(agent.registry.get("run_python"), "func", fake_python)
     rec = Recorder()
     await agent.run("c", "довга задача", rec.emit, rec.confirm)
-    calls = [c["messages"] for c in llm.calls]
+    calls = [[m for m in c["messages"] if not str(m.get("content")).startswith("[Context note")] for c in llm.calls]
     # задача користувача лишається на місці завжди, навіть коли старі кроки відкинуто
     assert all(c[1]["role"] == "user" and c[1]["content"].startswith("довга задача") for c in calls)
     # початок розмови після задачі змінюється лише зрідка (стрибками), а не на кожному кроці

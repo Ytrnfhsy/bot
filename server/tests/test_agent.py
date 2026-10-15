@@ -10,7 +10,7 @@ from kru_agent.llm import OllamaClient, OpenAICompatClient, ToolsNotSupported
 from kru_agent.storage import Storage
 from kru_agent.tools import ToolContext, ToolError
 
-from .conftest import FakeLLM, call, text
+from .conftest import FakeLLM, call, text, real
 
 
 class Recorder:
@@ -82,7 +82,7 @@ async def test_native_tool_loop(cfg):
     last_msgs = llm.calls[1]["messages"]
     assert last_msgs[-1]["role"] == "tool" and "Запам'ятовано" in last_msgs[-1]["content"]
     # історія збережена
-    hist = agent.storage.load_session("s1")
+    hist = real(agent.storage.load_session("s1"))
     assert hist[0]["role"] == "user" and hist[-1]["content"] == "Запам'ятав!"
 
 

@@ -31,7 +31,7 @@ async def test_plan_is_shown_saved_and_kept_in_prompt(cfg):
     rec2 = Recorder()
     await agent.run("c", "дрібниця", rec2.emit, rec2.confirm)
     assert {"type": "plan", "steps": []} in rec2.events and agent.open_chat("c")["plan"] == []
-    assert "Current plan" not in prompt(llm.calls[-1])
+    assert "no active plan" in llm.calls[-1]["messages"][-2]["content"]  # примітка перед новою задачею
 
 
 async def test_unfinished_plan_survives_and_gives_more_steps(cfg):
@@ -108,7 +108,7 @@ async def test_mark_step_marks_done_and_advances(cfg):
     plans = [e["steps"] for e in rec.events if e["type"] == "plan"]
     assert [s["status"] for s in plans[1]] == ["done", "in_progress", "pending", "pending", "pending"]
     assert [s["status"] for s in plans[2]] == ["done", "done", "done", "in_progress", "pending"]
-    assert "Залишилось: 2. Зараз: 4. Розділ 4" in llm.calls[4]["messages"][-1]["content"]
+    assert "Залишилось: 2. Зараз: 4. Розділ 4" in prompt(llm.calls[4])
     assert "📋 Виконано пункт плану 1" in [m["text"] for m in transcript(agent.storage.load_chat("c")["messages"])]
 
 

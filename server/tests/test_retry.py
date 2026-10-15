@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from kru_agent.agent import Agent
 from kru_agent.server import create_app
 
-from .conftest import FakeLLM, call, text
+from .conftest import FakeLLM, call, text, real
 from .test_agent import Recorder
 from .test_server import _until
 from .test_telegram_bot import make, msg
@@ -26,7 +26,7 @@ async def test_retry_replaces_last_attempt(cfg):
     sent = llm.calls[-1]["messages"]
     assert sent[-1]["role"] == "user" and sent[-1]["content"].startswith("А який там час?")
     assert not any("Погана" in str(m.get("content")) for m in sent)
-    roles = [(m["role"], m.get("content")) for m in agent.storage.load_session("s")]
+    roles = [(m["role"], m.get("content")) for m in real(agent.storage.load_session("s"))]
     assert roles == [("user", "Столиця Австралії?"), ("assistant", "Канберра"),
                      ("user", "А який там час?"), ("assistant", "Краща відповідь")]
     assert agent.list_chats()[0]["count"] == 2
@@ -42,7 +42,7 @@ async def test_retry_after_cancel_resets_plan(cfg):
     rec = Recorder()
     await agent.run("s", "", rec.emit, rec.confirm, retry=True)
     assert {"type": "plan", "steps": []} in rec.events
-    assert [m["role"] for m in agent.storage.load_session("s")] == ["user", "assistant"]
+    assert [m["role"] for m in real(agent.storage.load_session("s"))] == ["user", "assistant"]
 
 
 async def test_retry_empty_chat(cfg):
@@ -64,7 +64,7 @@ def test_ws_retry(cfg):
         assert _until(ws, "final")[0]["text"] == "2"
         ws.send_json({"type": "task", "retry": True, "session_id": "порожній"})
         assert "немає задачі" in _until(ws, "error")[0]["message"]
-    assert [m["content"] for m in agent.storage.load_session("t")] == ["скажи число", "2"]
+    assert [m["content"] for m in real(agent.storage.load_session("t"))] == ["скажи число", "2"]
 
 
 async def test_telegram_retry(cfg):
@@ -75,4 +75,4 @@ async def test_telegram_retry(cfg):
     await gw.handle(msg("/retry"))
     assert bot.texts()[-1] == "друга"
     sid = agent.storage.telegram_session("owner")
-    assert [m["content"] for m in agent.storage.load_session(sid)] == ["порахуй щось", "друга"]
+    assert [m["content"] for m in real(agent.storage.load_session(sid))] == ["порахуй щось", "друга"]

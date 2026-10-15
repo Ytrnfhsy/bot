@@ -65,8 +65,8 @@ def transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if item := _sent_file(files, content.split("\n", 1)[-1]):
                     out.append(item)
                 continue
-            if content.startswith("TOOL RESULT") or content.startswith("[view_image]"):
-                continue  # службові повідомлення JSON-протоколу / view_image
+            if content.startswith(("TOOL RESULT", "[view_image]", "[Context note")):
+                continue  # службові повідомлення JSON-протоколу / view_image / примітки агента (час, план)
             text = content
             if content.startswith("⏰ Заплановане завдання") and "\n" in content:
                 text = "⏰ " + content.split("\n", 1)[1]  # службову інструкцію не показуємо

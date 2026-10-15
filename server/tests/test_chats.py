@@ -5,7 +5,7 @@ import pytest
 from kru_agent.agent import Agent
 from kru_agent.chats import default_title, to_markdown, transcript
 
-from .conftest import FakeLLM, call, text
+from .conftest import FakeLLM, call, text, real
 from .test_agent import Recorder
 from .test_server import _client, _until
 
@@ -55,7 +55,7 @@ async def test_manual_title_kept_and_long_history_not_trimmed(cfg):
     await agent.run("c", "друге", rec.emit, rec.confirm)
     chat = agent.storage.load_chat("c")
     assert chat["title"] == "Моя назва"
-    assert [m["content"] for m in chat["messages"] if m["role"] == "user"] == ["перше", "друге"]  # нічого не обрізано
+    assert [m["content"] for m in real(chat["messages"]) if m["role"] == "user"] == ["перше", "друге"]  # нічого не обрізано
     # а моделі йде лише те, що влазить у контекст
     assert all(m["content"] != "перше" for m in agent.llm.calls[-1]["messages"])
 

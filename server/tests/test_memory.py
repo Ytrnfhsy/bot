@@ -7,7 +7,7 @@ from kru_agent.chats import transcript
 from kru_agent.semantic import Embedder, MemoryIndex, normalize
 from kru_agent.users import User
 
-from .conftest import FakeLLM, call, text, prompt
+from .conftest import FakeLLM, call, text, prompt, real
 from .test_agent import Recorder
 
 # «Смисли» для фейкової моделі ембедингів: слова з однієї групи — про одне й те саме
@@ -132,7 +132,7 @@ async def test_embedder_parses_openai_response(cfg, monkeypatch):
 
 # ---------------- стискання довгих розмов ----------------
 async def test_long_chat_is_summarized_not_cut_blindly(cfg):
-    cfg.max_history_chars = 400
+    cfg.max_history_chars = 600  # з запасом на службові примітки (час) — у справжньому бюджеті вони непомітні
     llm = FakeLLM([
         text("а" * 300),
         text("- користувач питав про перше\n- відповідь: багато «а»"),  # підсумок
@@ -149,9 +149,12 @@ async def test_long_chat_is_summarized_not_cut_blindly(cfg):
     assert "USER: перше" in summary_call["messages"][1]["content"]
     main = llm.calls[2]["messages"]
     assert "користувач питав про перше" in main[0]["content"]  # підсумок у системному промпті
-    assert [m["content"] for m in main[1:]][0].startswith("друге")
+    assert real(main[1:])[0]["content"].startswith("друге")
     assert {"type": "status", "state": "summarizing"} in rec.events
-    assert agent.storage.load_summary("c")[1] == 2
+    stored = agent.storage.load_session("c")
+    second = next(i for i, m in enumerate(stored) if str(m["content"]).startswith("друге"))
+    # підсумок охоплює все до другої задачі; її примітка (час) лишається з нею
+    assert agent.storage.load_summary("c")[1] == second - 1 and stored[second - 1]["content"].startswith("[Context")
 
     await agent.run("c", "третє", rec.emit, rec.confirm)  # підсумок не перераховується на кожну задачу
     assert len(llm.calls) == 4 and "користувач питав про перше" in llm.calls[3]["messages"][0]["content"]
