@@ -106,6 +106,14 @@ class Config:
     sandbox_memory: str = "2g"
     sandbox_cpus: float = 2.0
     sandbox_confirm: bool = False
+    # Голос: розпізнавання мовлення (faster-whisper, CPU) і озвучення відповідей (Piper). Встановлення —
+    # deploy/voice.sh install. auto — увімкнено, якщо бібліотеки й голос Piper є на сервері.
+    voice: str = "auto"
+    whisper_model: str = "turbo"  # tiny | base | small | medium | turbo (large-v3-turbo) — точніше = повільніше
+    whisper_language: str = "uk"  # порожньо — визначати мову самому
+    whisper_device: str = "cpu"  # відеопам'ять зайнята моделлю агента
+    piper_voice: str = ""  # шлях до .onnx; порожньо — <data_dir>/voice/uk_UA-ukrainian_tts-medium.onnx
+    piper_speaker: int = 0  # ukrainian_tts: 0 — Лада, 1 — Микита, 2 — Тетяна
     shell_timeout: int = 120
     python_timeout: int = 120
     searxng_url: str = ""
@@ -171,6 +179,12 @@ class Config:
             sandbox_memory=_env("SANDBOX_MEMORY", d.sandbox_memory),
             sandbox_cpus=float(_env("SANDBOX_CPUS", str(d.sandbox_cpus))),
             sandbox_confirm=_env_bool("SANDBOX_CONFIRM", d.sandbox_confirm),
+            voice=_env("VOICE", d.voice).lower(),
+            whisper_model=_env("WHISPER_MODEL", d.whisper_model),
+            whisper_language=_env("WHISPER_LANGUAGE", d.whisper_language),
+            whisper_device=_env("WHISPER_DEVICE", d.whisper_device),
+            piper_voice=_env("PIPER_VOICE", d.piper_voice),
+            piper_speaker=int(_env("PIPER_SPEAKER", str(d.piper_speaker))),
             shell_timeout=int(_env("SHELL_TIMEOUT", str(d.shell_timeout))),
             python_timeout=int(_env("PYTHON_TIMEOUT", str(d.python_timeout))),
             searxng_url=_env("SEARXNG_URL", d.searxng_url),

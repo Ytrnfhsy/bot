@@ -22,6 +22,7 @@ from .timezones import describe_tz, get_tz, server_tz
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
 from .tools.plan import PLAN_TOOLS, SUBAGENT_DENIED, format_plan
+from .voice import Voice
 
 SANDBOX_TOOLS = frozenset({"run_shell", "run_python"})  # виконуються в пісочниці, якщо її увімкнено
 PLAN_NUDGE_STEPS = 5  # стільки кроків без оновлення плану — і модель отримує нагадування
@@ -256,6 +257,7 @@ class Agent:
         self.vision_reason = ""  # чому зору немає (для користувача)
         self._vision_checked = 0.0
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self.voice = Voice(config)
 
     def make_context(self, user: User | None = None) -> ToolContext:
         """Контекст задачі конкретного користувача: його тека, пам'ять і дозволені інструменти."""

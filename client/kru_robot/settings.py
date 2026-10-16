@@ -42,6 +42,8 @@ class Settings:
     font_size: int = 13  # шрифт стрічки чату й поля вводу (Ctrl+колесо, Ctrl+=/−/0)
     panel_width: int = 408  # ширина вікна чату (тягнути за край; подвійний клік по краю — як було)
     panel_feed_height: int = 0  # висота стрічки; 0 — під вміст
+    voice_reply: str = "voice"  # озвучувати відповіді: off | voice (лише на голосові запити) | always
+    voice_volume: int = 90  # гучність озвучення, %
 
     @classmethod
     def load(cls) -> "Settings":
