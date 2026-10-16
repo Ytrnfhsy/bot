@@ -530,6 +530,26 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return {"font": win.settings.font_size, "width": win.settings.panel_width}
 
     step(50, lambda: check("resize_font", resize_font_flow))
+
+    def draft_visible_flow():
+        """Відповідь під час набору видно повністю (раніше Qt-Markdown викидав текст разом із <br> в HTML)."""
+        win.new_chat()
+        win.set_show_thinking(True)
+        win.panel.add_entry("user", "питання")
+        win.on_event({"type": "thinking", "text": "перший рядок думки\nдругий <рядок> & ще"})
+        win.on_event({"type": "token", "text": "## Огляд\n\n| a | b |\n|---|---|\n- **пункт** один\n> цитата"})
+        win.panel._render()
+        plain = win.panel.view.toPlainText()
+        for piece in ("перший рядок думки", "другий <рядок> & ще", "## Огляд", "| a | b |", "- **пункт** один"):
+            need(piece in plain, f"не видно «{piece}»: {plain!r}")
+        win.on_event({"type": "final", "text": "## Огляд\n\n- **пункт** один"})
+        win.panel._render()
+        need("**" not in win.panel.view.toPlainText(), "готова відповідь не відформатована")
+        win.set_show_thinking(False)
+        win.new_chat()
+        return "ok"
+
+    step(50, lambda: check("draft_visible", draft_visible_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())
