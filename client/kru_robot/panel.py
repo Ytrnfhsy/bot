@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 
 
 def human_size(n: int) -> str:
@@ -58,7 +59,12 @@ QLabel#status { color: #5B6B82; font-size: 11px; }
 QLabel#activity { color: #7A5AF8; font-size: 11px; }
 QLabel#plan { color: #2B2F3A; background: #F4F1FF; border: 1px solid #DDD3FF; border-radius: 8px;
     padding: 6px 8px; font-size: 11px; }
-QTextBrowser { background: transparent; border: none; color: #1D2740; font-size: 13px; }
+QTextBrowser { background: #FAFCFF; border: none; color: #1D2740; font-size: 13px; }
+QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 0; }
+QScrollBar::handle:vertical { background: #C9D6E8; border-radius: 4px; min-height: 24px; }
+QScrollBar::handle:vertical:hover { background: #9FB3CF; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
 QPlainTextEdit { background: #FFFFFF; border: 1px solid #C9D6E8; border-radius: 12px;
                  padding: 6px 8px; color: #1D2740; font-size: 13px; }
 QPlainTextEdit:focus { border: 1px solid #4FD1FF; }
@@ -941,8 +947,12 @@ class ChatPanel(QWidget):
         return f"{icon('file')} **{name}**{size} — {action}"
 
     def append_draft(self, text: str) -> None:
+        # під час набору відповідь — простим текстом і не частіше ніж раз на 0,4 с: розбір Markdown на кожен
+        # шматок і безперервне перемальовування на KDE/XWayland лишали порожні клітинки й невидимий текст.
+        # Готова відповідь (final) малюється повністю, з таблицями й списками.
         self.draft += text
-        self._schedule()
+        if not self._think_timer.isActive():
+            self._think_timer.start()
 
     def clear_draft(self) -> None:
         if self.draft:
@@ -1040,6 +1050,21 @@ class ChatPanel(QWidget):
         self.show_thinking = show
         self._render()
 
+    @staticmethod
+    def _md_escape(line: str) -> str:
+        """Рядок як є: розмітка Markdown/HTML у ньому не спрацьовує (екранування зворотною скісною)."""
+        lead = len(line) - len(line.lstrip(" "))
+        body = line.lstrip(" ").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        body = re.sub(r"([\\`*_{}\[\]()#+\-.!|~\"'=$])", r"\\\1", body)
+        return "\u00a0" * lead + body  # відступ — нерозривними пробілами (4 пробіли зробили б блок коду)
+
+    @classmethod
+    def _plain_md(cls, text: str) -> str:
+        """Текст без розмітки — для чернетки відповіді під час набору. Переноси — розривами рядка Markdown:
+        <br> всередині HTML Qt-Markdown не підтримує й тоді мовчки викидає весь фрагмент."""
+        paras = [p for p in re.split(r"\n\s*\n", text.strip("\n")) if p.strip()]
+        return "\n\n".join("  \n".join(cls._md_escape(ln) for ln in p.split("\n")) for p in paras)
+
     @classmethod
     def _thinking_html(cls, text: str, latest: bool = True) -> str:
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
@@ -1047,17 +1072,15 @@ class ChatPanel(QWidget):
             body = "\n".join(lines)
             if len(body) > cls.THINK_SHOWN:
                 body = "…" + body[-cls.THINK_SHOWN:].lstrip()
+            lines = body.split("\n")
         else:  # давніше міркування — коротко, одним рядком
             body = " ".join(lines)
             if len(body) > cls.THINK_COLLAPSED:
                 body = body[:cls.THINK_COLLAPSED].rstrip() + " …"
-        body = html.escape(body)
-        # «#» — першим: решта замін самі містять «#»
-        for ch, ent in (("#", "&#35;"), ("*", "&#42;"), ("_", "&#95;"), ("`", "&#96;"), ("[", "&#91;"),
-                        ("]", "&#93;"), ("~", "&#126;"), ("|", "&#124;"), ("\\", "&#92;")):
-            body = body.replace(ch, ent)  # розмітка Markdown у думках не має спрацьовувати
-        body = body.replace("\n", "<br>")
-        return f'{icon("think")} <span style="color:#8A94A6; font-style:italic; font-size:small">{body}</span>'
+            lines = [body]
+        style = "color:#8A94A6; font-style:italic; font-size:small"
+        spans = [f'<span style="{style}">{cls._md_escape(ln)}</span>' for ln in lines]
+        return f'{icon("think")} ' + "  \n".join(spans)
 
     FONT_MIN, FONT_MAX = 10, 24
     WIDTH_MIN = 340
@@ -1178,7 +1201,7 @@ class ChatPanel(QWidget):
             else:
                 parts.append(text)
         if self.draft:
-            parts.append(self.draft + " ▍")
+            parts.append(self._plain_md(self.draft) + " ▍")
         elif not getattr(self, "busy", False) and any(role == "user" for role, _ in self.entries):
             parts.append(f"{icon('retry')} [Повторити](kru-retry:last)")  # як у ChatGPT/Gemini: та сама задача ще раз
         self.view.setMarkdown("\n\n".join(parts))
