@@ -24,6 +24,21 @@ COLORS = {
     "hide": "#6E8BB5",
     "show": "#6E8BB5",
     "quit": "#E5484D",
+    # позначки в стрічці чату
+    "user": "#3D8BFD",
+    "tool": "#8A94A6",
+    "memory": "#E9A23B",
+    "delegate": "#14A3A3",
+    "file": "#3D8BFD",
+    "plan": "#2FB36D",
+    "clock": "#E9A23B",
+    "retry": "#3D8BFD",
+    "warn": "#E5484D",
+    "ok": "#2FB36D",
+    "download": "#3D8BFD",
+    "search": "#3D8BFD",
+    "send": "#14A3A3",
+    "link": "#E5484D",
 }
 KINDS = tuple(COLORS)
 
@@ -33,6 +48,30 @@ def menu_icon(kind: str, size: int = 32) -> QIcon:
     for px in (16, 24, size, size * 2):
         icon.addPixmap(_draw(kind, px))
     return icon
+
+
+def feed_image(kind: str, size: int = 15, ratio: float = 2.0):
+    """Іконка для стрічки чату (QImage з потрібною щільністю пікселів — чітка на HiDPI)."""
+    img = _draw(kind, int(size * ratio)).toImage()
+    img.setDevicePixelRatio(ratio)
+    return img
+
+
+_FILES: dict[str, str] = {}
+
+
+def icon_file(kind: str) -> str:
+    """Шлях до PNG іконки (для QLabel із rich text: там картинки — лише з файлів чи ресурсів)."""
+    if kind not in _FILES:
+        import os
+        import tempfile
+
+        folder = os.path.join(tempfile.gettempdir(), f"kru-icons-{os.getuid() if hasattr(os, 'getuid') else 0}")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"{kind}.png")
+        _draw(kind, 30).save(path)
+        _FILES[kind] = path
+    return _FILES[kind]
 
 
 def _ellipse(x: float, y: float, rx: float, ry: float) -> QPainterPath:
@@ -130,6 +169,99 @@ def _draw(kind: str, px: int) -> QPixmap:
         p.setBrush(color)
         p.drawEllipse(QPointF(6.5, 19.5), 1.4, 1.4)
         p.drawEllipse(QPointF(4, 22), 0.9, 0.9)
+    elif kind == "user":  # людина
+        p.drawEllipse(QPointF(12, 8), 4, 4)
+        body = QPainterPath()
+        body.moveTo(4.5, 21)
+        body.cubicTo(4.5, 15, 8, 13.5, 12, 13.5)
+        body.cubicTo(16, 13.5, 19.5, 15, 19.5, 21)
+        body.closeSubpath()
+        p.drawPath(body)
+    elif kind == "tool":  # гайковий ключ
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(5, 19), QPointF(13, 11))
+        head = QPainterPath()
+        head.addEllipse(QPointF(15.5, 8.5), 4.6, 4.6)
+        p.setBrush(fill)
+        p.drawPath(head)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 0))
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        p.drawRect(QRectF(16.2, 3, 4.5, 4.5))  # проріз ключа
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    elif kind == "memory":  # лампочка
+        bulb = QPainterPath()
+        bulb.moveTo(9, 15.5)
+        bulb.cubicTo(5, 12.5, 6, 4, 12, 4)
+        bulb.cubicTo(18, 4, 19, 12.5, 15, 15.5)
+        bulb.lineTo(15, 17)
+        bulb.lineTo(9, 17)
+        bulb.closeSubpath()
+        p.drawPath(bulb)
+        p.drawLine(QPointF(9.5, 20), QPointF(14.5, 20))
+    elif kind == "delegate":  # дві людини
+        for x, r in ((8.5, 3.2), (16, 3.2)):
+            p.drawEllipse(QPointF(x, 8), r, r)
+        for x in (8.5, 16):
+            body = QPainterPath()
+            body.moveTo(x - 5, 20)
+            body.cubicTo(x - 5, 15, x - 2.5, 13.5, x, 13.5)
+            body.cubicTo(x + 2.5, 13.5, x + 5, 15, x + 5, 20)
+            body.closeSubpath()
+            p.drawPath(body)
+    elif kind == "file":  # скріпка
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        clip = QPainterPath()
+        clip.moveTo(15.5, 7)
+        clip.lineTo(8.5, 14)
+        clip.cubicTo(6.5, 16, 9, 18.5, 11, 16.5)
+        clip.lineTo(18.5, 9)
+        clip.cubicTo(21.5, 6, 17, 1.5, 14, 4.5)
+        clip.lineTo(6, 12.5)
+        clip.cubicTo(1.5, 17, 8, 23.5, 12.5, 19)
+        clip.lineTo(18, 13.5)
+        p.drawPath(clip)
+    elif kind == "plan":  # список із галочкою
+        p.drawRoundedRect(QRectF(4, 3, 16, 18), 3, 3)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolyline(QPolygonF([QPointF(7.5, 9), QPointF(9, 10.5), QPointF(11.5, 7.5)]))
+        p.drawLine(QPointF(13.5, 9), QPointF(17, 9))
+        p.drawLine(QPointF(7.5, 15), QPointF(17, 15))
+    elif kind == "clock":  # годинник
+        p.drawEllipse(QPointF(12, 12), 8.5, 8.5)
+        p.drawPolyline(QPolygonF([QPointF(12, 7), QPointF(12, 12), QPointF(15.5, 14)]))
+    elif kind == "retry":  # кругова стрілка
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(4.5, 4.5, 15, 15), 60 * 16, 290 * 16)
+        p.setBrush(color)
+        p.drawPolygon(QPolygonF([QPointF(16, 2.5), QPointF(17.5, 8.5), QPointF(11.5, 7.5)]))
+    elif kind == "warn":  # трикутник зі знаком оклику
+        p.drawPolygon(QPolygonF([QPointF(12, 3.5), QPointF(21, 20), QPointF(3, 20)]))
+        p.drawLine(QPointF(12, 9.5), QPointF(12, 14))
+        p.setBrush(color)
+        p.drawEllipse(QPointF(12, 17), 0.9, 0.9)
+    elif kind == "ok":  # галочка в колі
+        p.drawEllipse(QPointF(12, 12), 8.5, 8.5)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolyline(QPolygonF([QPointF(8, 12.5), QPointF(11, 15.5), QPointF(16.5, 9)]))
+    elif kind == "download":  # стрілка вниз у лоток
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolyline(QPolygonF([QPointF(4, 14), QPointF(4, 20), QPointF(20, 20), QPointF(20, 14)]))
+        p.drawLine(QPointF(12, 3.5), QPointF(12, 15))
+        p.drawPolyline(QPolygonF([QPointF(7.5, 10.5), QPointF(12, 15), QPointF(16.5, 10.5)]))
+    elif kind == "search":  # лупа
+        p.drawEllipse(QPointF(10.5, 10.5), 6, 6)
+        p.drawLine(QPointF(15, 15), QPointF(20.5, 20.5))
+    elif kind == "send":  # паперовий літачок
+        p.drawPolygon(QPolygonF([QPointF(3, 11), QPointF(21, 3.5), QPointF(14, 21), QPointF(11, 13.5)]))
+        p.drawLine(QPointF(11, 13.5), QPointF(21, 3.5))
+    elif kind == "link":  # обірваний зв'язок: антена
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(4, 4, 16, 16), 30 * 16, 120 * 16)
+        p.drawArc(QRectF(8, 8, 8, 8), 30 * 16, 120 * 16)
+        p.setBrush(color)
+        p.drawEllipse(QPointF(12, 15), 1.6, 1.6)
+        p.drawLine(QPointF(5, 21), QPointF(19, 21))
     elif kind == "quit":  # кнопка живлення
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawArc(QRectF(4.5, 5, 15, 15), 125 * 16, 290 * 16)
