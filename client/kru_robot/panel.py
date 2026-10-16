@@ -148,6 +148,41 @@ def make_icon(kind: str, size: int = 18) -> QIcon:
 TASK_SCOPE_TOOLS = {"write_file", "edit_file"}  # що можна дозволити «до кінця задачі»
 
 
+# службові позначки стрічки → намальовані іконки (емодзі залежать від шрифтів системи й не всюди видні)
+LEAD_ICONS = (("↳ 🔧", "tool"), ("🔧", "tool"), ("🧠", "memory"), ("🤝", "delegate"), ("📎", "file"),
+              ("📋", "plan"), ("⏰", "clock"), ("✗", "warn"), ("⚠️", "warn"), ("⚠", "warn"), ("✅", "ok"))
+# рядок стану під стрічкою («💭 Думаю…», «🔧 Працюю…»): перший символ-емодзі → іконка
+ACTIVITY_ICONS = {
+    "💭": "think", "🔧": "tool", "⚙️": "tool", "🧮": "tool", "⏳": "clock", "⏰": "clock", "🕒": "clock",
+    "📡": "link", "🔄": "retry", "↻": "retry", "🗜": "plan", "📋": "plan", "📚": "search", "🔎": "search",
+    "🌐": "search", "📖": "search", "👁": "show", "✏": "rename", "✍️": "rename", "📝": "new", "📂": "chats",
+    "📤": "export", "⬇": "download", "🤝": "delegate", "🧠": "memory", "📎": "file", "✈️": "send",
+}
+
+
+def icon(kind: str) -> str:
+    """Іконка в Markdown стрічки (малюється FeedBrowser.loadResource)."""
+    return f"![{kind}](kru-icon:{kind})"  # без підпису Qt-Markdown картинку відкидає
+
+
+def lead_icon(text: str) -> tuple[str, str]:
+    """«🔧 read_file: …» → (іконка, «read_file: …»); без відомої позначки — ("", текст)."""
+    for mark, kind in LEAD_ICONS:
+        if text.startswith(mark):
+            sub = "↳ " if mark.startswith("↳") else ""
+            return icon(kind) + " " + sub, text[len(mark):].lstrip()
+    return "", text
+
+
+class FeedBrowser(QTextBrowser):
+    def loadResource(self, kind: int, url):  # noqa: N802 — метод Qt
+        if url.scheme() == "kru-icon":
+            from .menuicons import feed_image
+
+            return feed_image(url.path())
+        return super().loadResource(kind, url)
+
+
 class SearchBox(QLineEdit):
     """Поле пошуку чатів: стрілки ↑/↓ гортають список під ним, не забираючи фокус."""
 
@@ -259,7 +294,7 @@ class ChatPanel(QWidget):
         lay.addLayout(head)
 
         # стрічка розмови
-        self.view = QTextBrowser()
+        self.view = FeedBrowser()
         self.view.setOpenLinks(False)  # посилання відкриваємо самі: серед них — кнопки файлів від агента
         self.view.anchorClicked.connect(self._on_link)
         self.files: dict[str, dict] = {}  # кнопки файлів у стрічці: id → {path, name, size, state, saved, error}
@@ -278,6 +313,7 @@ class ChatPanel(QWidget):
         self.plan_steps: list[dict] = []
 
         self.activity = QLabel("", objectName="activity")
+        self.activity.setTextFormat(Qt.TextFormat.RichText)
         self.activity.setWordWrap(True)
         self.activity.hide()
         lay.addWidget(self.activity)
@@ -623,7 +659,7 @@ class ChatPanel(QWidget):
         self.input_row.show()
         self._render()
         self.set_plan(self.plan_steps)
-        self.set_activity(self.activity.text())
+        self.set_activity(getattr(self, "activity_text", ""))
         self.input.setFocus()
         self._fit()
 
@@ -801,7 +837,15 @@ class ChatPanel(QWidget):
         self._fit()
 
     def set_activity(self, text: str) -> None:
-        self.activity.setText(text)
+        self.activity_text = text  # сам текст (у мітці — HTML з іконкою)
+        head, _, rest = text.partition(" ")
+        if head in ACTIVITY_ICONS and rest:  # емодзі на початку → намальована іконка (шрифт тут не потрібен)
+            from .menuicons import icon_file
+
+            img = f'<img src="{icon_file(ACTIVITY_ICONS[head])}" width="15" height="15" style="vertical-align: middle">'
+            self.activity.setText(f"{img}&nbsp;{html.escape(rest)}")
+        else:
+            self.activity.setText(html.escape(text))
         self.activity.setVisible(bool(text) and not self.history_shown)
         self._fit()
 
@@ -865,14 +909,14 @@ class ChatPanel(QWidget):
         size = f" · {human_size(info['size'])}" if info.get("size") is not None else ""
         state = info["state"]
         if state == "loading":
-            action = "⏳ завантажую…"
+            action = f"{icon('clock')} завантажую…"
         elif state == "saved":
             action = f"✓ збережено — [відкрити](kru-open:{fid}) · [теку](kru-folder:{fid})"
         elif state == "error":
-            action = f"⚠ {html.escape(info['error'][:120])} — [ще раз](kru-file:{fid})"
+            action = f"{icon('warn')} {html.escape(info['error'][:120])} — [ще раз](kru-file:{fid})"
         else:
-            action = f"[⬇ Завантажити на ПК](kru-file:{fid})"
-        return f"📎 **{name}**{size} — {action}"
+            action = f"{icon('download')} [Завантажити на ПК](kru-file:{fid})"
+        return f"{icon('file')} **{name}**{size} — {action}"
 
     def append_draft(self, text: str) -> None:
         self.draft += text
@@ -991,7 +1035,7 @@ class ChatPanel(QWidget):
                         ("]", "&#93;"), ("~", "&#126;"), ("|", "&#124;"), ("\\", "&#92;")):
             body = body.replace(ch, ent)  # розмітка Markdown у думках не має спрацьовувати
         body = body.replace("\n", "<br>")
-        return f'<span style="color:#8A94A6; font-style:italic; font-size:small">💭 {body}</span>'
+        return f'{icon("think")} <span style="color:#8A94A6; font-style:italic; font-size:small">{body}</span>'
 
     def set_show_tools(self, show: bool) -> None:
         """Показувати технічні рядки дій агента («🔧 read_file: …»). Файли 📎 і спогади 🧠 видно завжди."""
@@ -1006,11 +1050,15 @@ class ChatPanel(QWidget):
             if role == "tool" and not getattr(self, "show_tools", False) and not text.startswith(("📎", "🧠", "🤝")):
                 continue
             if role == "user":
-                parts.append(f"**🧑 {text}**")
+                mark, body = lead_icon(text)  # «⏰ …» — заплановане завдання
+                lines = body.split("\n")
+                rest = [f"{lead_icon(ln)[0]}{lead_icon(ln)[1]}" if ln.startswith("📎") else ln for ln in lines[1:]]
+                parts.append("  \n".join([f"{mark or icon('user') + ' '}**{lines[0]}**", *rest]))
             elif role == "tool":
-                parts.append(f"<small>{html.escape(text)}</small>")
+                mark, body = lead_icon(text)
+                parts.append(f"{mark}<small>{html.escape(body)}</small>")
             elif role == "error":
-                parts.append(f"⚠️ *{text}*")
+                parts.append(f"{icon('warn')} *{text}*")
             elif role == "file":
                 parts.append(self._file_markdown(text))
             elif role == "thinking":
@@ -1021,7 +1069,7 @@ class ChatPanel(QWidget):
         if self.draft:
             parts.append(self.draft + " ▍")
         elif not getattr(self, "busy", False) and any(role == "user" for role, _ in self.entries):
-            parts.append("[↻ Повторити](kru-retry:last)")  # як у ChatGPT/Gemini: та сама задача ще раз
+            parts.append(f"{icon('retry')} [Повторити](kru-retry:last)")  # як у ChatGPT/Gemini: та сама задача ще раз
         self.view.setMarkdown("\n\n".join(parts))
         visible = bool(parts) and not self.history_shown
         self.view.setVisible(visible)

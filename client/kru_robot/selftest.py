@@ -461,6 +461,30 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     step(50, lambda: check("thinking_toggle", thinking_flow))
+
+    def feed_icons_flow():
+        """Службові позначки стрічки — намальовані іконки, а не емодзі (емодзі залежать від шрифтів системи)."""
+        import re
+
+        win.new_chat()
+        win.panel.set_show_tools(True)
+        win.panel.add_entry("user", "Задача\n📎 uploads/a.txt")
+        for t in ("🔧 read_file: a", "↳ 🔧 web_search: b", "🧠 Запам'ятав: c", "🤝 Доручаю субагенту: d", "✗ x: e"):
+            win.panel.add_entry("tool", t)
+        win.panel.add_entry("error", "помилка")
+        win.panel.add_file("a.pdf", "a.pdf", 10)
+        win.panel.set_activity("💭 Думаю… (крок 2)")
+        win.panel._render()
+        plain = win.panel.view.toPlainText()
+        emoji = re.findall("[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B07\u21BB\u23F3]", plain)
+        need(not emoji, f"емодзі в позначках стрічки: {emoji}")
+        imgs = re.findall(r'src="kru-icon:(\w+)"', win.panel.view.toHtml())
+        need({"user", "tool", "memory", "delegate", "warn", "file", "download"} <= set(imgs), f"іконки: {imgs}")
+        need("<img" in win.panel.activity.text() and "💭" not in win.panel.activity.text(), "рядок стану без іконки")
+        win.new_chat()
+        return sorted(set(imgs))
+
+    step(50, lambda: check("feed_icons", feed_icons_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())
