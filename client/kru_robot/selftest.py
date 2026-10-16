@@ -444,6 +444,15 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             html_text = win.panel.view.toHtml().lower()
             need("#8a94a6" in html_text and "italic" in html_text, "думки не приглушені")
             need(plain.index("Користувач") < plain.index("4"), "думки мають бути перед відповіддю")
+            # довгі міркування на багатьох кроках не роздувають стрічку: давні — одним рядком, останнє — хвіст
+            for step in range(3):
+                win.on_event({"type": "tool_call", "name": "read_file", "args": {}, "summary": "x"})
+                for _ in range(40):
+                    win.on_event({"type": "thinking", "text": f"крок {step}: міркую над перекладом розділу. "})
+            win.panel._render()
+            plain = win.panel.view.toPlainText()
+            need(len(plain) < 1400, f"думки займають забагато місця: {len(plain)} символів")
+            need("крок 2" in plain and plain.count(" …") >= 2, "давні думки не згорнуто")
             win.act_thinking.setChecked(False)
             need("Користувач питає" not in win.panel.view.toPlainText(), "не сховались після вимкнення")
         finally:
