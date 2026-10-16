@@ -405,6 +405,10 @@ class ChatPanel(QWidget):
         self.draft = ""
         self._render_timer = QTimer(self, singleShot=True, interval=60)
         self._render_timer.timeout.connect(self._render)
+        # потік думок іде дуже дрібними шматками: перемальовувати всю стрічку на кожен — забагато
+        # (на KDE/XWayland вікно не встигало домалюватися й лишались чорні порожні області)
+        self._think_timer = QTimer(self, singleShot=True, interval=400)
+        self._think_timer.timeout.connect(self._render)
 
     # ---------------- API ----------------
     # ---------------- поява / зникнення ----------------
@@ -949,7 +953,8 @@ class ChatPanel(QWidget):
         if not self._render_timer.isActive():
             self._render_timer.start()
 
-    THINK_SHOWN = 3000  # з довгого міркування в стрічці видно кінець (найсвіжіше)
+    THINK_SHOWN = 600  # з останнього міркування видно кінець (найсвіжіше); попередні — одним рядком
+    THINK_COLLAPSED = 90
     THINK_KEPT = 20000
 
     def append_thinking(self, text: str) -> None:
@@ -961,8 +966,8 @@ class ChatPanel(QWidget):
             self.entries = self.entries[-60:]
         else:
             return
-        if getattr(self, "show_thinking", False):
-            self._schedule()
+        if getattr(self, "show_thinking", False) and not self._think_timer.isActive():
+            self._think_timer.start()
 
     def set_show_thinking(self, show: bool) -> None:
         """Показувати хід думок моделі в стрічці (приглушено, щоб не сплутати з відповіддю)."""
@@ -970,11 +975,16 @@ class ChatPanel(QWidget):
         self._render()
 
     @classmethod
-    def _thinking_html(cls, text: str) -> str:
+    def _thinking_html(cls, text: str, latest: bool = True) -> str:
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-        body = "\n".join(lines)
-        if len(body) > cls.THINK_SHOWN:
-            body = "…" + body[-cls.THINK_SHOWN:]
+        if latest:
+            body = "\n".join(lines)
+            if len(body) > cls.THINK_SHOWN:
+                body = "…" + body[-cls.THINK_SHOWN:].lstrip()
+        else:  # давніше міркування — коротко, одним рядком
+            body = " ".join(lines)
+            if len(body) > cls.THINK_COLLAPSED:
+                body = body[:cls.THINK_COLLAPSED].rstrip() + " …"
         body = html.escape(body)
         # «#» — першим: решта замін самі містять «#»
         for ch, ent in (("#", "&#35;"), ("*", "&#42;"), ("_", "&#95;"), ("`", "&#96;"), ("[", "&#91;"),
@@ -989,8 +999,10 @@ class ChatPanel(QWidget):
         self._render()
 
     def _render(self) -> None:
+        self._think_timer.stop()
         parts = []
-        for role, text in self.entries:
+        last_think = max((i for i, (role, _) in enumerate(self.entries) if role == "thinking"), default=-1)
+        for i, (role, text) in enumerate(self.entries):
             if role == "tool" and not getattr(self, "show_tools", False) and not text.startswith(("📎", "🧠", "🤝")):
                 continue
             if role == "user":
@@ -1003,7 +1015,7 @@ class ChatPanel(QWidget):
                 parts.append(self._file_markdown(text))
             elif role == "thinking":
                 if getattr(self, "show_thinking", False):
-                    parts.append(self._thinking_html(text))
+                    parts.append(self._thinking_html(text, latest=i == last_think))
             else:
                 parts.append(text)
         if self.draft:
