@@ -50,7 +50,7 @@ def menu_icon(kind: str, size: int = 32) -> QIcon:
     return icon
 
 
-def feed_image(kind: str, size: int = 15, ratio: float = 2.0):
+def feed_image(kind: str, size: int = 15, ratio: float = 2.0):  # noqa: D401
     """Іконка для стрічки чату (QImage з потрібною щільністю пікселів — чітка на HiDPI)."""
     img = _draw(kind, int(size * ratio)).toImage()
     img.setDevicePixelRatio(ratio)

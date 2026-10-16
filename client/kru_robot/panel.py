@@ -175,12 +175,21 @@ def lead_icon(text: str) -> tuple[str, str]:
 
 
 class FeedBrowser(QTextBrowser):
+    zoom = Signal(int)  # Ctrl+колесо: +1 / -1
+    icon_px = 15
+
     def loadResource(self, kind: int, url):  # noqa: N802 — метод Qt
         if url.scheme() == "kru-icon":
             from .menuicons import feed_image
 
-            return feed_image(url.path())
+            return feed_image(url.path(), self.icon_px)
         return super().loadResource(kind, url)
+
+    def wheelEvent(self, e) -> None:  # noqa: N802
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.zoom.emit(1 if e.angleDelta().y() > 0 else -1)
+            return
+        super().wheelEvent(e)
 
 
 class SearchBox(QLineEdit):
@@ -238,6 +247,8 @@ class ChatPanel(QWidget):
     confirm_answered = Signal(str, bool, str)  # id, дозволено, scope ("task" — до кінця задачі)
     file_requested = Signal(str, str)  # (id кнопки, шлях на сервері) — завантажити файл від агента
     retry_requested = Signal()  # «↻ Повторити» під відповіддю — виконати останню задачу заново
+    resized = Signal(int, int)  # (ширина, висота стрічки; 0 — під вміст) — користувач потягнув за край
+    font_changed = Signal(int)  # розмір шрифту чату (Ctrl+колесо, Ctrl+=/−/0)
     closed = Signal()
 
     WIDTH = 408
@@ -251,7 +262,11 @@ class ChatPanel(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet(STYLE)
-        self.setFixedWidth(self.WIDTH)
+        self.panel_width = self.WIDTH  # змінює користувач, тягнучи за край
+        self.feed_height = 0  # висота стрічки, яку задав користувач (0 — під вміст, до 420 px)
+        self.font_px = 13
+        self._drag: dict | None = None
+        self.setFixedWidth(self.panel_width)
         # «хвостик» бульбашки в бік робота та анімація появи
         self._tail_side: str | None = None  # "left" | "right"
         self._tail_y = 0
@@ -265,6 +280,8 @@ class ChatPanel(QWidget):
         # тінь малюємо самі в paintEvent: QGraphicsDropShadowEffect інколи не перемальовував дочірні віджети
         self.card = card
         outer.addWidget(card)
+        card.setMouseTracking(True)
+        card.installEventFilter(self)  # тягнути за край картки — змінити розмір
 
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 12)
@@ -295,6 +312,11 @@ class ChatPanel(QWidget):
 
         # стрічка розмови
         self.view = FeedBrowser()
+        self.view.zoom.connect(lambda d: self.set_font_size(self.font_px + d, user=True))
+        QShortcut(QKeySequence.StandardKey.ZoomIn, self, activated=lambda: self.set_font_size(self.font_px + 1, user=True))
+        QShortcut(QKeySequence("Ctrl+="), self, activated=lambda: self.set_font_size(self.font_px + 1, user=True))
+        QShortcut(QKeySequence.StandardKey.ZoomOut, self, activated=lambda: self.set_font_size(self.font_px - 1, user=True))
+        QShortcut(QKeySequence("Ctrl+0"), self, activated=lambda: self.set_font_size(13, user=True))
         self.view.setOpenLinks(False)  # посилання відкриваємо самі: серед них — кнопки файлів від агента
         self.view.anchorClicked.connect(self._on_link)
         self.files: dict[str, dict] = {}  # кнопки файлів у стрічці: id → {path, name, size, state, saved, error}
@@ -831,7 +853,7 @@ class ChatPanel(QWidget):
             rows.append(f'<span style="color:#8A8F9C">… і ще {hidden_left}</span>')
         self.plan.setText("<br>".join(rows))
         # висота з урахуванням переносу рядків (сам layout її не рахує для QLabel із wordWrap)
-        width = self.WIDTH - 2 * self.MARGIN - 28
+        width = self.panel_width - 2 * self.MARGIN - 28
         self.plan.setFixedHeight(self.plan.heightForWidth(width))
         self.plan.setVisible(not self.history_shown)
         self._fit()
@@ -966,7 +988,7 @@ class ChatPanel(QWidget):
         """Висота поля з кодом: за вмістом, але не більше ~третини екрана (далі — прокрутка)."""
         lines = 0
         fm = self.confirm_text.fontMetrics()
-        width = max(100, self.WIDTH - 2 * self.MARGIN - 60)
+        width = max(100, self.panel_width - 2 * self.MARGIN - 60)
         for line in self.confirm_text.toPlainText().split("\n"):
             lines += max(1, -(-fm.horizontalAdvance(line) // width))  # з урахуванням переносу рядків
         content = lines * fm.lineSpacing() + 26  # + рамка й внутрішні відступи поля
@@ -1037,6 +1059,95 @@ class ChatPanel(QWidget):
         body = body.replace("\n", "<br>")
         return f'{icon("think")} <span style="color:#8A94A6; font-style:italic; font-size:small">{body}</span>'
 
+    FONT_MIN, FONT_MAX = 10, 24
+    WIDTH_MIN = 340
+    FEED_MIN = 120
+    EDGE = 7  # px від краю картки, за які можна тягнути
+
+    def set_font_size(self, px: int, user: bool = False) -> None:
+        """Розмір шрифту стрічки й поля вводу; іконки стрічки — під нього."""
+        px = max(self.FONT_MIN, min(self.FONT_MAX, int(px)))
+        if px == self.font_px and not user:
+            return
+        changed = px != self.font_px
+        self.font_px = px
+        self.setStyleSheet(STYLE.replace("color: #1D2740; font-size: 13px; }", f"color: #1D2740; font-size: {px}px; }}"))
+        self.view.icon_px = px + 2
+        self._render()
+        if user and changed:
+            self.set_activity(f"Розмір шрифту: {px}")
+            self.font_changed.emit(px)
+
+    def set_panel_size(self, width: int, feed_height: int) -> None:
+        geo = (self.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+        self.panel_width = max(self.WIDTH_MIN, min(int(width) or self.WIDTH, geo.width() - 40))
+        self.feed_height = 0 if not feed_height else max(self.FEED_MIN, min(int(feed_height),
+                                                                              int(geo.height() * 0.85)))
+        self.setFixedWidth(self.panel_width)
+        self.set_plan(self.plan_steps)
+        self._render()
+
+    def _edge_at(self, pos) -> str:
+        """Який край картки під курсором: комбінація l/r/t/b або ""."""
+        r = self.card.rect()
+        e = self.EDGE
+        side = ""
+        if pos.x() <= e:
+            side += "l"
+        elif pos.x() >= r.width() - e:
+            side += "r"
+        if pos.y() <= e:
+            side += "t"
+        elif pos.y() >= r.height() - e:
+            side += "b"
+        return side
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802
+        from PySide6.QtCore import QEvent
+
+        if obj is not self.card:
+            return super().eventFilter(obj, ev)
+        t = ev.type()
+        if t == QEvent.Type.MouseMove and self._drag is None:
+            side = self._edge_at(ev.position().toPoint())
+            cursors = {"l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
+                       "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
+                       "lt": Qt.CursorShape.SizeFDiagCursor, "rb": Qt.CursorShape.SizeFDiagCursor,
+                       "rt": Qt.CursorShape.SizeBDiagCursor, "lb": Qt.CursorShape.SizeBDiagCursor}
+            if side:
+                self.card.setCursor(cursors[side])
+            else:
+                self.card.unsetCursor()
+        elif t == QEvent.Type.MouseButtonDblClick and self._edge_at(ev.position().toPoint()):
+            self.set_panel_size(self.WIDTH, 0)  # подвійний клік по краю — стандартний розмір
+            self.resized.emit(self.panel_width, self.feed_height)
+            return True
+        elif t == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
+            side = self._edge_at(ev.position().toPoint())
+            if side:
+                self._drag = {"side": side, "start": ev.globalPosition().toPoint(), "w": self.panel_width,
+                              "h": self.feed_height or (self.view.height() if self.view.isVisible() else 200)}
+                return True
+        elif t == QEvent.Type.MouseMove and self._drag is not None:
+            d, pos = self._drag, ev.globalPosition().toPoint()
+            dx, dy = pos.x() - d["start"].x(), pos.y() - d["start"].y()
+            w, h = d["w"], d["h"]
+            if "l" in d["side"]:
+                w -= dx
+            elif "r" in d["side"]:
+                w += dx
+            if "t" in d["side"]:
+                h -= dy
+            elif "b" in d["side"]:
+                h += dy
+            self.set_panel_size(w, h if ("t" in d["side"] or "b" in d["side"]) else self.feed_height)
+            return True
+        elif t == QEvent.Type.MouseButtonRelease and self._drag is not None:
+            self._drag = None
+            self.resized.emit(self.panel_width, self.feed_height)
+            return True
+        return super().eventFilter(obj, ev)
+
     def set_show_tools(self, show: bool) -> None:
         """Показувати технічні рядки дій агента («🔧 read_file: …»). Файли 📎 і спогади 🧠 видно завжди."""
         self.show_tools = show
@@ -1076,13 +1187,17 @@ class ChatPanel(QWidget):
         if visible:
             doc = self.view.document()
             # ширина тексту = ширина картки мінус відступи й вертикальна прокрутка — щоб не було горизонтальної
-            doc.setTextWidth(self.WIDTH - 2 * self.MARGIN - 28 - 18)
+            doc.setTextWidth(self.panel_width - 2 * self.MARGIN - 28 - 18)
             doc_h = int(doc.size().height()) + 12
             # коли відкритий запит/підтвердження — стрічка нижча, щоб усе вмістилося на екрані
-            cap = 420
+            cap = self.feed_height or 420
             if self.ask_box.isVisible() or self.confirm_box.isVisible():
                 cap = max(60, min(240, int(self._screen_height() * 0.2)))
-            self.view.setFixedHeight(max(40, min(cap, doc_h)))
+                self.view.setFixedHeight(max(40, min(cap, doc_h)))
+            elif self.feed_height:  # розмір задав користувач — стрічка саме такої висоти
+                self.view.setFixedHeight(cap)
+            else:
+                self.view.setFixedHeight(max(40, min(cap, doc_h)))
             sb = self.view.verticalScrollBar()
             sb.setValue(sb.maximum())
         self._fit()

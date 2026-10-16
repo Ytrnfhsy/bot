@@ -485,6 +485,51 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return sorted(set(imgs))
 
     step(50, lambda: check("feed_icons", feed_icons_flow))
+
+    def resize_font_flow():
+        """Тягнути вікно чату за край і міняти шрифт: усе запам'ятовується; подвійний клік — як було."""
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+
+        panel, card = win.panel, win.panel.card
+
+        def mouse(kind, local, glob):
+            btn = Qt.MouseButton.LeftButton
+            ev = QMouseEvent(kind, QPointF(local), QPointF(glob), btn,
+                             btn if kind != QEvent.Type.MouseButtonRelease else Qt.MouseButton.NoButton,
+                             Qt.KeyboardModifier.NoModifier)
+            QApplication.sendEvent(card, ev)
+
+        def drag(local, dx, dy):
+            g = card.mapToGlobal(local)
+            mouse(QEvent.Type.MouseButtonPress, local, g)
+            mouse(QEvent.Type.MouseMove, local, g + QPoint(dx, dy))
+            mouse(QEvent.Type.MouseButtonRelease, local, g + QPoint(dx, dy))
+
+        from PySide6.QtCore import QPoint
+
+        win.new_chat()
+        panel.add_entry("user", "привіт")
+        panel.add_entry("assistant", "Відповідь")
+        panel._render()
+        w0 = panel.panel_width
+        drag(QPoint(card.width() - 2, card.height() // 2), 80, 0)  # правий край — ширше
+        need(panel.panel_width == w0 + 80 and win.settings.panel_width == w0 + 80, f"ширина {panel.panel_width}")
+        need(panel.width() == w0 + 80, "вікно не змінило ширину")
+        drag(QPoint(card.width() // 2, card.height() - 2), 0, 150)  # нижній край — вища стрічка
+        need(win.settings.panel_feed_height > 0 and panel.view.height() == panel.feed_height,
+             f"висота стрічки {panel.view.height()} / {panel.feed_height}")
+        panel.set_font_size(18, user=True)
+        need(win.settings.font_size == 18 and panel.view.icon_px == 20, "шрифт не застосовано")
+        need("18px" in panel.styleSheet(), "стиль без нового розміру шрифту")
+        mouse(QEvent.Type.MouseButtonDblClick, QPoint(card.width() - 2, 40), card.mapToGlobal(QPoint(card.width() - 2, 40)))
+        need(panel.panel_width == panel.WIDTH and panel.feed_height == 0 and win.settings.panel_feed_height == 0,
+             "подвійний клік не повернув розмір")
+        panel.set_font_size(13, user=True)
+        win.new_chat()
+        return {"font": win.settings.font_size, "width": win.settings.panel_width}
+
+    step(50, lambda: check("resize_font", resize_font_flow))
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())

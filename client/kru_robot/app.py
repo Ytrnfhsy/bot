@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QSpinBox,
     QFormLayout,
     QLineEdit,
     QMenu,
@@ -55,7 +56,9 @@ class SettingsDialog(QDialog):
         self.thinking.setChecked(s.show_thinking)
         self.thinking.setEnabled(s.think)  # без міркувань показувати нічого
         self.think.toggled.connect(self.thinking.setEnabled)
-        self.tools = QCheckBox("Показувати дії агента (🔧 read_file, web_search…)")
+        self.font_px = QSpinBox(minimum=10, maximum=24, value=s.font_size, suffix=" px")
+        self.font_px.setToolTip("Шрифт стрічки чату й поля вводу. Швидко: Ctrl + колесо миші над чатом, Ctrl+= / Ctrl+− / Ctrl+0")
+        self.tools = QCheckBox("Показувати дії агента (read_file, web_search…)")
         self.tools.setChecked(s.show_tools)
         self.auto_files = QCheckBox("Запис файлів у робочій теці — без запиту (старі версії → .kru-backup)")
         self.auto_files.setToolTip(
@@ -68,6 +71,7 @@ class SettingsDialog(QDialog):
         form.addRow("Токен:", self.token)
         form.addRow("Персонаж:", self.character)
         form.addRow("Розмір:", self.scale)
+        form.addRow("Шрифт чату:", self.font_px)
         form.addRow("", self.think)
         form.addRow("", self.thinking)
         form.addRow("", self.tools)
@@ -143,6 +147,8 @@ class RobotWindow(QWidget):
         self.panel = ChatPanel()
         self.panel.show_tools = settings.show_tools
         self.panel.show_thinking = settings.show_thinking
+        self.panel.set_font_size(settings.font_size)
+        self.panel.set_panel_size(settings.panel_width, settings.panel_feed_height)
         self.conn = AgentConnection(settings.server_url, settings.token, self)
         self.busy = False
         self.last_activity = time.monotonic()
@@ -167,6 +173,8 @@ class RobotWindow(QWidget):
         self.panel.confirm_answered.connect(self.answer_confirm)
         self.panel.file_requested.connect(self.download_file)
         self.panel.retry_requested.connect(self.retry_task)
+        self.panel.resized.connect(self._on_panel_resized)
+        self.panel.font_changed.connect(self._on_font_changed)
         self.conn.event.connect(self.on_event)
         self.conn.connected.connect(self.on_connected)
         self.conn.disconnected.connect(self.on_disconnected)
@@ -328,6 +336,8 @@ class RobotWindow(QWidget):
         self.set_show_thinking(dlg.thinking.isChecked())
         s.show_tools = dlg.tools.isChecked()
         s.auto_files = dlg.auto_files.isChecked()
+        s.font_size = dlg.font_px.value()
+        self.panel.set_font_size(s.font_size)
         self.panel.set_show_tools(s.show_tools)
         if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
             set_autostart(dlg.autostart.isChecked())
@@ -377,6 +387,16 @@ class RobotWindow(QWidget):
         self.busy = True
         self.panel.set_busy(True)
         self.robot.set_state("thinking")
+
+    def _on_panel_resized(self, width: int, feed_height: int) -> None:
+        self.settings.panel_width, self.settings.panel_feed_height = width, feed_height
+        self.settings.save()
+        QTimer.singleShot(0, self.position_panel)
+
+    def _on_font_changed(self, px: int) -> None:
+        self.settings.font_size = px
+        self.settings.save()
+        QTimer.singleShot(0, self.position_panel)
 
     def retry_task(self) -> None:
         """«↻ Повторити»: сервер прибирає попередню спробу з чату й виконує останню задачу заново."""
