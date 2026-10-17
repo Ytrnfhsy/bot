@@ -39,6 +39,8 @@ COLORS = {
     "search": "#3D8BFD",
     "send": "#14A3A3",
     "link": "#E5484D",
+    "mic": "#E2558E",
+    "speaker": "#14A3A3",
 }
 KINDS = tuple(COLORS)
 
@@ -262,6 +264,18 @@ def _draw(kind: str, px: int) -> QPixmap:
         p.setBrush(color)
         p.drawEllipse(QPointF(12, 15), 1.6, 1.6)
         p.drawLine(QPointF(5, 21), QPointF(19, 21))
+    elif kind == "mic":  # мікрофон
+        p.drawRoundedRect(QRectF(8.5, 2.5, 7, 12), 3.5, 3.5)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(5, 5.5, 14, 12.5), 200 * 16, 140 * 16)
+        p.drawLine(QPointF(12, 18), QPointF(12, 21))
+        p.drawLine(QPointF(8.5, 21), QPointF(15.5, 21))
+    elif kind == "speaker":  # гучномовець із хвилями
+        p.drawPolygon(QPolygonF([QPointF(3.5, 9), QPointF(7.5, 9), QPointF(12.5, 4.5), QPointF(12.5, 19.5),
+                                 QPointF(7.5, 15), QPointF(3.5, 15)]))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(10, 8, 7, 8), -50 * 16, 100 * 16)
+        p.drawArc(QRectF(10, 4.5, 11, 15), -50 * 16, 100 * 16)
     elif kind == "quit":  # кнопка живлення
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawArc(QRectF(4.5, 5, 15, 15), 125 * 16, 290 * 16)

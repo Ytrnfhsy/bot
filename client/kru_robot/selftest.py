@@ -550,6 +550,135 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     step(50, lambda: check("draft_visible", draft_visible_flow))
+
+    def audio_helpers():
+        import array
+        import struct
+
+        from .audio import envelope, make_wav, peak, to_mono16
+
+        stereo = struct.pack("<4f", 0.5, -1.0, -0.25, 1.0)  # 2 кадри × 2 канали, float32
+        mono = array.array("h", to_mono16(stereo, "Float", 2))
+        need(list(mono) == [16383, -8191], f"float→int16: {list(mono)}")
+        need(len(to_mono16(bytes([128, 255]), "UInt8", 1)) == 4, "uint8")
+        loud = array.array("h", [0] * 1600 + [20000, -20000] * 800).tobytes()  # 0,1 с тиші, 0,1 с звуку
+        levels, ms = envelope(make_wav(loud, 16000))
+        need(ms == 40 and levels[0] < 0.05 and max(levels) > 0.9, f"обвідна: {levels}")
+        need(peak(array.array("h", [0, 32767]).tobytes()) > 0.9 and peak(b"") == 0.0, "пік")
+        return f"{len(levels)} кадрів"
+
+    check("audio_helpers", audio_helpers)
+
+    def mic_graceful():
+        """Справжній мікрофон: на машині без нього (CI) — зрозуміла помилка, а не падіння."""
+        from .audio import Recorder
+
+        rec = Recorder()
+        errors: list[str] = []
+        rec.failed.connect(errors.append)
+        ok = rec.start()
+        rec.stop(send=False)
+        need(ok or errors, "ні запису, ні пояснення")
+        return "записує" if ok else errors[0]
+
+    def voice_hold_start():
+        """Утримання персонажа → «слухаю»; відпустив → запис іде на сервер, сказане стає задачею."""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+
+        from .audio import Recorder, make_wav
+
+        class FakeRecorder(Recorder):
+            on = False
+
+            @property
+            def active(self):
+                return self.on
+
+            def start(self):
+                self.on, self.level = True, 0.6
+                return True
+
+            def stop(self, send=True):
+                self.on, self.level = False, 0.0
+                self.finished.emit(make_wav(b"\0\0" * 16000, 16000))
+
+        win.new_chat()
+        win._set_voice_caps(None)  # сервер без голосу — утримання працює як звичайний клік
+        need(not win.robot.hold_enabled and win.panel.btn_mic.isHidden(), "голос увімкнено без сервера")
+        state["voice_sent"] = sent = []
+        state["voice_orig"] = (win.conn.send, win.recorder, win.player.play)
+        win.conn.send = lambda msg: sent.append(msg) or True
+        win.recorder = FakeRecorder(win)
+        win.recorder.finished.connect(win._on_recorded)
+        win.recorder.failed.connect(win._on_record_failed)
+        win.settings.voice_reply = "voice"
+        win._set_voice_caps({"stt": True, "tts": True})
+        need(win.robot.hold_enabled and not win.panel.btn_mic.isHidden(), "кнопки мікрофона немає")
+        win.busy = False
+        win.robot.set_state("idle")
+        center = QPoint(win.robot.width() // 2, win.robot.height() // 2)
+        QTest.mousePress(win.robot, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center)
+        return "ok"
+
+    def voice_hold_release():
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+
+        from .audio import make_wav
+
+        sent = state["voice_sent"]
+        need(win.robot.state == "listening", f"стан: {win.robot.state}")
+        need(win.panel.btn_mic.property("recording") is True, "кнопка не показує запис")
+        need(win.robot.voice_level > 0, "персонаж не чує гучності")
+        center = QPoint(win.robot.width() // 2, win.robot.height() // 2)
+        QTest.mouseRelease(win.robot, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center)
+        vin = next((m for m in sent if m.get("type") == "voice_in"), None)
+        need(vin is not None and len(vin["data"]) > 1000, f"запис не надіслано: {[m.get('type') for m in sent]}")
+        need(win.robot.state == "thinking" and win.panel.shown is not None, f"стан: {win.robot.state}")
+        win.on_event({"type": "voice_text", "id": vin["id"], "text": "яка погода в Києві"})
+        task = next((m for m in sent if m.get("type") == "task"), None)
+        need(task and task["text"] == "яка погода в Києві", f"задача: {task}")
+        win.on_event({"type": "final", "text": "У Києві **сонячно**."})
+        win.on_event({"type": "status", "state": "idle"})
+        tts = next((m for m in sent if m.get("type") == "tts"), None)
+        need(tts and "сонячно" in tts["text"], f"озвучення не попрошено: {tts}")
+        played = []
+
+        def fake_play(wav, volume=1.0):
+            played.append(volume)
+            win.player.playing = True
+            return True
+
+        win.player.play = fake_play
+        wav = make_wav(b"\0\0" * 8000, 16000)
+        import base64
+
+        win.on_event({"type": "tts_audio", "id": tts["id"], "format": "wav", "data": base64.b64encode(wav).decode()})
+        need(played and win.robot.state == "talking", f"не говорить: {win.robot.state}")
+        win.player.stop()
+        need(win.robot.state == "happy", f"після озвучення: {win.robot.state}")
+        # текстова задача — без озвучення (режим «коли питаю голосом»)
+        sent.clear()
+        win.send_task("а завтра?")
+        win.on_event({"type": "final", "text": "Дощ."})
+        win.on_event({"type": "status", "state": "idle"})
+        need(not any(m.get("type") == "tts" for m in sent), "озвучено текстову відповідь")
+        return "ok"
+
+    def voice_cleanup():
+        send, rec, play = state.pop("voice_orig")
+        win.conn.send, win.recorder = send, rec
+        win.player.play = play
+        win._set_voice_caps(None)
+        win.busy = False
+        win.panel.set_busy(False)
+        win.new_chat()
+
+    step(50, lambda: check("mic_graceful", mic_graceful))
+    step(50, lambda: check("voice_hold", voice_hold_start))
+    step(700, lambda: check("voice_roundtrip", voice_hold_release))
+    step(50, voice_cleanup)
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
     step(50, lambda: win.on_robot_clicked())

@@ -73,7 +73,14 @@ class DogWidget(RobotWidget):
             return 14 + 4 * math.sin(self.t * 5 + side)
         if st == "thinking":
             return 45 if side > 0 else 2  # одне вушко вгору
-        return {"happy": 26, "sad": -14, "sleeping": 50, "offline": 50, "waiting": 8, "talking": 8,
+        if st == "listening":  # насторожив вушка й ловить кожне слово
+            return 26 + 4 * math.sin(self.t * 7 + side) + 12 * self._level
+        if st == "talking":  # «говорить» вухами: махають у такт голосу
+            lv = self._level
+            if lv > 0.02:
+                return 6 + 34 * lv + 6 * math.sin(self.t * 11 + side * 1.4)
+            return 8 + 5 * math.sin(self.t * 6 + side)
+        return {"happy": 26, "sad": -14, "sleeping": 50, "offline": 50, "waiting": 8,
                 "working": 0}.get(st, 4)
 
     def _tick(self) -> None:
@@ -81,7 +88,7 @@ class DogWidget(RobotWidget):
         dt = 1 / 60
         st, face = self._look()
         # хвіст: частота виляння залежить від настрою
-        freq = {"happy": 14, "talking": 6, "working": 8, "waiting": 5, "thinking": 1.5,
+        freq = {"happy": 14, "talking": 6, "listening": 4, "working": 8, "waiting": 5, "thinking": 1.5,
                 "sad": 1.0, "sleeping": 0.6, "offline": 0.0}.get(st, 3.0)
         if face in ("purr", "drop"):
             freq = 15
@@ -333,7 +340,7 @@ class DogWidget(RobotWidget):
     def _draw_eyes(self, p: QPainter, grey: bool, st: str, face: str, t: float) -> None:
         eye = _grey(EYE, grey)
         kind = {"happy": "happy", "sad": "sad", "sleeping": "closed", "offline": "dots",
-                "waiting": "big", "working": "down"}.get(st, "open")
+                "waiting": "big", "listening": "big", "working": "down"}.get(st, "open")
         if face in ("purr",):
             kind = "happy"
         elif face == "drop":
@@ -413,7 +420,9 @@ class DogWidget(RobotWidget):
             m.quadTo(5, 25, 10, 19)
             p.drawPath(m)
         elif mouth in ("talk", "tongue"):
-            if mouth == "talk":
+            if mouth == "talk" and self._level > 0.02:  # озвучує відповідь — у такт голосу
+                depth = 20 + 16 * self._level
+            elif mouth == "talk":
                 depth = 21 + 12 * abs(math.sin(t * 9)) * (0.6 + 0.4 * math.sin(t * 2.3))
             else:
                 depth = 29
@@ -496,6 +505,8 @@ class DogWidget(RobotWidget):
                 c.setAlphaF(1 - phase)
                 p.setPen(c)
                 p.drawText(QPointF(146 + phase * 26 + i * 2, 130 - phase * 40), "z")
+        elif st == "listening":
+            self._draw_sound_waves(p, QPointF(100, 16 + bob), QColor("#E2558E"), t, spread=6)  # над головою
         elif st == "offline":
             p.setFont(QFont("Sans", 14, QFont.Weight.Bold))
             p.setPen(QColor("#9CA3AF"))

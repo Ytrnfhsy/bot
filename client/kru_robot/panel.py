@@ -53,6 +53,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .menuicons import menu_icon
+
 STYLE = """
 #card { background: rgba(250, 252, 255, 245); border: 1px solid #C9D6E8; border-radius: 18px; }
 QLabel#status { color: #5B6B82; font-size: 11px; }
@@ -72,6 +74,9 @@ QPushButton { border: none; border-radius: 12px; padding: 6px 12px; font-weight:
 QPushButton#send { background: #4FD1FF; color: #0E1426; }
 QPushButton#send:hover { background: #7BDDFF; }
 QPushButton#stop { background: #FFE1E1; color: #C92A2A; }
+QPushButton#mic { background: #FDE7F0; border-radius: 12px; padding: 4px; }
+QPushButton#mic:hover { background: #FBD3E3; }
+QPushButton#mic[recording="true"] { background: #E2558E; }
 QPushButton#flat { background: transparent; color: #5B6B82; padding: 0; border-radius: 8px; }
 QPushButton#flat:hover { background: #E7EEF8; }
 QPushButton#flat:pressed { background: #D5E2F2; }
@@ -255,6 +260,7 @@ class ChatPanel(QWidget):
     retry_requested = Signal()  # «↻ Повторити» під відповіддю — виконати останню задачу заново
     resized = Signal(int, int)  # (ширина, висота стрічки; 0 — під вміст) — користувач потягнув за край
     font_changed = Signal(int)  # розмір шрифту чату (Ctrl+колесо, Ctrl+=/−/0)
+    mic_toggled = Signal()  # кнопка мікрофона: почати / закінчити запис голосом
     closed = Signal()
 
     WIDTH = 408
@@ -459,8 +465,16 @@ class ChatPanel(QWidget):
         self.btn_stop = QPushButton("■", objectName="stop", toolTip="Зупинити")
         self.btn_stop.clicked.connect(self.cancel_requested)
         self.btn_stop.hide()
+        self.btn_mic = QPushButton(objectName="mic", toolTip="Сказати голосом: натисни, говори, натисни ще раз "
+                                                             "(або просто утримуй персонажа)")
+        self.btn_mic.setIcon(menu_icon("mic"))
+        self.btn_mic.setIconSize(QSize(18, 18))
+        self.btn_mic.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mic.clicked.connect(self.mic_toggled)
+        self.btn_mic.hide()  # з'являється, коли сервер уміє розпізнавати мовлення
         btns.addWidget(self.btn_send)
         btns.addWidget(self.btn_stop)
+        btns.addWidget(self.btn_mic)
         row.addLayout(btns)
         lay.addWidget(self.input_row)
 
@@ -798,6 +812,16 @@ class ChatPanel(QWidget):
         cur.movePosition(cur.MoveOperation.End)
         self.input.setTextCursor(cur)
         self.input.setFocus()
+
+    def set_voice(self, available: bool) -> None:
+        self.btn_mic.setVisible(available)
+
+    def set_recording(self, on: bool) -> None:
+        self.btn_mic.setProperty("recording", on)
+        self.btn_mic.setIcon(menu_icon("stop" if on else "mic"))
+        self.btn_mic.setToolTip("Закінчити й надіслати" if on else "Сказати голосом")
+        self.btn_mic.style().unpolish(self.btn_mic)
+        self.btn_mic.style().polish(self.btn_mic)
 
     def set_busy(self, busy: bool) -> None:
         self.btn_stop.setVisible(busy)

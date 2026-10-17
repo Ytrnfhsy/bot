@@ -19,6 +19,7 @@ from .telegram import TelegramBot, TelegramError
 from .tools import ToolError
 from .tools.files import shared_file
 from .users import workspace_for
+from .voice import VoiceError
 
 log = logging.getLogger("kru.telegram")
 
@@ -34,7 +35,7 @@ ACTIVITY = {
 }
 HELP = (
     "Я {name} — твій агент. Просто пиши задачу, як у персонажі на ПК: знайти, порахувати, перекласти, "
-    "нагадати…\n\nФото й файли теж можна надсилати.\n\n/new — новий чат\n/stop — зупинити задачу\n/retry — виконати останню задачу заново\n/help — довідка"
+    "нагадати…\n\nФото, файли й голосові теж можна надсилати.\n\n/new — новий чат\n/stop — зупинити задачу\n/retry — виконати останню задачу заново\n/help — довідка"
 )
 
 
@@ -190,6 +191,14 @@ class TelegramGateway:
                 return await self.bot.send(chat_id, "⏹ Зупиняю задачу.")
             return await self.bot.send(chat_id, "Зараз нічого не виконується.")
 
+        if voice := msg.get("voice") or msg.get("audio"):
+            if self.hub.get(owner):
+                return await self.bot.send(chat_id, "⏳ Зараз виконую іншу задачу. Зачекай або надішли /stop.")
+            heard = await self._hear(chat_id, voice)
+            if not heard:
+                return
+            text = (text + "\n" + heard).strip() if text else heard
+
         retry = cmd == "/retry"
         if retry:
             text = "/retry"  # сам текст задачі агент візьме з чату
@@ -249,6 +258,24 @@ class TelegramGateway:
             except TelegramError:
                 pass
             await asyncio.sleep(4.5)
+
+    async def _hear(self, chat_id: str, voice: dict[str, Any]) -> str:
+        """Голосове повідомлення → текст (faster-whisper на сервері); показуємо, що почули."""
+        if not self.agent.voice.stt_ok:
+            await self.bot.send(chat_id, "🎤 Голосові повідомлення ще не підключено на сервері "
+                                         "(deploy/voice.sh install). Напиши, будь ласка, текстом.")
+            return ""
+        try:
+            data, _ = await self.bot.download(voice["file_id"])
+            heard = await self.agent.voice.transcribe(data)
+        except (TelegramError, VoiceError) as e:
+            await self.bot.send(chat_id, f"⚠️ Не вдалося розпізнати голосове: {e}")
+            return ""
+        if not heard:
+            await self.bot.send(chat_id, "🎤 Не почув слів — спробуй ще раз.")
+            return ""
+        await self.bot.send(chat_id, f"🎤 «{heard}»")
+        return heard
 
     async def _save_files(self, msg: dict[str, Any], user) -> list[str]:
         """Фото/документи з повідомлення → <тека користувача>/uploads/; повертає відносні шляхи."""

@@ -17,13 +17,16 @@
   {"type": "chat_list"} | {"type": "chat_open", "id"} | {"type": "chat_delete", "id"}
   {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
   {"type": "chat_search", "query": "відпустка море"}  — пошук за назвою й текстом розмов
+  {"type": "voice_in", "id": "...", "data": "<base64 WAV/OGG>"}  — розпізнати сказане (faster-whisper)
+  {"type": "tts", "id": "...", "text": "..."}  — озвучити відповідь (Piper)
   {"type": "ping"}
 
 Задача не скасовується, коли з'єднання рветься: вона доробляється на сервері, а після перепідключення
 клієнт відкриває чат (chat_open) і знову отримує її події та непідтверджені запити.
 
 Сервер → клієнт:
-  {"type": "hello", "name": "Kru", "model": ..., "version": ..., "user": "owner", "role": "admin"}
+  {"type": "hello", "name": "Kru", "model": ..., "version": ..., "user": "owner", "role": "admin",
+   "voice": {"stt": bool, "tts": bool}}
   {"type": "status", "state": "thinking|working|waiting_confirm|idle", ...}
   {"type": "thinking", "text": "..."}         — потік міркувань моделі
   {"type": "token", "text": "..."}            — потік тексту відповіді (чернетка)
@@ -43,6 +46,8 @@
   {"type": "chat_export", "title", "markdown"}
   {"type": "chat_search", "query", "chats": [{id, title, count, created_at, updated_at, snippet}]}
   {"type": "chat_error", "message"}
+  {"type": "voice_text", "id", "text"} | {"type": "voice_error", "id", "message"}
+  {"type": "tts_audio", "id", "format": "wav", "data": "<base64>"} | {"type": "tts_error", "id", "message"}
   {"type": "error", "message": "..."}
   {"type": "pong"}
 """
@@ -69,6 +74,7 @@ from .scheduler import Scheduler
 from .tools import ToolError
 from .tools.files import shared_file
 from .users import User, UserStore, workspace_for
+from .voice import MAX_AUDIO, VoiceError
 
 log = logging.getLogger("kru.server")
 
@@ -249,6 +255,7 @@ class Connection:
         self.hub = hub or TaskHub()
         self._send_lock = asyncio.Lock()
         self.closed = False
+        self._bg: set[asyncio.Task] = set()
 
     async def send(self, ev: dict[str, Any]) -> None:
         if self.closed:
@@ -320,6 +327,33 @@ class Connection:
         await self.send({"type": "file_data", "id": fid, "path": shown, "name": p.name, "size": len(data),
                          "data": base64.b64encode(data).decode("ascii")})
 
+    async def _voice(self, kind: str, msg: dict[str, Any]) -> None:
+        """Голос: запис з мікрофона → текст (voice_in) або текст відповіді → WAV (tts)."""
+        vid, voice = msg.get("id"), self.agent.voice
+        if kind == "tts":
+            try:
+                audio = await voice.speak(str(msg.get("text") or ""))
+            except VoiceError as e:
+                await self.send({"type": "tts_error", "id": vid, "message": str(e)})
+                return
+            await self.send({"type": "tts_audio", "id": vid, "format": "wav",
+                             "data": base64.b64encode(audio).decode("ascii")})
+            return
+        try:
+            raw = str(msg.get("data", ""))
+            if len(raw) > MAX_AUDIO * 4 // 3 + 4:
+                raise VoiceError("Запис задовгий")
+            data = base64.b64decode(raw, validate=True)
+            text = await voice.transcribe(data)
+        except (binascii.Error, ValueError):
+            await self.send({"type": "voice_error", "id": vid, "message": "пошкоджений запис"})
+            return
+        except VoiceError as e:
+            await self.send({"type": "voice_error", "id": vid, "message": str(e)})
+            return
+        log.info("Розпізнано голос: %d символів", len(text))
+        await self.send({"type": "voice_text", "id": vid, "text": text})
+
     async def _chats(self, kind: str, msg: dict[str, Any]) -> None:
         """Чати (зберігаються автоматично): список / відкрити / перейменувати / видалити / експорт."""
         ag, owner = self.agent, self.user.name
@@ -355,7 +389,8 @@ class Connection:
         cfg = self.agent.config
         vision = await self.agent.refresh_vision(force=True)
         await self.send({"type": "hello", "name": cfg.agent_name, "model": cfg.model, "version": __version__,
-                         "vision": vision, "user": self.user.name, "role": self.user.role})
+                         "vision": vision, "user": self.user.name, "role": self.user.role,
+                         "voice": self.agent.voice.caps()})
         self.hub.connections.setdefault(self.user.name, set()).add(self)
         if (rt := self.hub.get(self.user.name)) and rt.scheduled:
             await rt.attach(self)  # заплановане завдання може чекати на дозвіл
@@ -398,6 +433,11 @@ class Connection:
                     await self._save_upload(msg)
                 elif kind == "file_get":
                     await self._send_file(msg)
+                elif kind in {"voice_in", "tts"}:
+                    # розпізнавання/озвучення — секунди роботи CPU: не блокуємо решту повідомлень
+                    task = asyncio.create_task(self._voice(kind, msg))
+                    self._bg.add(task)
+                    task.add_done_callback(self._bg.discard)
                 elif kind == "ping":
                     await self.send({"type": "pong"})
         except WebSocketDisconnect:

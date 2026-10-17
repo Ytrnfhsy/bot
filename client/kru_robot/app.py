@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import sys
 import time
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .audio import Player, Recorder
 from .connection import AgentConnection, normalize_url
 from .characters import CHARACTERS, make_character
 from .icon import app_icon
@@ -67,11 +69,20 @@ class SettingsDialog(QDialog):
             "Команди shell і Python, як і раніше, просять дозволу."
         )
         self.auto_files.setChecked(s.auto_files)
+        self.voice_reply = QComboBox()
+        for key, title in VOICE_REPLY.items():
+            self.voice_reply.addItem(title, key)
+        self.voice_reply.setCurrentIndex(max(0, self.voice_reply.findData(s.voice_reply)))
+        self.voice_reply.setToolTip("Голосом питаєш — утримуй персонажа й говори (або кнопка мікрофона в чаті).\n"
+                                    "Потрібно встановити голос на сервері: deploy/voice.sh install")
+        self.voice_volume = QSpinBox(minimum=0, maximum=100, value=s.voice_volume, suffix=" %")
         form.addRow("Сервер (WebSocket):", self.url)
         form.addRow("Токен:", self.token)
         form.addRow("Персонаж:", self.character)
         form.addRow("Розмір:", self.scale)
         form.addRow("Шрифт чату:", self.font_px)
+        form.addRow("Відповідати голосом:", self.voice_reply)
+        form.addRow("Гучність голосу:", self.voice_volume)
         form.addRow("", self.think)
         form.addRow("", self.thinking)
         form.addRow("", self.tools)
@@ -88,6 +99,13 @@ class SettingsDialog(QDialog):
         lay.addLayout(form)
         lay.addWidget(buttons)
         self.resize(460, 0)
+
+
+VOICE_REPLY = {
+    "voice": "коли питаю голосом",
+    "always": "завжди",
+    "off": "ні, лише текстом",
+}
 
 
 # що показувати замість технічної назви інструмента, коли дії агента приховані
@@ -153,6 +171,18 @@ class RobotWindow(QWidget):
         self.busy = False
         self.last_activity = time.monotonic()
         self.thinking_buf = ""
+        # голос: запис (утримання персонажа / кнопка мікрофона) → сервер розпізнає → задача;
+        # відповідь сервер озвучує, персонаж «говорить» у такт
+        self.voice_caps = {"stt": False, "tts": False}
+        self.recorder = Recorder(self)
+        self.recorder.finished.connect(self._on_recorded)
+        self.recorder.failed.connect(self._on_record_failed)
+        self.player = Player(self)
+        self.player.stopped.connect(self._on_speech_done)
+        self._voice_task = False  # поточну задачу поставлено голосом — відповідь озвучити
+        self._voice_seq = 0
+        self._level_timer = QTimer(self, interval=33)
+        self._level_timer.timeout.connect(self._feed_level)
 
         # сигнали
         self._connect_character()
@@ -175,6 +205,7 @@ class RobotWindow(QWidget):
         self.panel.retry_requested.connect(self.retry_task)
         self.panel.resized.connect(self._on_panel_resized)
         self.panel.font_changed.connect(self._on_font_changed)
+        self.panel.mic_toggled.connect(self.toggle_mic)
         self.conn.event.connect(self.on_event)
         self.conn.connected.connect(self.on_connected)
         self.conn.disconnected.connect(self.on_disconnected)
@@ -279,6 +310,9 @@ class RobotWindow(QWidget):
         self.robot.drag_moved.connect(self.on_drag)
         self.robot.drag_finished.connect(self.save_position)
         self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
+        self.robot.hold_started.connect(self.start_listening)
+        self.robot.hold_finished.connect(self.stop_listening)
+        self.robot.hold_enabled = self.voice_caps["stt"]
 
     def set_character(self, name: str) -> None:
         """Перемкнути персонажа на льоту: стан і позиція зберігаються."""
@@ -337,6 +371,8 @@ class RobotWindow(QWidget):
         s.show_tools = dlg.tools.isChecked()
         s.auto_files = dlg.auto_files.isChecked()
         s.font_size = dlg.font_px.value()
+        s.voice_reply = dlg.voice_reply.currentData()
+        s.voice_volume = dlg.voice_volume.value()
         self.panel.set_font_size(s.font_size)
         self.panel.set_show_tools(s.show_tools)
         if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
@@ -360,6 +396,9 @@ class RobotWindow(QWidget):
 
     def on_robot_clicked(self) -> None:
         self.touch()
+        if self.player.playing:  # клік під час озвучення — замовкнути
+            self.player.stop()
+            return
         self.conn.reconnect_now()
         if self.robot.state == "sleeping":
             self.robot.set_state("happy", 1.2)
@@ -368,8 +407,10 @@ class RobotWindow(QWidget):
         else:
             self.show_panel()
 
-    def send_task(self, text: str) -> None:
+    def send_task(self, text: str, by_voice: bool = False) -> None:
         self.touch()
+        self.player.stop()
+        self._voice_task = by_voice
         if not self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
                            "think": self.settings.think, "auto_files": self.settings.auto_files,
                            "tz": local_timezone()}):
@@ -387,6 +428,102 @@ class RobotWindow(QWidget):
         self.busy = True
         self.panel.set_busy(True)
         self.robot.set_state("thinking")
+
+    # ---------------- голос ----------------
+    def start_listening(self) -> None:
+        """Утримує персонажа (чи натиснув 🎤) — слухаємо мікрофон."""
+        self.touch()
+        if not self.voice_caps["stt"]:
+            return
+        if self.busy:
+            self.panel.set_activity("⏳ Я ще працюю над попередньою задачею — скажеш, щойно закінчу")
+            self.robot.set_state("waiting", 1.5, then=self.robot.state)
+            return
+        self.player.stop()
+        if self.recorder.start():
+            self._state_before_listen = self.robot.state if self.robot.state != "listening" else "idle"
+            self.robot.set_state("listening")
+            self.panel.set_recording(True)
+            self.panel.set_activity("🎤 Слухаю… відпусти, коли договориш")
+            self._level_timer.start()
+
+    def stop_listening(self) -> None:
+        if self.recorder.active:
+            self.recorder.stop()
+
+    def toggle_mic(self) -> None:
+        if self.recorder.active:
+            self.stop_listening()
+        else:
+            self.start_listening()
+
+    def _end_listening(self) -> None:
+        self.panel.set_recording(False)
+        if not self.player.playing:
+            self._level_timer.stop()
+            self.robot.voice_level = 0.0
+
+    def _on_recorded(self, wav: bytes) -> None:
+        self._end_listening()
+        self._voice_seq += 1
+        if not self.conn.send({"type": "voice_in", "id": f"v{self._voice_seq}",
+                               "data": base64.b64encode(wav).decode("ascii")}):
+            self._on_record_failed("немає з'єднання з сервером")
+            return
+        self.robot.set_state("thinking")
+        self.panel.set_activity("🎤 Розпізнаю сказане…")
+
+    def _on_record_failed(self, reason: str) -> None:
+        self._end_listening()
+        self.panel.set_activity("")
+        self.panel.add_entry("error", f"Голос: {reason}")
+        self.robot.set_state("sad", 2.0, then="idle")
+        self.show_panel()
+
+    def _on_voice_text(self, ev: dict) -> None:
+        text = " ".join(str(ev.get("text", "")).split())
+        if not text:
+            self.panel.set_activity("🎤 Не почув слів — спробуй ще раз, ближче до мікрофона")
+            self.robot.set_state("sad", 1.5, then="idle")
+            return
+        self.panel.set_activity("")
+        self.show_panel()
+        self.send_task(text, by_voice=True)
+
+    def _wants_speech(self) -> bool:
+        mode = self.settings.voice_reply
+        return self.voice_caps["tts"] and (mode == "always" or (mode == "voice" and self._voice_task))
+
+    def _speak(self, text: str) -> None:
+        self._voice_seq += 1
+        self.conn.send({"type": "tts", "id": f"t{self._voice_seq}", "text": text})
+
+    def _on_tts_audio(self, ev: dict) -> None:
+        try:
+            wav = base64.b64decode(str(ev.get("data", "")))
+        except ValueError:
+            return
+        if self.recorder.active or self.busy:
+            return  # уже говорить сам користувач або пішла нова задача — стара відповідь неактуальна
+        if self.player.play(wav, self.settings.voice_volume / 100):
+            self.robot.set_state("talking")
+            self._level_timer.start()
+
+    def _on_speech_done(self) -> None:
+        self._level_timer.stop()
+        self.robot.voice_level = 0.0
+        if self.robot.state == "talking":
+            self.robot.set_state("happy", 1.5)
+            QTimer.singleShot(3300, self._back_to_idle)
+
+    def _feed_level(self) -> None:
+        self.robot.voice_level = self.recorder.level if self.recorder.active else self.player.level
+
+    def _set_voice_caps(self, caps) -> None:
+        caps = caps if isinstance(caps, dict) else {}
+        self.voice_caps = {"stt": caps.get("stt") is True, "tts": caps.get("tts") is True}
+        self.robot.hold_enabled = self.voice_caps["stt"]
+        self.panel.set_voice(self.voice_caps["stt"])
 
     def _on_panel_resized(self, width: int, feed_height: int) -> None:
         self.settings.panel_width, self.settings.panel_feed_height = width, feed_height
@@ -806,6 +943,20 @@ class RobotWindow(QWidget):
         if t == "file_error":
             self.panel.file_failed(str(ev.get("id", "")), str(ev.get("message", "помилка")))
             return
+        if t == "voice_text":
+            self._on_voice_text(ev)
+            return
+        if t in {"voice_error", "tts_error"}:
+            if t == "voice_error":
+                self._on_record_failed(str(ev.get("message", "помилка")))
+            else:
+                self.panel.set_activity(f"🔇 {ev.get('message', 'не вдалося озвучити')}")
+                if self.robot.state == "talking":
+                    self._on_speech_done()
+            return
+        if t == "tts_audio":
+            self._on_tts_audio(ev)
+            return
         if t == "upload_error":
             self._pending_uploads = getattr(self, "_pending_uploads", {})
             self._pending_uploads.pop(ev.get("id"), None)
@@ -817,7 +968,9 @@ class RobotWindow(QWidget):
             model = str(ev.get("model", "")).split("/")[-1]
             eye = {True: " · 👁", False: " · без зору"}.get(ev.get("vision"), "")
             user = f" · {ev['user']}" if ev.get("user") and ev.get("user") != "owner" else ""
-            self.panel.set_status(f"{name} · підключено · {model}{eye}{user}", True)
+            self._set_voice_caps(ev.get("voice"))
+            mic = " · 🎤" if self.voice_caps["stt"] else ""
+            self.panel.set_status(f"{name} · підключено · {model}{eye}{mic}{user}", True)
             if "user" not in ev:  # сервер ще старої версії — чати працюватимуть неправильно
                 self.panel.add_entry(
                     "error",
@@ -900,9 +1053,14 @@ class RobotWindow(QWidget):
             text = ev.get("text", "")
             self.thinking_buf = ""
             self.panel.add_entry("assistant", text)
-            talk = min(6.0, 1.0 + len(text) / 120)
-            self.robot.set_state("talking", talk, then="happy")
-            QTimer.singleShot(int(talk * 1000) + 1800, self._back_to_idle)
+            if self._wants_speech() and text.strip():
+                self._speak(text)  # «говорить» почне, щойно прийде звук
+                self.robot.set_state("talking", 30, then="happy")
+            else:
+                talk = min(6.0, 1.0 + len(text) / 120)
+                self.robot.set_state("talking", talk, then="happy")
+                QTimer.singleShot(int(talk * 1000) + 1800, self._back_to_idle)
+            self._voice_task = False
             if not self.panel.shown:
                 self.show_panel()
             else:

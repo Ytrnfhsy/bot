@@ -33,6 +33,7 @@ STATE_COLORS = {
     "sad": QColor("#FF6B6B"),
     "sleeping": QColor("#5C7CFA"),
     "waiting": QColor("#FF9F43"),
+    "listening": QColor("#FF6FA8"),
     "offline": QColor("#8A94A6"),
 }
 
@@ -62,6 +63,9 @@ class RobotWidget(QWidget):
     drag_moved = Signal(QPointF)  # глобальна позиція курсора під час перетягування
     drag_finished = Signal()
     context_requested = Signal(QPointF)
+    hold_started = Signal()  # утримує персонажа — почати слухати (голос)
+    hold_finished = Signal()  # відпустив — надіслати сказане
+    HOLD_MS = 450
 
     def __init__(self, scale: float = 1.0, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -97,6 +101,13 @@ class RobotWidget(QWidget):
         self._pet_last: tuple[QPointF, float] | None = None
         self._hearts: list[list[float]] = []  # [x, y, вік, дрейф]
         self._next_heart = 0.0
+        # голос: утримання персонажа — «говори», рівень звуку (0..1) задає застосунок
+        self.hold_enabled = False
+        self._holding = False
+        self._hold_timer = QTimer(self, singleShot=True, interval=self.HOLD_MS)
+        self._hold_timer.timeout.connect(self._on_hold)
+        self.voice_level = 0.0
+        self._level = 0.0
         # перетягування файлів
         self._drop_hover = False
         self.setAcceptDrops(True)
@@ -151,6 +162,10 @@ class RobotWidget(QWidget):
             h[2] += dt
         self._hearts = [h for h in self._hearts if h[2] < 1.6]
 
+        # рівень голосу: швидко вгору, плавно вниз
+        lv = max(0.0, min(1.0, self.voice_level))
+        self._level = lv if lv > self._level else _lerp(self._level, lv, min(1.0, dt * 10))
+
         # плавна зміна кольору
         if self._drop_hover:
             target = STATE_COLORS["happy"]
@@ -172,7 +187,7 @@ class RobotWidget(QWidget):
         self._blink = max(0.0, self._blink - dt * 7)
 
         # погляд: за курсором у idle/talking/waiting, вгору при роздумах, бігає при роботі
-        if self.state in {"idle", "talking", "waiting", "happy"}:
+        if self.state in {"idle", "talking", "waiting", "happy", "listening"}:
             center = self.mapToGlobal(self.rect().center())
             d = QCursor.pos() - center
             dist = math.hypot(d.x(), d.y()) or 1.0
@@ -446,7 +461,7 @@ class RobotWidget(QWidget):
             glow_ellipse(QPointF(rx, eye_y), 8, h)
         else:
             open_k = 1.0 - self._blink
-            big = 1.15 if st == "waiting" else 1.0
+            big = {"waiting": 1.15, "listening": 1.2}.get(st, 1.0)
             h = max(1.5, 9.5 * open_k * big)
             glow_ellipse(QPointF(lx, eye_y), 7.5 * big, h)
             glow_ellipse(QPointF(rx, eye_y), 7.5 * big, h)
@@ -465,7 +480,10 @@ class RobotWidget(QWidget):
         mouth_pen = _pen(c, 3)
         p.setPen(mouth_pen)
         if st == "talking":
-            open_h = 2 + 5 * abs(math.sin(t * 14)) * (0.6 + 0.4 * math.sin(t * 3.7))
+            if self._level > 0.02:  # озвучує відповідь — рот у такт голосу
+                open_h = 2 + 9 * self._level
+            else:
+                open_h = 2 + 5 * abs(math.sin(t * 14)) * (0.6 + 0.4 * math.sin(t * 3.7))
             p.setBrush(c.darker(160))
             p.drawRoundedRect(QRectF(mx - 7, my - open_h / 2, 14, open_h), 4, 4)
         elif st in {"happy", "idle"} or self._hover:
@@ -476,7 +494,7 @@ class RobotWidget(QWidget):
             path = QPainterPath(QPointF(mx - 7, my + 3))
             path.quadTo(QPointF(mx, my - 4), QPointF(mx + 7, my + 3))
             p.drawPath(path)
-        elif st == "waiting":
+        elif st in {"waiting", "listening"}:
             p.drawEllipse(QPointF(mx, my + 1), 3.5, 3.5)
         elif st == "sleeping":
             p.drawEllipse(QPointF(mx, my + 1), 2.5 + math.sin(t) * 0.8, 2.5 + math.sin(t) * 0.8)
@@ -520,6 +538,8 @@ class RobotWidget(QWidget):
             cc.setAlphaF(k)
             p.setPen(cc)
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "?")
+        elif st == "listening":
+            self._draw_sound_waves(p, QPointF(100, 83 + bob), c, t, spread=78)  # від «вушок»
         elif st == "offline":
             f = QFont("Sans", 14, QFont.Weight.Bold)
             p.setFont(f)
@@ -532,6 +552,20 @@ class RobotWidget(QWidget):
                 r = 88 + 6 * math.sin(t * 5 + i)
                 pos = QPointF(100 + math.cos(a) * r, 90 + bob + math.sin(a) * 50)
                 self._sparkle(p, pos, 4 + 2 * math.sin(t * 6 + i), c)
+
+    def _draw_sound_waves(self, p: QPainter, center: QPointF, c: QColor, t: float, spread: float = 0) -> None:
+        """«Слухаю»: звукові дуги в обидва боки від center (± spread) — що голосніше говориш, то ширші й яскравіші."""
+        lv = self._level
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for i in range(3):
+            phase = (t * 1.4 + i / 3) % 1.0
+            r = 6 + 16 * phase + 5 * lv
+            cc = QColor(c)
+            cc.setAlphaF(max(0.0, (1 - phase) * (0.45 + 0.55 * min(1.0, lv * 2 + 0.1))))
+            p.setPen(_pen(cc, 2.6 + 1.6 * lv))
+            for side, start in ((1, -40), (-1, 140)):
+                o = QPointF(center.x() + side * spread, center.y())
+                p.drawArc(QRectF(o.x() - r, o.y() - r, 2 * r, 2 * r), start * 16, 80 * 16)
 
     def _gear(self, p: QPainter, center: QPointF, r: float, angle: float, color: QColor) -> None:
         p.save()
@@ -577,6 +611,9 @@ class RobotWidget(QWidget):
         if e.button() == Qt.MouseButton.LeftButton:
             self._press_pos = e.globalPosition()
             self._dragging = False
+            self._holding = False
+            if self.hold_enabled:
+                self._hold_timer.start()
         elif e.button() == Qt.MouseButton.RightButton:
             self.context_requested.emit(e.globalPosition())
 
@@ -596,8 +633,11 @@ class RobotWidget(QWidget):
         if self._press_pos is None:
             self._track_pet(e.position())
             return
+        if self._holding:
+            return  # уже слухає — персонаж стоїть на місці
         if not self._dragging and (e.globalPosition() - self._press_pos).manhattanLength() > 6:
             self._dragging = True
+            self._hold_timer.stop()
         if self._dragging:
             self.drag_moved.emit(e.globalPosition() - self._press_pos)
             self._press_pos = e.globalPosition()
@@ -605,13 +645,23 @@ class RobotWidget(QWidget):
     def mouseReleaseEvent(self, e) -> None:
         if e.button() != Qt.MouseButton.LeftButton or self._press_pos is None:
             return
-        if self._dragging:
+        self._hold_timer.stop()
+        if self._holding:
+            self._holding = False
+            self.hold_finished.emit()
+        elif self._dragging:
             self.drag_finished.emit()
         else:
             self.poke()
             self.clicked.emit()  # одразу, без очікування подвійного кліку
         self._press_pos = None
         self._dragging = False
+
+    def _on_hold(self) -> None:
+        if self._press_pos is not None and not self._dragging:
+            self._holding = True
+            self.poke()  # «стрепенувся» (у такси ще й вушка підскакують)
+            self.hold_started.emit()
 
     def mouseDoubleClickEvent(self, e) -> None:
         # другий швидкий клік — просто ще один клік (Qt замість натискання надсилає подвійний)
