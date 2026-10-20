@@ -1,7 +1,8 @@
-"""Голос: розпізнавання мовлення (faster-whisper) і озвучення відповідей (Piper).
+"""Голос: розпізнавання мовлення (faster-whisper) і озвучення відповідей.
 
-Обидві моделі працюють на CPU (відеопам'ять зайнята моделлю агента) і завантажуються при першому
-зверненні. Встановлення бібліотек і українського голосу — deploy/voice.sh install.
+Озвучення — HolosTTS (окремий Docker-сервіс, deploy/holos.sh start; природний український голос, 27 дикторів)
+або, якщо його немає, Piper. Усе працює на CPU (відеопам'ять зайнята моделлю агента).
+Whisper і Piper — deploy/voice.sh install; моделі завантажуються при першому зверненні.
 """
 
 from __future__ import annotations
@@ -10,15 +11,20 @@ import asyncio
 import io
 import logging
 import re
+import time
 import wave
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 log = logging.getLogger("kru.voice")
 
 MAX_AUDIO = 10 * 1024 * 1024  # ~5 хв мовлення у WAV 16 кГц
 MAX_SPEECH = 1500  # стільки символів відповіді озвучуємо (довше — до кінця речення)
 DEFAULT_VOICE = "uk_UA-ukrainian_tts-medium.onnx"
+PIPER_SPEAKERS = ["Лада", "Микита", "Тетяна"]  # дикторки/диктори голосу ukrainian_tts
+VOICES_TTL = 300.0  # як часто перепитувати HolosTTS про список голосів
 
 
 class VoiceError(Exception):
@@ -38,6 +44,8 @@ class Voice:
         self._tts: Any = None
         self._stt_lock = asyncio.Lock()
         self._tts_lock = asyncio.Lock()
+        self._holos_voices: list[str] = []
+        self._holos_checked = 0.0
 
     # ---------------- що доступно ----------------
     @property
@@ -54,15 +62,49 @@ class Voice:
         return self.enabled and _importable("faster_whisper")
 
     @property
+    def piper_ok(self) -> bool:
+        return _importable("piper") and self.voice_path.is_file()
+
+    @property
+    def engine(self) -> str:
+        """Чим озвучувати: holos (сервіс HolosTTS), piper або "" — нічим."""
+        if not self.enabled:
+            return ""
+        if self.config.tts_url:
+            return "holos"
+        return "piper" if self.piper_ok else ""
+
+    @property
     def tts_ok(self) -> bool:
-        return self.enabled and _importable("piper") and self.voice_path.is_file()
+        return bool(self.engine)
+
+    def voices(self) -> list[str]:
+        if self.engine == "holos":
+            return list(self._holos_voices)
+        return PIPER_SPEAKERS[:] if self.engine == "piper" and DEFAULT_VOICE in self.voice_path.name else []
+
+    async def refresh_voices(self, force: bool = False) -> None:
+        """Список голосів HolosTTS (кешується на кілька хвилин; сервіс міг ще не запуститися — тоді пізніше)."""
+        if self.engine != "holos" or (not force and time.monotonic() - self._holos_checked < VOICES_TTL):
+            return
+        self._holos_checked = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=3) as client:
+                r = await client.get(f"{self.config.tts_url}/v1/audio/voices")
+                r.raise_for_status()
+                voices = r.json().get("voices")
+            if isinstance(voices, list):
+                self._holos_voices = [str(v) for v in voices if isinstance(v, str)]
+        except (httpx.HTTPError, ValueError, AttributeError) as e:
+            log.info("HolosTTS ще не відповідає (%s) — голоси спитаю пізніше", e)
+            self._holos_checked = time.monotonic() - VOICES_TTL + 15
 
     def caps(self) -> dict:
         from .voice_fx import EFFECTS
 
-        return {"stt": self.stt_ok, "tts": self.tts_ok,
-                "effects": {k: e.title for k, e in EFFECTS.items()},
-                "speakers": ["Лада", "Микита", "Тетяна"] if DEFAULT_VOICE in self.voice_path.name else []}
+        return {"stt": self.stt_ok, "tts": self.tts_ok, "engine": self.engine,
+                "effects": {k: e.title for k, e in EFFECTS.items()}, "voices": self.voices(),
+                "speakers": self.voices() if self.engine == "piper" else []}  # speakers — для старих клієнтів
 
     # ---------------- розпізнавання ----------------
     def _load_stt(self):
@@ -105,55 +147,96 @@ class Voice:
             self._tts = PiperVoice.load(str(self.voice_path))
         return self._tts
 
-    def options(self, speaker=None, effect=None, speed=None) -> tuple[int, str, float]:
-        """Голос, звучання й темп: з запиту клієнта, інакше — з налаштувань сервера."""
+    def options(self, voice=None, effect=None, speed=None, speaker=None) -> tuple[str, str, float]:
+        """Голос (назва), обробка й темп: з запиту клієнта, інакше — з налаштувань сервера."""
         from .voice_fx import EFFECTS
 
-        sp = speaker if isinstance(speaker, int) and not isinstance(speaker, bool) and speaker >= 0 \
-            else self.config.piper_speaker
+        name = voice.strip() if isinstance(voice, str) else ""
+        if not name and isinstance(speaker, int) and not isinstance(speaker, bool) and 0 <= speaker < len(PIPER_SPEAKERS):
+            name = PIPER_SPEAKERS[speaker]  # старі клієнти надсилали номер диктора Piper
+        if not name:
+            name = self.config.tts_voice if self.engine == "holos" else (
+                PIPER_SPEAKERS[self.config.piper_speaker] if 0 <= self.config.piper_speaker < len(PIPER_SPEAKERS)
+                else "")
         fx = effect if effect in EFFECTS else (self.config.voice_effect if self.config.voice_effect in EFFECTS
                                                else "natural")
         try:
             sd = min(1.6, max(0.6, float(speed))) if speed is not None else 1.0
         except (TypeError, ValueError):
             sd = 1.0
-        return sp, fx, sd
+        return name, fx, sd
 
-    def _speak(self, text: str, speaker: int, effect: str, speed: float) -> bytes:
+    def _effect(self, audio: bytes, effect: str) -> bytes:
+        if effect == "natural":
+            return audio
         from .voice_fx import EFFECTS, apply
 
+        try:
+            return apply(audio, EFFECTS[effect])
+        except ImportError:  # без numpy (Piper зазвичай тягне його сам) — звичайний голос, а не помилка
+            log.warning("numpy не встановлено — обробка «%s» недоступна, голос без неї", effect)
+            return audio
+
+    async def _speak_holos(self, text: str, voice: str, effect: str, speed: float) -> bytes:
+        """HolosTTS через його OpenAI-сумісний API. Числа, наголоси й довгий текст сервіс обробляє сам."""
+        from .voice_fx import EFFECTS
+
+        pitch = EFFECTS[effect].pitch
+        body = {"input": text, "response_format": "wav",
+                # вища висота: синтезуємо повільніше, а voice_fx стискає запис назад до звичайного темпу
+                "speed": round(min(2.0, max(0.5, speed / pitch)), 3)}
+        if voice:
+            body["voice"] = voice
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=5)) as client:
+                r = await client.post(f"{self.config.tts_url}/v1/audio/speech", json=body)
+        except httpx.ConnectError as e:
+            raise VoiceError("Сервіс голосу HolosTTS не відповідає — перевір: deploy/holos.sh status") from e
+        except httpx.TimeoutException as e:
+            raise VoiceError("HolosTTS не встиг озвучити (тайм-аут)") from e
+        if r.status_code != 200:
+            try:
+                detail = r.json().get("detail") or r.text
+            except ValueError:
+                detail = r.text
+            raise VoiceError(f"HolosTTS: {str(detail)[:200]}")
+        return await asyncio.to_thread(self._effect, r.content, effect)
+
+    def _speak_piper(self, text: str, voice: str, effect: str, speed: float) -> bytes:
+        from .voice_fx import EFFECTS
+
         fx = EFFECTS[effect]
-        voice = self._load_tts()
+        speaker = PIPER_SPEAKERS.index(voice) if voice in PIPER_SPEAKERS else self.config.piper_speaker
+        model = self._load_tts()
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wav:
             try:
                 from piper import SynthesisConfig
 
-                speakers = int(getattr(voice.config, "num_speakers", 1) or 1)
+                speakers = int(getattr(model.config, "num_speakers", 1) or 1)
                 # вища висота = синтезуємо повільніше на той самий коефіцієнт, а voice_fx «прискорює» назад
-                voice.synthesize_wav(text, wav, syn_config=SynthesisConfig(
+                model.synthesize_wav(text, wav, syn_config=SynthesisConfig(
                     speaker_id=speaker if 0 <= speaker < speakers else None, length_scale=fx.pitch / speed))
             except ImportError:  # старіший piper-tts (1.2)
-                voice.synthesize(text, wav, speaker_id=speaker or None, length_scale=fx.pitch / speed)
-        audio = buf.getvalue()
-        if effect == "natural":
-            return audio
-        try:
-            return apply(audio, fx)
-        except ImportError:  # без numpy (Piper зазвичай тягне його сам) — звичайний голос, а не помилка
-            log.warning("numpy не встановлено — звучання «%s» недоступне, голос без обробки", effect)
-            return audio
+                model.synthesize(text, wav, speaker_id=speaker or None, length_scale=fx.pitch / speed)
+        return self._effect(buf.getvalue(), effect)
 
-    async def speak(self, text: str, speaker=None, effect=None, speed=None) -> bytes:
-        """Текст відповіді → WAV (голос speaker, звучання effect — див. voice_fx.EFFECTS, темп speed)."""
-        if not self.tts_ok:
-            raise VoiceError("Озвучення не встановлено на сервері: deploy/voice.sh install")
+    async def speak(self, text: str, voice=None, effect=None, speed=None, speaker=None) -> bytes:
+        """Текст відповіді → WAV (голос voice — назва, обробка effect — див. voice_fx.EFFECTS, темп speed)."""
+        engine = self.engine
+        if not engine:
+            raise VoiceError("Озвучення не налаштовано на сервері: deploy/holos.sh start (або deploy/voice.sh install)")
         speech = speech_text(text)
         if not speech:
             raise VoiceError("Нема чого озвучувати")
+        opts = self.options(voice, effect, speed, speaker)
         async with self._tts_lock:
             try:
-                return await asyncio.to_thread(self._speak, speech, *self.options(speaker, effect, speed))
+                if engine == "holos":
+                    return await self._speak_holos(speech, *opts)
+                return await asyncio.to_thread(self._speak_piper, speech, *opts)
+            except VoiceError:
+                raise
             except Exception as e:  # noqa: BLE001
                 log.exception("Озвучення не вдалося")
                 raise VoiceError(f"Не вдалося озвучити: {e}") from e
