@@ -644,6 +644,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         win.on_event({"type": "status", "state": "idle"})
         tts = next((m for m in sent if m.get("type") == "tts"), None)
         need(tts and "сонячно" in tts["text"], f"озвучення не попрошено: {tts}")
+        need((tts["speaker"], tts["effect"], tts["speed"]) == (0, "robot", 1.0), f"параметри голосу: {tts}")
         played = []
 
         def fake_play(wav, volume=1.0):
@@ -667,6 +668,31 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         need(not any(m.get("type") == "tts" for m in sent), "озвучено текстову відповідь")
         return "ok"
 
+    def voice_settings_flow():
+        """Налаштування: голос/звучання/темп від сервера, «▶ Прослухати» — пробна фраза саме з ними."""
+        sent = state["voice_sent"]
+        sent.clear()
+        win._set_voice_caps({"stt": True, "tts": True, "speakers": ["Лада", "Микита", "Тетяна"],
+                             "effects": {"natural": "Звичайний", "robot": "М'який робот", "droid": "Маленький дроїд"}})
+        dlg = appmod.SettingsDialog(win.settings, voice_caps=win.voice_caps, preview=win.preview_voice)
+        need(dlg.voice_effect.count() == 3 and dlg.voice_speaker.count() == 3, "списки голосів")
+        need(dlg.voice_effect.currentData() == "robot", f"типове звучання: {dlg.voice_effect.currentData()}")
+        dlg.voice_speaker.setCurrentIndex(1)
+        dlg.voice_effect.setCurrentIndex(dlg.voice_effect.findData("droid"))
+        dlg.voice_speed.setValue(1.2)
+        dlg.voice_volume.setValue(40)
+        need(dlg.btn_preview.isEnabled(), "кнопка «Прослухати» вимкнена")
+        win.busy = False
+        dlg.btn_preview.click()
+        tts = next((m for m in sent if m.get("type") == "tts"), None)
+        need(tts and (tts["speaker"], tts["effect"], tts["speed"]) == (1, "droid", 1.2), f"пробна фраза: {tts}")
+        need(win._speech_volume == 40 and win.settings.voice_effect == "robot", "налаштування змінились до OK")
+        dlg.deleteLater()
+        old = appmod.SettingsDialog(win.settings, voice_caps={"stt": False, "tts": False})
+        need(not old.btn_preview.isEnabled() and old.voice_effect.count() == 5, "без голосу на сервері")
+        old.deleteLater()
+        return "ok"
+
     def voice_cleanup():
         send, rec, play = state.pop("voice_orig")
         win.conn.send, win.recorder = send, rec
@@ -679,6 +705,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
     step(50, lambda: check("mic_graceful", mic_graceful))
     step(50, lambda: check("voice_hold", voice_hold_start))
     step(700, lambda: check("voice_roundtrip", voice_hold_release))
+    step(50, lambda: check("voice_settings", voice_settings_flow))
     step(50, voice_cleanup)
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))

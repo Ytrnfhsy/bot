@@ -44,6 +44,9 @@ class Settings:
     panel_feed_height: int = 0  # висота стрічки; 0 — під вміст
     voice_reply: str = "voice"  # озвучувати відповіді: off | voice (лише на голосові запити) | always
     voice_volume: int = 90  # гучність озвучення, %
+    voice_speaker: int = 0  # голос Piper: 0 — Лада, 1 — Микита, 2 — Тетяна
+    voice_effect: str = "robot"  # звучання: natural | robot | digital | droid | mech (див. сервер voice_fx)
+    voice_speed: float = 1.0  # темп мовлення
 
     @classmethod
     def load(cls) -> "Settings":
