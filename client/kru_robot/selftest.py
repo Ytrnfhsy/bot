@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time as _time
 import tempfile
 import traceback
 from pathlib import Path
@@ -789,6 +790,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             utterance = Signal(bytes, bool)
             timeout = Signal()
             failed = Signal(str)
+            ready = Signal()
 
             def __init__(self):
                 super().__init__()
@@ -893,6 +895,109 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         need(hasattr(vosk, "KaldiRecognizer") and hasattr(vosk, "Model"), "vosk неповний")
         return getattr(vosk, "__version__", "ok")
 
+    def listener_start():
+        """Справжній WakeListener (потік + черга подій) зі штучним мікрофоном і розпізнавачем:
+        модель вантажиться у фоні, інтерфейс не завмирає, ім'я → сигнал woke, стоп — без падіння."""
+        import array
+        import json as _json
+        import math as _m
+
+        from PySide6.QtCore import QByteArray, QObject, Signal
+
+        from . import audio as audiomod
+        from . import wake as wakemod
+
+        rate = 16000
+
+        class FakeIO(QObject):
+            readyRead = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.buf = b""
+
+            def readAll(self):
+                data, self.buf = self.buf, b""
+                return QByteArray(data)
+
+        class FakeSource(QObject):
+            def __init__(self):
+                super().__init__()
+                self.io = FakeIO()
+
+            def start(self):
+                return self.io
+
+            def stop(self):
+                pass
+
+        class FakeRec:
+            loud = 0
+
+            def Reset(self):
+                self.loud = 0
+
+            def AcceptWaveform(self, frame):
+                self.loud += max(abs(x) for x in array.array("h", frame)) > 2000
+                return False
+
+            def PartialResult(self):
+                return _json.dumps({"partial": "кру" if self.loud >= 10 else ""})
+
+            def Result(self):
+                return "{}"
+
+        src = FakeSource()
+        state["listener_orig"] = (audiomod.open_input, wakemod.make_recognizer)
+        audiomod.open_input = lambda parent=None, rate=16000: (src, ("Int16", 1, rate))
+
+        def slow_model(path, r):
+            import time as _t
+
+            _t.sleep(0.5)  # як справжня модель: вантажиться помітний час — інтерфейс має жити
+            return object(), FakeRec(), True
+
+        wakemod.make_recognizer = slow_model
+        lst = wakemod.WakeListener()
+        got = state["listener_got"] = []
+        lst.ready.connect(lambda: got.append("ready"))
+        lst.woke.connect(lambda: got.append("woke"))
+        lst.utterance.connect(lambda wav, need: got.append(("utterance", need)))
+        lst.failed.connect(lambda m: got.append(("failed", m)))
+        t0 = _time.monotonic()
+        need(lst.start(Path("/fake"), "medium"), "не стартував")
+        need(_time.monotonic() - t0 < 0.2, "start() завмер на завантаженні моделі")
+        state["listener"], state["listener_src"] = lst, src
+        tone = array.array("h", [int(8000 * _m.sin(2 * _m.pi * 220 * i / rate)) for i in range(rate * 2)]).tobytes()
+        state["listener_audio"] = b"\0\0" * rate + tone + b"\0\0" * int(rate * 1.2)
+        return "ok"
+
+    def listener_feed():
+        src = state["listener_src"]
+        need("ready" in state["listener_got"], f"модель не «завантажилась»: {state['listener_got']}")
+        audio = state["listener_audio"]
+        for i in range(0, len(audio), 3200):  # як мікрофон: шматками по 100 мс
+            src.io.buf += audio[i:i + 3200]
+            src.io.readyRead.emit()
+        return "ok"
+
+    def listener_check():
+        from . import audio as audiomod
+        from . import wake as wakemod
+
+        lst, got = state["listener"], state["listener_got"]
+        try:
+            need("woke" in got and ("utterance", True) in got, f"події: {got}")
+            lst.listen()
+            lst.stop()
+            need(not lst.active, "не зупинився")
+        finally:
+            audiomod.open_input, wakemod.make_recognizer = state.pop("listener_orig")
+        return got
+
+    step(50, lambda: check("wake_listener_start", listener_start))
+    step(900, lambda: check("wake_listener_feed", listener_feed))
+    step(900, lambda: check("wake_listener", listener_check))
     step(50, lambda: check("vosk_import", vosk_check))
     step(50, lambda: check("double_click", double_click_check))
     step(50, lambda: check("wake_flow", wake_flow))

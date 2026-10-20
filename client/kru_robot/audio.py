@@ -41,6 +41,37 @@ def to_mono16(raw: bytes, sample_format: str, channels: int) -> bytes:
     return a.tobytes()
 
 
+class Resampler:
+    """16-біт моно з будь-якої частоти → 16 кГц (лінійна інтерполяція, зі станом між шматками).
+    Моделі Vosk навчені на 16 кГц, а мікрофон часто дає 44,1/48 кГц."""
+
+    def __init__(self, src_rate: int, dst_rate: int = 16000) -> None:
+        self.step = src_rate / dst_rate
+        self.pos = 0.0  # позиція наступного вихідного відліку відносно початку буфера
+        self.prev = 0  # останній відлік попереднього шматка (для інтерполяції на стику)
+
+    def __call__(self, pcm16: bytes) -> bytes:
+        if self.step == 1.0:
+            return pcm16
+        a = array.array("h", pcm16[: len(pcm16) // 2 * 2])
+        if sys.byteorder == "big":
+            a.byteswap()
+        src = [self.prev] + a.tolist()  # індекс 0 — хвіст попереднього шматка
+        out = array.array("h")
+        pos, step, n = self.pos + 1, self.step, len(src)
+        while pos < n - 1:
+            i = int(pos)
+            frac = pos - i
+            out.append(int(src[i] + (src[i + 1] - src[i]) * frac))
+            pos += step
+        self.pos = pos - (n - 1) - 1
+        if a:
+            self.prev = a[-1]
+        if sys.byteorder == "big":
+            out.byteswap()
+        return out.tobytes()
+
+
 def make_wav(pcm16: bytes, rate: int) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:

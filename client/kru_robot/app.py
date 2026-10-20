@@ -637,6 +637,7 @@ class RobotWindow(QWidget):
         listener.utterance.connect(self._on_wake_utterance)
         listener.timeout.connect(self._on_wake_timeout)
         listener.failed.connect(self._on_wake_failed)
+        listener.ready.connect(lambda: self.panel.set_activity("👂 Слухаю. Поклич: «Кру, …» — подвійний клік вимикає"))
 
     def toggle_wake(self) -> None:
         self.set_wake(not (self.wake.active or self._wake_loading))
@@ -720,7 +721,7 @@ class RobotWindow(QWidget):
         self.robot.wake_mode = True
         self._sync_wake_action(True)
         self._level_timer.start()
-        self.panel.set_activity("👂 Слухаю. Поклич: «Кру, …» — подвійний клік вимикає")
+        self.panel.set_activity("👂 Вмикаю режим «Кру»…")  # модель вантажиться у фоні — далі сигнал ready
 
     def _wake_listen(self) -> None:
         if self.wake.active and not self.player.playing and not self.recorder.active:
@@ -1502,11 +1503,30 @@ def _listen_for_commands(win: RobotWindow) -> None:
     server.newConnection.connect(on_new)
 
 
+def _crash_log() -> None:
+    """Якщо робот впаде на рівні C (Qt, звук, Vosk) — стек Python запишеться в crash.log, а не зникне."""
+    import faulthandler
+
+    base = os.environ.get("LOCALAPPDATA") if IS_WINDOWS else os.environ.get(
+        "XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
+    try:
+        folder = os.path.join(base or os.path.expanduser("~"), "kru-robot")
+        os.makedirs(folder, exist_ok=True)
+        log = open(os.path.join(folder, "crash.log"), "a", encoding="utf-8")  # noqa: SIM115 — живе до кінця
+        log.write(f"\n=== запуск {time.strftime('%Y-%m-%d %H:%M:%S')}, Python {sys.version.split()[0]} ===\n")
+        log.flush()
+        faulthandler.enable(file=log, all_threads=True)
+        _crash_log.file = log  # не дати збирачу сміття закрити файл
+    except OSError:
+        faulthandler.enable()
+
+
 def main() -> None:
     # На Wayland (типово у Fedora) вікна не можуть самі тримати себе поверх інших
     # і позиціонуватися — тому використовуємо XWayland (xcb), якщо користувач не вказав інше.
     if os.environ.get("WAYLAND_DISPLAY") and "QT_QPA_PLATFORM" not in os.environ:
         os.environ["QT_QPA_PLATFORM"] = "xcb"
+    _crash_log()
     app = QApplication(sys.argv)
     app.setApplicationName("Kru")
     app.setDesktopFileName("kru-robot")  # панель задач KDE/GNOME бере іконку з kru-robot.desktop
