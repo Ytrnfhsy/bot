@@ -660,7 +660,7 @@ class RobotWidget(QWidget):
     def _on_hold(self) -> None:
         if self._press_pos is not None and not self._dragging:
             self._holding = True
-            self.poke()  # «стрепенувся» (у такси ще й вушка підскакують)
+            self.poke()  # «стрепенувся» — почав слухати
             self.hold_started.emit()
 
     def mouseDoubleClickEvent(self, e) -> None:

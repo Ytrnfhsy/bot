@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import math
 import os
 import sys
 import time
@@ -29,10 +30,10 @@ from PySide6.QtWidgets import (
 
 from .audio import Player, Recorder
 from .connection import AgentConnection, normalize_url
-from .characters import CHARACTERS, make_character
 from .icon import app_icon
 from .winplatform import IS_WINDOWS, WinHotkey, autostart_enabled, set_autostart
 from .panel import ChatPanel
+from .robot import RobotWidget
 from .settings import Settings, new_session_id
 
 
@@ -58,10 +59,6 @@ class SettingsDialog(QDialog):
         self.token = QLineEdit(s.token)
         self.token.setEchoMode(QLineEdit.EchoMode.Password)
         self.scale = QDoubleSpinBox(minimum=0.5, maximum=2.0, singleStep=0.1, value=s.scale)
-        self.character = QComboBox()
-        for key, (title, _cls) in CHARACTERS.items():
-            self.character.addItem(title, key)
-        self.character.setCurrentIndex(max(0, self.character.findData(s.character)))
         self.think = QCheckBox("Думати перед відповіддю (розумніше, але повільніше)")
         self.think.setChecked(s.think)
         self.thinking = QCheckBox("Показувати хід думок моделі")
@@ -115,7 +112,6 @@ class SettingsDialog(QDialog):
         speed_row.addWidget(self.btn_preview, 1)
         form.addRow("Сервер (WebSocket):", self.url)
         form.addRow("Токен:", self.token)
-        form.addRow("Персонаж:", self.character)
         form.addRow("Розмір:", self.scale)
         form.addRow("Шрифт чату:", self.font_px)
         form.addRow("Відповідати голосом:", self.voice_reply)
@@ -198,7 +194,7 @@ class RobotWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("Kru")
 
-        self.robot = make_character(settings.character, settings.scale, self)
+        self.robot = RobotWidget(settings.scale, self)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.robot)
@@ -228,7 +224,7 @@ class RobotWindow(QWidget):
         self._level_timer.timeout.connect(self._feed_level)
 
         # сигнали
-        self._connect_character()
+        self._connect_robot()
         self.panel.task_submitted.connect(self.send_task)
         self.panel.height_changed.connect(lambda: self.panel.isVisible() and self.position_panel())
         self.panel.chats_requested.connect(self.show_chats)
@@ -345,7 +341,7 @@ class RobotWindow(QWidget):
             self.panel.set_activity("💭 Модель зараз не міркує — увімкни «Думати перед відповіддю» в налаштуваннях")
         QTimer.singleShot(0, self.position_panel)
 
-    def _connect_character(self) -> None:
+    def _connect_robot(self) -> None:
         self.robot.clicked.connect(self.on_robot_clicked)
         self.robot.petted.connect(self.on_petted)
         self.robot.files_dropped.connect(self.upload_files)
@@ -357,30 +353,11 @@ class RobotWindow(QWidget):
         self.robot.hold_finished.connect(self.stop_listening)
         self.robot.hold_enabled = self.voice_caps["stt"]
 
-    def set_character(self, name: str) -> None:
-        """Перемкнути персонажа на льоту: стан і позиція зберігаються."""
-        if name not in CHARACTERS:
-            return
-        old = self.robot
-        self.robot = make_character(name, self.settings.scale, self)
-        self.robot.set_state(old.state)
-        self.layout().replaceWidget(old, self.robot)
-        old._timer.stop()
-        old.deleteLater()
-        self._connect_character()
-        self.robot.set_state("happy", 1.2, then=old.state if old.state != "happy" else "idle")
-        self.robot.show()
-        icon = app_icon(name)
-        QApplication.instance().setWindowIcon(icon)
-        self.setWindowIcon(icon)
-        if self.tray:
-            self.tray.setIcon(icon)
-
     def _build_tray(self) -> None:
         self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        self.tray = QSystemTrayIcon(app_icon(self.settings.character), self)
+        self.tray = QSystemTrayIcon(app_icon(), self)
         self.tray.setToolTip("Kru")
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(
@@ -423,10 +400,6 @@ class RobotWindow(QWidget):
         self.panel.set_show_tools(s.show_tools)
         if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
             set_autostart(dlg.autostart.isChecked())
-        character = dlg.character.currentData()
-        if character != s.character:
-            s.character = character
-            self.set_character(character)
         if abs(dlg.scale.value() - s.scale) > 1e-3:
             s.scale = dlg.scale.value()
             self.robot.scale_factor = s.scale
@@ -1296,11 +1269,7 @@ def main() -> None:
             return
 
     settings = Settings.load()
-    if "--character" in sys.argv:  # лише на цей запуск, напр. --demo --character dog
-        args = sys.argv[sys.argv.index("--character") + 1 :]
-        if args and args[0] in CHARACTERS:
-            settings.character = args[0]
-    app.setWindowIcon(app_icon(settings.character))
+    app.setWindowIcon(app_icon())
     win = RobotWindow(settings, demo=demo)
     win.show()
     if demo:
@@ -1320,6 +1289,7 @@ DEMO_STATES = [
     ("thinking", "думає"),
     ("working", "працює з інструментом"),
     ("waiting", "чекає на твій дозвіл"),
+    ("listening", "слухає (утримуєш робота й говориш)"),
     ("talking", "відповідає"),
     ("happy", "задачу виконано"),
     ("sad", "помилка"),
@@ -1346,6 +1316,16 @@ def _demo(win: RobotWindow, only: str | None = None) -> None:
         print(f"[demo] {name}: {title}", flush=True)
         step["i"] += 1
 
+    # «голос» для станів слухає/говорить: гучність хвилями, як у живому мовленні
+    voice = QTimer(win, interval=40)
+
+    def feed() -> None:
+        t = time.monotonic()
+        live = win.robot.state in {"listening", "talking"}
+        win.robot.voice_level = (0.35 + 0.35 * math.sin(t * 9) * math.sin(t * 2.3)) if live else 0.0
+
+    voice.timeout.connect(feed)
+    voice.start()
     show()
     win.show_panel()
     if len(states) > 1:
