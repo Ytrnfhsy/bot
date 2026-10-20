@@ -136,7 +136,13 @@ class Voice:
             except ImportError:  # старіший piper-tts (1.2)
                 voice.synthesize(text, wav, speaker_id=speaker or None, length_scale=fx.pitch / speed)
         audio = buf.getvalue()
-        return audio if effect == "natural" else apply(audio, fx)
+        if effect == "natural":
+            return audio
+        try:
+            return apply(audio, fx)
+        except ImportError:  # без numpy (Piper зазвичай тягне його сам) — звичайний голос, а не помилка
+            log.warning("numpy не встановлено — звучання «%s» недоступне, голос без обробки", effect)
+            return audio
 
     async def speak(self, text: str, speaker=None, effect=None, speed=None) -> bytes:
         """Текст відповіді → WAV (голос speaker, звучання effect — див. voice_fx.EFFECTS, темп speed)."""
