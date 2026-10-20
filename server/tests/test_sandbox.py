@@ -85,7 +85,8 @@ async def test_without_sandbox_still_asks_and_regular_users_denied(cfg):
     await agent.run("s", "echo", rec.emit, rec.confirm)
     assert rec.confirms == ["run_shell"]
     assert "require user approval" in llm.calls[0]["messages"][0]["content"]
-    assert agent.make_context(User("olena", "user")).denied_tools == {"run_shell", "run_python"}
+    assert agent.make_context(User("olena", "user")).denied_tools == {"run_shell", "run_python", "ssh_run",
+                                                                     "ssh_upload", "ssh_download"}
 
 
 async def test_timeout_and_missing_image_messages(cfg, monkeypatch):
