@@ -446,6 +446,7 @@ class RobotWindow(QWidget):
             self.panel.set_recording(True)
             self.panel.set_activity("🎤 Слухаю… відпусти, коли договориш")
             self._level_timer.start()
+            self._feed_level()  # одразу, не чекаючи першого тіку таймера
 
     def stop_listening(self) -> None:
         if self.recorder.active:
