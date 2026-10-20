@@ -27,10 +27,11 @@ import zipfile
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
-from .audio import make_wav, to_mono16
+from .audio import Resampler, make_wav, to_mono16
 
+RATE = 16000  # частота, на якій працюють Vosk і Whisper
 FRAME_MS = 30  # аналізуємо звук шматками по 30 мс
 PRE_ROLL = 0.35  # с звуку перед початком мовлення, що додається до запису (не обрізати перший склад)
 BUFFER_SEC = 20  # стільки останніх секунд тримаємо в пам'яті
@@ -67,6 +68,9 @@ class WakeLogic:
         self.deadline = 0  # кадр, до якого чекаємо на уточнення
         self._hits = 0  # «середня» чутливість: ім'я в кількох проміжних результатах поспіль
         self.level = 0.0
+        self.loose = False  # модель не знає слова «кру» — шукаємо схожі слова у вільному розпізнаванні
+        self.debug = None  # функція для діагностики (KRU_WAKE_DEBUG=1)
+        self._last_partial = ""
 
     # ---------------- керування ----------------
     def listen(self) -> None:
@@ -159,20 +163,27 @@ class WakeLogic:
     def _recognize(self, frame: bytes) -> bool:
         if self.rec is None:
             return False
+        is_wake = _is_wake_loose if self.loose else _is_wake
         final = self.rec.AcceptWaveform(frame)
         if final:
             res = _json(self.rec.Result())
+            if self.debug and res.get("text"):
+                self.debug(f"почуто (фраза): {res.get('text')!r} {[(w.get('word'), round(float(w.get('conf', 0)), 2)) for w in res.get('result', []) if isinstance(w, dict)]}")
             words = [w for w in res.get("result", []) if isinstance(w, dict)]
             if words:
-                ok = any(_is_wake(w.get("word", "")) and
+                ok = any(is_wake(w.get("word", "")) and
                          (self.sensitivity != "low" or float(w.get("conf", 1.0)) >= 0.6) for w in words)
             else:
-                ok = _has_wake(res.get("text", ""))
+                ok = any(is_wake(w) for w in res.get("text", "").split())
             self._hits = 0
             return ok
         if self.sensitivity == "low":
             return False
-        if _has_wake(_json(self.rec.PartialResult()).get("partial", "")):
+        partial = _json(self.rec.PartialResult()).get("partial", "")
+        if self.debug and partial and partial != self._last_partial:
+            self.debug(f"чую: {partial!r}")
+        self._last_partial = partial
+        if any(is_wake(w) for w in partial.split()):
             self._hits += 1
         else:
             self._hits = 0
@@ -209,8 +220,10 @@ def _is_wake(word: str) -> bool:
     return word.strip(" ,.!?").lower() in WAKE_WORDS
 
 
-def _has_wake(text: str) -> bool:
-    return any(_is_wake(w) for w in text.split())
+def _is_wake_loose(word: str) -> bool:
+    """Вільне розпізнавання (модель не знає «кру»): ім'я зазвичай чується як коротке слово на «кру-»/«крю-»."""
+    w = word.strip(" ,.!?").lower()
+    return w in WAKE_WORDS or (w.startswith(("кру", "крю")) and len(w) <= 5)
 
 
 # ---------------- модель Vosk ----------------
@@ -281,39 +294,54 @@ def download_model(progress=lambda text: None) -> Path:
     return found
 
 
+DEBUG = os.environ.get("KRU_WAKE_DEBUG", "").lower() not in {"", "0", "false", "no"}
+
+
+def debug(msg: str) -> None:
+    if DEBUG:
+        print(f"[kru-wake {time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
+
+
 def make_recognizer(model_path: Path, rate: int):
     """Vosk-розпізнавач, обмежений лише ім'ям (найточніше й найлегше); якщо модель не знає жодного
-    варіанта імені — вільне розпізнавання, а ім'я шукаємо в тексті."""
+    варіанта імені — вільне розпізнавання, а ім'я шукаємо в тексті. → (model, recognizer, обмежений?)"""
     from vosk import KaldiRecognizer, Model, SetLogLevel
 
-    SetLogLevel(-1)
+    SetLogLevel(0 if DEBUG else -1)
     model = Model(str(model_path))
     known = [w for w in WAKE_WORDS if model.vosk_model_find_word(w) >= 0]  # слова, які модель знає
-    rec = KaldiRecognizer(model, rate, json.dumps(known + ["[unk]"], ensure_ascii=False)) if known else \
-        KaldiRecognizer(model, rate)
+    debug(f"модель {model_path.name}, частота {rate} Гц, слова імені в словнику: {known or 'жодного'}")
+    if known:
+        rec = KaldiRecognizer(model, rate, json.dumps(known + ["[unk]"], ensure_ascii=False))
+    else:
+        rec = KaldiRecognizer(model, rate)
     rec.SetWords(True)
-    return model, rec
+    return model, rec, bool(known)
 
 
 class WakeListener(QObject):
-    """Мікрофон + Vosk в окремому потоці. Сигнали — у потоці інтерфейсу."""
+    """Мікрофон (потік інтерфейсу) + Vosk (робочий потік). Робочий потік не чіпає Qt: події складає
+    в чергу, а інтерфейс забирає їх таймером і вже тоді випускає сигнали."""
 
     woke = Signal()
     speech = Signal()
     utterance = Signal(bytes, bool)
     timeout = Signal()
     failed = Signal(str)
+    ready = Signal()  # модель завантажено — слухає
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._source = None
         self._io = None
         self._fmt = ("Int16", 1, 16000)
-        self._queue: queue.Queue = queue.Queue(maxsize=200)
+        self._queue: queue.Queue = queue.Queue(maxsize=400)  # звук і команди → робочий потік
+        self._events: queue.SimpleQueue = queue.SimpleQueue()  # події → потік інтерфейсу
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.logic: WakeLogic | None = None
-        self._model = None
+        self._poll = QTimer(self, interval=40)
+        self._poll.timeout.connect(self._drain)
 
     @property
     def active(self) -> bool:
@@ -321,46 +349,52 @@ class WakeListener(QObject):
 
     @property
     def level(self) -> float:
-        return self.logic.level if self.logic else 0.0
+        logic = self.logic
+        return logic.level if logic else 0.0
 
     def start(self, model_path: Path, sensitivity: str = "medium") -> bool:
+        """Відкриває мікрофон одразу, а модель вантажить у робочому потоці (інтерфейс не завмирає);
+        коли все готово — сигнал ready, якщо ні — failed."""
         from .audio import MicError, open_input
 
         if self._source is not None:
             return True
         try:
             source, fmt = open_input(self)
-            model, rec = make_recognizer(model_path, fmt[2])
         except MicError as e:
             self.failed.emit(str(e))
             return False
-        except Exception as e:  # noqa: BLE001 — немає vosk, пошкоджена модель тощо
-            self.failed.emit(f"не вдалося запустити розпізнавання імені: {e}")
-            return False
-        self._model, self._fmt = model, fmt
-        self.logic = WakeLogic(fmt[2], rec, sensitivity)
-        self._io = source.start()
-        if self._io is None:
+        io = source.start()
+        if io is None:
             self.failed.emit("мікрофон зайнятий або доступ до нього заборонено")
             return False
-        self._source = source
-        self._io.readyRead.connect(self._read)
+        self._source, self._io, self._fmt = source, io, fmt
+        self._resample = Resampler(fmt[2], RATE)  # Vosk і Whisper — 16 кГц
+        debug(f"мікрофон: {fmt[0]}, каналів {fmt[1]}, {fmt[2]} Гц → {RATE} Гц")
+        io.readyRead.connect(self._read)
         self._stop.clear()
-        self._thread = threading.Thread(target=self._work, name="kru-wake", daemon=True)
+        self._thread = threading.Thread(target=self._work, args=(model_path, sensitivity), name="kru-wake",
+                                        daemon=True)
         self._thread.start()
+        self._poll.start()
         return True
 
     def stop(self) -> None:
         self._stop.set()
+        self._poll.stop()
         if self._source is not None:
             self._source.stop()
             self._source.deleteLater()
         self._source = self._io = None
         if self._thread is not None:
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=3)
         self._thread = None
         self.logic = None
-        self._model = None
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
 
     # керування — з потоку інтерфейсу; логіку змінює лише робочий потік, тож передаємо командою
     def listen(self) -> None:
@@ -373,7 +407,7 @@ class WakeListener(QObject):
         self._command(("pause",))
 
     def _command(self, cmd: tuple) -> None:
-        if self.logic is not None:
+        if self._source is not None:
             try:
                 self._queue.put_nowait(cmd)
             except queue.Full:
@@ -385,34 +419,70 @@ class WakeListener(QObject):
         data = bytes(self._io.readAll().data())
         if data:
             try:
-                self._queue.put_nowait(to_mono16(data, self._fmt[0], self._fmt[1]))
-            except queue.Full:  # робочий потік не встигає — пропускаємо шматок, а не гальмуємо інтерфейс
+                self._queue.put_nowait(data)  # перетворення — у робочому потоці, не тут
+            except queue.Full:  # робочий потік не встигає (чи ще вантажить модель) — пропускаємо шматок
                 pass
 
-    def _work(self) -> None:
+    def _drain(self) -> None:
+        """Потік інтерфейсу: події з робочого потоку → сигнали."""
+        while True:
+            try:
+                ev = self._events.get_nowait()
+            except queue.Empty:
+                return
+            kind = ev[0]
+            if kind == "failed":
+                self.stop()
+                self.failed.emit(ev[1])
+                return
+            if kind == "ready":
+                self.ready.emit()
+            elif kind == "wake":
+                self.woke.emit()
+            elif kind == "speech":
+                self.speech.emit()
+            elif kind == "utterance":
+                self.utterance.emit(ev[1], ev[2])
+            elif kind == "timeout":
+                self.timeout.emit()
+
+    def _work(self, model_path: Path, sensitivity: str) -> None:
+        try:
+            self._model, rec, limited = make_recognizer(model_path, RATE)
+        except Exception as e:  # noqa: BLE001 — немає vosk, пошкоджена модель тощо
+            self._events.put(("failed", f"не вдалося запустити розпізнавання імені: {e}"))
+            return
+        logic = WakeLogic(RATE, rec, sensitivity)
+        logic.loose = not limited
+        logic.debug = debug if DEBUG else None
+        self.logic = logic
+        self._events.put(("ready",))
+        last_report = time.monotonic()
         while not self._stop.is_set():
             try:
                 item = self._queue.get(timeout=0.2)
             except queue.Empty:
                 item = b""
-            logic = self.logic
-            if logic is None:
-                continue
             if isinstance(item, tuple):
-                {"listen": lambda: logic.listen(), "pause": logic.pause,
-                 "await": lambda: logic.await_command(item[1])}[item[0]]()
+                if item[0] == "listen":
+                    logic.listen()
+                elif item[0] == "pause":
+                    logic.pause()
+                elif item[0] == "await":
+                    logic.await_command(item[1])
+                debug(f"команда {item[0]} → стан {logic.state}")
                 continue
             try:
+                if item:
+                    item = self._resample(to_mono16(item, self._fmt[0], self._fmt[1]))
                 events = logic.feed(item)
             except Exception as e:  # noqa: BLE001
-                self.failed.emit(f"розпізнавання імені: {e}")
+                self._events.put(("failed", f"розпізнавання імені: {e}"))
                 return
             for ev in events:
-                if ev[0] == "wake":
-                    self.woke.emit()
-                elif ev[0] == "speech":
-                    self.speech.emit()
-                elif ev[0] == "utterance":
-                    self.utterance.emit(ev[1], ev[2])
-                elif ev[0] == "timeout":
-                    self.timeout.emit()
+                debug(f"подія {ev[0]}" + (f" ({len(ev[1])} байт, потрібне ім'я: {ev[2]})" if ev[0] == "utterance" else ""))
+                self._events.put(ev)
+            if DEBUG and time.monotonic() - last_report > 2:
+                last_report = time.monotonic()
+                debug(f"стан {logic.state}, рівень {logic.level:.2f}, шум {logic.floor:.0f}, мовлення {logic.speaking}")
+        self._model = None
