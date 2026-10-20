@@ -18,8 +18,8 @@
   {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
   {"type": "chat_search", "query": "відпустка море"}  — пошук за назвою й текстом розмов
   {"type": "voice_in", "id": "...", "data": "<base64 WAV/OGG>"}  — розпізнати сказане (faster-whisper)
-  {"type": "tts", "id": "...", "text": "...", "speaker": 0, "effect": "robot", "speed": 1.0}  — озвучити (Piper);
-      speaker/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_PIPER_SPEAKER, KRU_VOICE_EFFECT)
+  {"type": "tts", "id": "...", "text": "...", "voice": "Speaker_67", "effect": "natural", "speed": 1.0}  — озвучити
+      (HolosTTS або Piper); voice/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_TTS_VOICE, KRU_VOICE_EFFECT)
   {"type": "ping"}
 
 Задача не скасовується, коли з'єднання рветься: вона доробляється на сервері, а після перепідключення
@@ -27,7 +27,7 @@
 
 Сервер → клієнт:
   {"type": "hello", "name": "Kru", "model": ..., "version": ..., "user": "owner", "role": "admin",
-   "voice": {"stt": bool, "tts": bool, "effects": {id: назва}, "speakers": [імена голосів]}}
+   "voice": {"stt": bool, "tts": bool, "engine": "holos|piper|", "voices": [назви голосів], "effects": {id: назва}}}
   {"type": "status", "state": "thinking|working|waiting_confirm|idle", ...}
   {"type": "thinking", "text": "..."}         — потік міркувань моделі
   {"type": "token", "text": "..."}            — потік тексту відповіді (чернетка)
@@ -333,8 +333,8 @@ class Connection:
         vid, voice = msg.get("id"), self.agent.voice
         if kind == "tts":
             try:
-                audio = await voice.speak(str(msg.get("text") or ""), msg.get("speaker"), msg.get("effect"),
-                                          msg.get("speed"))
+                audio = await voice.speak(str(msg.get("text") or ""), msg.get("voice"), msg.get("effect"),
+                                          msg.get("speed"), msg.get("speaker"))
             except VoiceError as e:
                 await self.send({"type": "tts_error", "id": vid, "message": str(e)})
                 return
@@ -390,6 +390,7 @@ class Connection:
     async def serve(self) -> None:
         cfg = self.agent.config
         vision = await self.agent.refresh_vision(force=True)
+        await self.agent.voice.refresh_voices()
         await self.send({"type": "hello", "name": cfg.agent_name, "model": cfg.model, "version": __version__,
                          "vision": vision, "user": self.user.name, "role": self.user.role,
                          "voice": self.agent.voice.caps()})

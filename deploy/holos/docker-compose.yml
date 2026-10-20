@@ -1,0 +1,19 @@
+# HolosTTS — природний український голос для Kru (https://github.com/ALERTua/ha-holos-tts,
+# модель patriotyk/HolosTTS). Працює на процесорі, ~1–1,5 ГБ RAM. Запуск: deploy/holos.sh start
+name: kru-holos
+services:
+  holos:
+    image: ghcr.io/alertua/ha-holos-tts:${HOLOS_TAG:-1}
+    container_name: kru-holos
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      HTTP_PORT: 8000
+      VERBALIZE: ${HOLOS_VERBALIZE:-1}               # числа, дати, скорочення — словами
+      THREADS: ${HOLOS_THREADS:-0}                   # 0 — усі ядра (у межах ліміту контейнера)
+      UNLOAD_AFTER_SECONDS: ${HOLOS_UNLOAD:-0}       # >0 — звільняти пам'ять після простою
+      PRELOAD: 1
+    ports:
+      - "127.0.0.1:${HOLOS_PORT:-8890}:8000"         # лише для агента на цій машині
+    volumes:
+      - ${HOLOS_DATA:?}:/data                        # моделі (~3,4 ГБ) і власні голоси (data/voices/*.pt)

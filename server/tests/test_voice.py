@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import io
 import sys
 import types
@@ -57,7 +58,7 @@ def voice_ready(monkeypatch):
     monkeypatch.setitem(sys.modules, "piper", piper)
     monkeypatch.setattr(voice_mod, "decode_audio", lambda data: data)  # декодер перевіряє окремий тест
     monkeypatch.setattr(Voice, "stt_ok", property(lambda self: self.enabled))
-    monkeypatch.setattr(Voice, "tts_ok", property(lambda self: self.enabled))
+    monkeypatch.setattr(Voice, "piper_ok", property(lambda self: True))
     whisper, tts = FakeWhisper(), FakePiper()
 
     def attach(agent: Agent):
@@ -196,10 +197,10 @@ def test_voice_options_and_effects(cfg, voice_ready):
     from kru_agent.voice_fx import EFFECTS, apply
 
     v = Voice(cfg)
-    assert v.options() == (0, "robot", 1.0)  # типово — «М'який робот»
-    assert v.options(2, "droid", 1.2) == (2, "droid", 1.2)
-    assert v.options(-1, "невідомий", "швидко") == (0, "robot", 1.0)  # сміття з клієнта — до типових
-    assert v.options(None, None, 9) == (0, "robot", 1.6)
+    assert v.options() == ("Лада", "natural", 1.0)  # типово — без обробки
+    assert v.options("Тетяна", "droid", 1.2) == ("Тетяна", "droid", 1.2)
+    assert v.options(None, "невідомий", "швидко") == ("Лада", "natural", 1.0)  # сміття з клієнта — до типових
+    assert v.options(None, None, 9, speaker=1) == ("Микита", "natural", 1.6)  # старі клієнти: номер диктора
 
     rate = 22050
     t = np.arange(rate) / rate  # 1 с «голосу»: 220 Гц з обертонами
@@ -223,6 +224,82 @@ def test_voice_options_and_effects(cfg, voice_ready):
 async def test_speak_uses_requested_voice(cfg, voice_ready):
     agent = Agent(cfg, llm=FakeLLM([]))
     _, tts = voice_ready(agent)
-    await agent.voice.speak("Привіт", speaker=1, effect="droid", speed=1.25)
+    await agent.voice.speak("Привіт", voice="Микита", effect="droid", speed=1.25)
     assert tts.said[-1] == ("Привіт.", 1)
     assert tts.length_scales[-1] == pytest.approx(1.14 / 1.25)  # вища висота й швидший темп
+
+
+def _holos(monkeypatch, handler):
+    import httpx
+
+    real = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+
+def _wav(frames: int = 2400, rate: int = 24000) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\x10\x00" * frames)
+    return buf.getvalue()
+
+
+async def test_holos_tts(cfg, monkeypatch):
+    """HolosTTS як окремий сервіс: голоси за назвами, WAV через OpenAI-сумісний API, зрозумілі помилки."""
+    import httpx
+
+    cfg.tts_url = "http://127.0.0.1:8890"
+    cfg.tts_voice = "Speaker_67"
+    requests = []
+
+    state = {"down": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if state["down"]:
+            raise httpx.ConnectError("refused")
+        if request.url.path == "/v1/audio/voices":
+            return httpx.Response(200, json={"voices": ["Speaker_67", "Гаська Шиян", "Speaker_0"]})
+        body = json.loads(request.content)
+        requests.append(body)
+        if body["input"].startswith("Зламай"):
+            return httpx.Response(400, json={"detail": "input is empty"})
+        return httpx.Response(200, content=_wav(), headers={"content-type": "audio/wav"})
+
+    _holos(monkeypatch, handler)
+    v = Voice(cfg)
+    assert v.engine == "holos" and v.tts_ok  # Piper не потрібен
+    await v.refresh_voices(force=True)
+    caps = v.caps()
+    assert caps["engine"] == "holos" and caps["voices"] == ["Speaker_67", "Гаська Шиян", "Speaker_0"]
+
+    audio = await v.speak("**Привіт**, о 7:45 зустріч! ```код```", voice="Гаська Шиян", speed=1.2)
+    assert audio.startswith(b"RIFF")
+    assert requests[-1] == {"input": "Привіт, о 7:45 зустріч! (код показано в чаті).", "response_format": "wav",
+                            "speed": 1.2, "voice": "Гаська Шиян"}  # числа сервіс озвучує сам
+    await v.speak("Як справи?")
+    assert requests[-1]["voice"] == "Speaker_67" and requests[-1]["speed"] == 1.0  # голос сервера за замовчуванням
+    try:
+        import numpy  # noqa: F401 — обробка голосу без numpy вимикається
+        has_numpy = True
+    except ImportError:
+        has_numpy = False
+    if has_numpy:
+        out = await v.speak("Я робот.", effect="droid")
+        assert requests[-1]["speed"] == pytest.approx(1 / 1.14, abs=1e-3)  # повільніше — й стиснути назад
+        with wave.open(io.BytesIO(out)) as w:
+            assert abs(w.getnframes() - 2400 / 1.14) <= 1
+    with pytest.raises(VoiceError, match="HolosTTS: input is empty"):
+        await v.speak("Зламай")
+
+    state["down"] = True
+    with pytest.raises(VoiceError, match="deploy/holos.sh status"):
+        await v.speak("Привіт")
+    await v.refresh_voices(force=True)  # сервіс ще не запустився — список лишається, без помилки
+    assert v.voices() == ["Speaker_67", "Гаська Шиян", "Speaker_0"]
