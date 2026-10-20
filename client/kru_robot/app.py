@@ -6,9 +6,10 @@ import base64
 import math
 import os
 import sys
+import threading
 import time
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,12 +29,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .audio import Player, Recorder
+from .audio import Player, Recorder, make_wav
 from .connection import AgentConnection, normalize_url
 from .icon import app_icon
 from .winplatform import IS_WINDOWS, WinHotkey, autostart_enabled, set_autostart
 from .panel import ChatPanel
 from .robot import RobotWidget
+from . import wake as wakemod
+from .wake import WakeListener
 from .settings import Settings, new_session_id
 
 
@@ -110,6 +113,13 @@ class SettingsDialog(QDialog):
                                                              self.voice_effect.currentData(),
                                                              round(self.voice_speed.value(), 2),
                                                              self.voice_volume.value()))
+        self.wake_sensitivity = QComboBox()
+        for key, title in WAKE_SENSITIVITY.items():
+            self.wake_sensitivity.addItem(title, key)
+        self.wake_sensitivity.setCurrentIndex(max(0, self.wake_sensitivity.findData(s.wake_sensitivity)))
+        self.wake_sensitivity.setToolTip("Як легко робот відгукується на «Кру». Якщо реагує на схожі слова — знизь")
+        self.wake_followup = QCheckBox(f"Після відповіді ще {FOLLOWUP_SEC} с слухати уточнення без імені")
+        self.wake_followup.setChecked(s.wake_followup)
         voice_row = QHBoxLayout()
         voice_row.addWidget(self.voice_name, 3)
         voice_row.addWidget(self.voice_effect, 2)
@@ -124,6 +134,8 @@ class SettingsDialog(QDialog):
         form.addRow("Гучність голосу:", self.voice_volume)
         form.addRow("Голос і звучання:", voice_row)
         form.addRow("Темп мовлення:", speed_row)
+        form.addRow("Чутливість до «Кру»:", self.wake_sensitivity)
+        form.addRow("", self.wake_followup)
         form.addRow("", self.think)
         form.addRow("", self.thinking)
         form.addRow("", self.tools)
@@ -190,7 +202,29 @@ TOOL_ACTIVITY = {
 }
 
 
+WAKE_SENSITIVITY = {"low": "низька — рідше помиляється", "medium": "середня", "high": "висока — чує здалеку"}
+FOLLOWUP_SEC = 6  # стільки слухаємо уточнення без імені після відповіді
+BUSY_PHRASE = "Зачекай хвилинку, я ще працюю над попередньою задачею."
+
+
+def _chime(up: bool) -> bytes:
+    """Короткий м'який сигнал «слухаю» (вгору) / «почув» (вниз)."""
+    import array
+
+    rate, out = 24000, array.array("h")
+    for freq in ((660, 880) if up else (880, 660)):
+        n = int(rate * 0.09)
+        for i in range(n):
+            env = math.sin(math.pi * i / n)  # без клацань
+            out.append(int(9000 * env * math.sin(2 * math.pi * freq * i / rate)))
+    if sys.byteorder == "big":
+        out.byteswap()
+    return make_wav(out.tobytes(), rate)
+
+
 class RobotWindow(QWidget):
+    _wake_model = Signal(object)  # модель Vosk завантажено (шлях) або помилка
+    _wake_progress = Signal(str)
     def __init__(self, settings: Settings, demo: bool = False) -> None:
         super().__init__(
             None,
@@ -222,8 +256,18 @@ class RobotWindow(QWidget):
         self.recorder = Recorder(self)
         self.recorder.finished.connect(self._on_recorded)
         self.recorder.failed.connect(self._on_record_failed)
+        # «завжди слухаю»: подвійний клік — робот чекає на «Кру, …» (див. wake.py)
+        self.chime = Player(self)
+        self._chimes = {True: _chime(True), False: _chime(False)}
+        self._wake_turn = False  # поточна задача — з режиму «Кру»: відповідь голосом, потім уточнення
+        self._wake_pending: str | None = None  # id запису з режиму «Кру», що розпізнається на сервері
+        self._wake_loading = False
+        self._wake_model.connect(self._on_wake_model)
+        self._wake_progress.connect(lambda text: self.panel.set_activity(f"👂 {text}"))
+        self._wire_wake(WakeListener(self))
         self.player = Player(self)
         self.player.stopped.connect(self._on_speech_done)
+        self.player.started.connect(lambda: self.wake.active and self.wake.pause())  # не слухати самого себе
         self._voice_task = False  # поточну задачу поставлено голосом — відповідь озвучити
         self._voice_seq = 0
         self._level_timer = QTimer(self, interval=33)
@@ -324,6 +368,9 @@ class RobotWindow(QWidget):
         self.menu.addAction(menu_icon("export"), "Експорт розмови в Markdown…", lambda: self.export_chat(None))
         self.menu.addAction(menu_icon("stop"), "Зупинити задачу", self.cancel_task)
         self.menu.addSeparator()
+        self.act_wake = QAction(menu_icon("mic"), "Завжди слухати «Кру» (подвійний клік)", self, checkable=True)
+        self.act_wake.toggled.connect(self.set_wake)
+        self.menu.addAction(self.act_wake)
         self.act_thinking = QAction(menu_icon("think"), "Показувати хід думок", self, checkable=True)
         self.act_thinking.setChecked(self.settings.show_thinking)
         self.act_thinking.toggled.connect(self.set_show_thinking)
@@ -357,6 +404,7 @@ class RobotWindow(QWidget):
         self.robot.context_requested.connect(lambda pos: self.menu.popup(pos.toPoint()))
         self.robot.hold_started.connect(self.start_listening)
         self.robot.hold_finished.connect(self.stop_listening)
+        self.robot.double_clicked.connect(self.toggle_wake)
         self.robot.hold_enabled = self.voice_caps["stt"]
 
     def _build_tray(self) -> None:
@@ -399,6 +447,12 @@ class RobotWindow(QWidget):
         s.font_size = dlg.font_px.value()
         s.voice_reply = dlg.voice_reply.currentData()
         s.voice_volume = dlg.voice_volume.value()
+        restart_wake = dlg.wake_sensitivity.currentData() != s.wake_sensitivity and self.wake.active
+        s.wake_sensitivity = dlg.wake_sensitivity.currentData()
+        s.wake_followup = dlg.wake_followup.isChecked()
+        if restart_wake:
+            self.set_wake(False)
+            self.set_wake(True)
         s.voice_name = dlg.voice_name.currentData()
         s.voice_sound = dlg.voice_effect.currentData()
         s.voice_speed = round(dlg.voice_speed.value(), 2)
@@ -465,6 +519,8 @@ class RobotWindow(QWidget):
             self.robot.set_state("waiting", 1.5, then=self.robot.state)
             return
         self.player.stop()
+        if self.wake.active:
+            self.wake.pause()
         if self.recorder.start():
             self._state_before_listen = self.robot.state if self.robot.state != "listening" else "idle"
             self.robot.set_state("listening")
@@ -485,7 +541,9 @@ class RobotWindow(QWidget):
 
     def _end_listening(self) -> None:
         self.panel.set_recording(False)
-        if not self.player.playing:
+        if self.wake.active:
+            self.wake.listen()
+        elif not self.player.playing:
             self._level_timer.stop()
             self.robot.voice_level = 0.0
 
@@ -507,6 +565,9 @@ class RobotWindow(QWidget):
         self.show_panel()
 
     def _on_voice_text(self, ev: dict) -> None:
+        if self._wake_pending is not None and ev.get("id") == self._wake_pending:
+            self._on_wake_text(ev)
+            return
         text = " ".join(str(ev.get("text", "")).split())
         if not text:
             self.panel.set_activity("🎤 Не почув слів — спробуй ще раз, ближче до мікрофона")
@@ -518,7 +579,7 @@ class RobotWindow(QWidget):
 
     def _wants_speech(self) -> bool:
         mode = self.settings.voice_reply
-        return self.voice_caps["tts"] and (mode == "always" or (mode == "voice" and self._voice_task))
+        return self.voice_caps["tts"] and (self._wake_turn or mode == "always" or (mode == "voice" and self._voice_task))
 
     def _speak(self, text: str, voice=None, effect=None, speed=None, volume=None) -> None:
         s = self.settings
@@ -541,20 +602,203 @@ class RobotWindow(QWidget):
         except ValueError:
             return
         if self.recorder.active or self.busy:
+            if self._wake_turn:
+                self._after_wake_reply()
             return  # уже говорить сам користувач або пішла нова задача — стара відповідь неактуальна
         if self.player.play(wav, self._speech_volume / 100):
             self.robot.set_state("talking")
             self._level_timer.start()
 
     def _on_speech_done(self) -> None:
-        self._level_timer.stop()
+        if not self.wake.active:
+            self._level_timer.stop()
         self.robot.voice_level = 0.0
         if self.robot.state == "talking":
             self.robot.set_state("happy", 1.5)
             QTimer.singleShot(3300, self._back_to_idle)
+        if self._wake_turn:
+            self._after_wake_reply()
+        elif self.wake.active and not self._wake_pending:
+            QTimer.singleShot(300, self._wake_listen)  # відлуння власного голосу встигне затихнути
 
     def _feed_level(self) -> None:
-        self.robot.voice_level = self.recorder.level if self.recorder.active else self.player.level
+        if self.recorder.active:
+            self.robot.voice_level = self.recorder.level
+        elif self.player.playing:
+            self.robot.voice_level = self.player.level
+        else:
+            self.robot.voice_level = self.wake.level if self.wake.active else 0.0
+
+    # ---------------- «завжди слухаю» ----------------
+    def _wire_wake(self, listener) -> None:
+        self.wake = listener
+        listener.woke.connect(self._on_wake)
+        listener.speech.connect(self._on_wake_speech)
+        listener.utterance.connect(self._on_wake_utterance)
+        listener.timeout.connect(self._on_wake_timeout)
+        listener.failed.connect(self._on_wake_failed)
+
+    def toggle_wake(self) -> None:
+        self.set_wake(not (self.wake.active or self._wake_loading))
+
+    def _sync_wake_action(self, on: bool) -> None:
+        if self.act_wake.isChecked() != on:
+            self.act_wake.blockSignals(True)
+            self.act_wake.setChecked(on)
+            self.act_wake.blockSignals(False)
+
+    def set_wake(self, on: bool, auto: bool = False) -> None:
+        """Подвійний клік / пункт меню: робот постійно слухає й відгукується на «Кру, …»."""
+        self.touch()
+        if on == (self.wake.active or self._wake_loading):
+            self._sync_wake_action(on)
+            return
+        if not on:
+            self.wake.stop()
+            self._wake_loading = self._wake_turn = False
+            self._wake_pending = None
+            self.robot.wake_mode = False
+            self._sync_wake_action(False)
+            if not self.player.playing and not self.recorder.active:
+                self._level_timer.stop()
+            self.settings.wake_enabled = False
+            self.settings.save()
+            self.panel.set_activity("👂 Режим «Кру» вимкнено")
+            return
+        problem = ""
+        if not self.voice_caps["stt"]:
+            problem = ("на сервері ще не встановлено розпізнавання мовлення: deploy/voice.sh install"
+                       if self.conn.is_connected() else "немає з'єднання з сервером")
+        else:
+            try:
+                import vosk  # noqa: F401
+            except Exception:  # noqa: BLE001
+                problem = "немає бібліотеки vosk — онови робота: cd ~/bot && ./update.sh"
+        if problem:
+            self._sync_wake_action(False)
+            if not auto:
+                self.panel.add_entry("error", f"Режим «Кру»: {problem}")
+                self.show_panel()
+            return
+        self.settings.wake_enabled = True
+        self.settings.save()
+        self.robot.wake_mode = True
+        self._sync_wake_action(True)
+        path = wakemod.installed_model()
+        if path is not None:
+            self._start_wake(path)
+            return
+        self._wake_loading = True
+        self.panel.set_activity("👂 Готую режим «Кру»: завантажую модель розпізнавання імені…")
+
+        def work() -> None:
+            try:
+                result = wakemod.download_model(self._wake_progress.emit)
+            except Exception as e:  # noqa: BLE001
+                result = e
+            self._wake_model.emit(result)
+
+        threading.Thread(target=work, name="kru-wake-model", daemon=True).start()
+
+    def _on_wake_model(self, result) -> None:
+        if not self._wake_loading:
+            return  # поки вантажилось, режим вимкнули
+        self._wake_loading = False
+        if isinstance(result, Exception):
+            self.robot.wake_mode = False
+            self._sync_wake_action(False)
+            self.settings.wake_enabled = False
+            self.settings.save()
+            self.panel.add_entry("error", f"Режим «Кру»: не вдалося завантажити модель — {result}")
+            self.show_panel()
+            return
+        self._start_wake(result)
+
+    def _start_wake(self, path) -> None:
+        if not self.wake.start(path, self.settings.wake_sensitivity):
+            return  # причину покаже failed
+        self.robot.wake_mode = True
+        self._sync_wake_action(True)
+        self._level_timer.start()
+        self.panel.set_activity("👂 Слухаю. Поклич: «Кру, …» — подвійний клік вимикає")
+
+    def _wake_listen(self) -> None:
+        if self.wake.active and not self.player.playing and not self.recorder.active:
+            self.wake.listen()
+
+    def _on_wake_failed(self, reason: str) -> None:
+        self.set_wake(False)
+        self.panel.add_entry("error", f"Режим «Кру»: {reason}")
+        self.show_panel()
+
+    def _on_wake(self) -> None:
+        """Почув ім'я — слухає питання."""
+        self.touch()
+        self.chime.play(self._chimes[True], self.settings.voice_volume / 200)
+        self.robot.set_state("listening")
+        self.panel.set_activity("🎤 Слухаю…")
+
+    def _on_wake_speech(self) -> None:
+        self.touch()
+        self.robot.set_state("listening")
+        self.panel.set_activity("🎤 Слухаю…")
+
+    def _on_wake_timeout(self) -> None:
+        if self.robot.state == "listening":
+            self.robot.set_state("idle")
+        self.panel.set_activity("")
+        self.wake.listen()
+
+    def _on_wake_utterance(self, wav: bytes, need_name: bool) -> None:
+        """Фраза записана — на сервер (він перевірить, що вона починається з «Кру»)."""
+        if self.busy:  # агент ще працює — нову задачу не беремо (як і з чату)
+            self.robot.set_state("waiting", 2.0, then="thinking")
+            self.panel.set_activity("⏳ " + BUSY_PHRASE)
+            self.wake.listen()
+            return
+        self._voice_seq += 1
+        vid = f"w{self._voice_seq}"
+        msg = {"type": "voice_in", "id": vid, "data": base64.b64encode(wav).decode("ascii")}
+        if need_name:
+            msg["wake"] = "require"
+        if not self.conn.send(msg):
+            self.robot.set_state("idle")
+            self.panel.set_activity("📡 Немає з'єднання з сервером")
+            self.wake.listen()
+            return
+        self._wake_pending = vid
+        self.robot.set_state("thinking")
+        self.panel.set_activity("🎤 Розпізнаю…")
+
+    def _on_wake_text(self, ev: dict) -> None:
+        self._wake_pending = None
+        text = " ".join(str(ev.get("text", "")).split())
+        if ev.get("wake_only"):  # «Кру…» і пауза — чекаємо на саме питання
+            self.chime.play(self._chimes[True], self.settings.voice_volume / 200)
+            self.robot.set_state("listening")
+            self.panel.set_activity("🎤 Так? Слухаю…")
+            QTimer.singleShot(300, lambda: self.wake.active and self.wake.await_command(FOLLOWUP_SEC))
+            return
+        if ev.get("ignored") or not text:  # почулося — мовчки повертаємось до чекання
+            if self.robot.state in {"thinking", "listening"}:
+                self.robot.set_state("idle")
+            self.panel.set_activity("")
+            self.wake.listen()
+            return
+        self.chime.play(self._chimes[False], self.settings.voice_volume / 200)
+        self._wake_turn = True
+        self.show_panel()
+        self.send_task(text, by_voice=True)
+
+    def _after_wake_reply(self) -> None:
+        """Відповідь на «Кру, …» прозвучала — ще кілька секунд слухаємо уточнення без імені."""
+        self._wake_turn = False
+        if not self.wake.active:
+            return
+        if self.settings.wake_followup:
+            QTimer.singleShot(300, lambda: self.wake.active and self.wake.await_command(FOLLOWUP_SEC))
+        else:
+            QTimer.singleShot(300, self._wake_listen)
 
     def _set_voice_caps(self, caps) -> None:
         caps = caps if isinstance(caps, dict) else {}
@@ -564,6 +808,8 @@ class RobotWindow(QWidget):
                                       if isinstance(v, str)]}
         self.robot.hold_enabled = self.voice_caps["stt"]
         self.panel.set_voice(self.voice_caps["stt"])
+        if self.settings.wake_enabled and self.voice_caps["stt"] and not (self.wake.active or self._wake_loading):
+            self.set_wake(True, auto=True)  # режим був увімкнений до перезапуску
 
     def _on_panel_resized(self, width: int, feed_height: int) -> None:
         self.settings.panel_width, self.settings.panel_feed_height = width, feed_height
@@ -993,11 +1239,16 @@ class RobotWindow(QWidget):
             self._on_voice_text(ev)
             return
         if t in {"voice_error", "tts_error"}:
-            if t == "voice_error":
+            if t == "voice_error" and self._wake_pending is not None and ev.get("id") == self._wake_pending:
+                self._wake_pending = None
+                self.robot.set_state("sad", 1.5, then="idle")
+                self.panel.set_activity(f"🎤 {ev.get('message', 'не вдалося розпізнати')}")
+                self.wake.listen()
+            elif t == "voice_error":
                 self._on_record_failed(str(ev.get("message", "помилка")))
             else:
                 self.panel.set_activity(f"🔇 {ev.get('message', 'не вдалося озвучити')}")
-                if self.robot.state == "talking":
+                if self.robot.state == "talking" or self._wake_turn:
                     self._on_speech_done()
             return
         if t == "tts_audio":
@@ -1106,6 +1357,8 @@ class RobotWindow(QWidget):
                 talk = min(6.0, 1.0 + len(text) / 120)
                 self.robot.set_state("talking", talk, then="happy")
                 QTimer.singleShot(int(talk * 1000) + 1800, self._back_to_idle)
+                if self._wake_turn:
+                    self._after_wake_reply()
             self._voice_task = False
             if not self.panel.shown:
                 self.show_panel()
@@ -1114,6 +1367,8 @@ class RobotWindow(QWidget):
         elif t == "error":
             self.panel.add_entry("error", ev.get("message", "помилка"))
             self.robot.set_state("sad", 3.0)
+            if self._wake_turn:
+                self._after_wake_reply()
 
     def _on_notify(self, ev: dict) -> None:
         """Заплановане завдання виконано: сповіщення з коротким результатом і кнопкою «Відкрити чат»."""

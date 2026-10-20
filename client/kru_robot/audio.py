@@ -85,6 +85,32 @@ def envelope(wav_bytes: bytes, frame_ms: int = 40) -> tuple[list[float], int]:
     return [min(1.0, (v / top) ** 0.7) for v in levels], frame_ms
 
 
+class MicError(Exception):
+    pass
+
+
+def open_input(parent: QObject | None = None, rate: int = 16000):
+    """QAudioSource для мікрофона за замовчуванням: 16 кГц моно 16 біт, якщо пристрій уміє, інакше — його рідний
+    формат (відліки потім зводяться до to_mono16). → (source, (формат, канали, частота)); MicError — якщо ніяк."""
+    try:
+        from PySide6.QtMultimedia import QAudioFormat, QAudioSource, QMediaDevices
+    except ImportError as e:
+        raise MicError("у цій збірці Qt немає QtMultimedia") from e
+    dev = QMediaDevices.defaultAudioInput()
+    if dev.isNull():
+        raise MicError("мікрофон не знайдено")
+    fmt = QAudioFormat()
+    fmt.setSampleRate(rate)
+    fmt.setChannelCount(1)
+    fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+    if not dev.isFormatSupported(fmt):
+        fmt = dev.preferredFormat()
+    name = fmt.sampleFormat().name
+    if name not in {"Int16", "Float", "Int32", "UInt8"}:
+        raise MicError(f"мікрофон дає звук у форматі {name}, який не підтримується")
+    return QAudioSource(dev, fmt, parent), (name, max(1, fmt.channelCount()), fmt.sampleRate())
+
+
 class Recorder(QObject):
     """Запис з мікрофона за замовчуванням: start() … stop() → finished(wav) або failed(причина)."""
 
@@ -109,28 +135,12 @@ class Recorder(QObject):
         if self._source is not None:
             return True
         try:
-            from PySide6.QtMultimedia import QAudioFormat, QAudioSource, QMediaDevices
-        except ImportError:
-            self.failed.emit("у цій збірці Qt немає QtMultimedia")
+            self._source, self._fmt = open_input(self)
+        except MicError as e:
+            self.failed.emit(str(e))
             return False
-        dev = QMediaDevices.defaultAudioInput()
-        if dev.isNull():
-            self.failed.emit("мікрофон не знайдено")
-            return False
-        fmt = QAudioFormat()
-        fmt.setSampleRate(16000)
-        fmt.setChannelCount(1)
-        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-        if not dev.isFormatSupported(fmt):
-            fmt = dev.preferredFormat()
-        name = fmt.sampleFormat().name
-        if name not in {"Int16", "Float", "Int32", "UInt8"}:
-            self.failed.emit(f"мікрофон дає звук у форматі {name}, який не підтримується")
-            return False
-        self._fmt = (name, max(1, fmt.channelCount()), fmt.sampleRate())
         self._chunks = []
         self.level = 0.0
-        self._source = QAudioSource(dev, fmt, self)
         self._io = self._source.start()
         if self._io is None:
             self._source = None
@@ -181,7 +191,7 @@ class Player(QObject):
         self._output = None
         self._levels: list[float] = []
         self._frame_ms = 40
-        self._file = os.path.join(tempfile.gettempdir(), f"kru-speech-{os.getpid()}.wav")
+        self._file = os.path.join(tempfile.gettempdir(), f"kru-speech-{os.getpid()}-{id(self)}.wav")
         self.playing = False
 
     @property

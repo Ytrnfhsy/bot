@@ -693,6 +693,209 @@ def run_selftest(app: QApplication, report_path: str) -> int:
     step(50, lambda: check("voice_hold", voice_hold_start))
     step(700, lambda: check("voice_roundtrip", voice_hold_release))
     step(50, lambda: check("voice_settings", voice_settings_flow))
+
+    def wake_logic_check():
+        """Логіка «Кру» на синтетичному звуці: ім'я → запис до паузи; уточнення; тайм-аут."""
+        import array
+        import json as _json
+        import math as _m
+
+        from .wake import WakeLogic
+
+        rate = 16000
+
+        def tone(sec):
+            return array.array("h", [int(8000 * _m.sin(2 * _m.pi * 220 * i / rate)) for i in range(int(rate * sec))]).tobytes()
+
+        def quiet(sec):
+            return b"\0\0" * int(rate * sec)
+
+        class FakeRec:  # «чує» ім'я після ~0,3 с гучного звуку
+            loud = 0
+
+            def Reset(self):
+                self.loud = 0
+
+            def AcceptWaveform(self, frame):
+                self.loud += max(abs(x) for x in array.array("h", frame)) > 2000
+                return False
+
+            def PartialResult(self):
+                return _json.dumps({"partial": "кру" if self.loud >= 10 else "[unk]"})
+
+            def Result(self):
+                return "{}"
+
+        lg = WakeLogic(rate, FakeRec(), "medium")
+        need(lg.feed(quiet(1.0)) == [], "тиша щось викликала")
+        ev = lg.feed(tone(2.0))
+        need([e[0] for e in ev] == ["wake"], f"ім'я: {ev}")
+        ev = lg.feed(quiet(1.2))
+        need(len(ev) == 1 and ev[0][0] == "utterance" and ev[0][2] is True, f"фраза: {[e[0] for e in ev]}")
+        need(3.0 < (len(ev[0][1]) - 44) / 2 / rate < 3.6, "довжина запису (з початком фрази)")
+        need(lg.feed(tone(1.0)) == [], "після фрази чекає на застосунок")
+        lg.await_command(0.5)
+        need(lg.feed(quiet(0.8)) == [("timeout",)], "тайм-аут уточнення")
+        lg.await_command(3)
+        ev = lg.feed(quiet(0.3) + tone(1.0) + quiet(1.2))
+        need([(e[0], e[2] if len(e) > 2 else None) for e in ev] == [("speech", None), ("utterance", False)],
+             f"уточнення: {ev}")
+        lg.pause()
+        need(lg.feed(tone(2.0)) == [], "на паузі слухає")
+        return "ok"
+
+    check("wake_logic", wake_logic_check)
+
+    def double_click_check():
+        """Клік відкриває панель (з паузою ~0,3 с), подвійний — режим «Кру», а не два кліки."""
+        from PySide6.QtCore import QPoint
+        from PySide6.QtTest import QTest
+
+        got = []
+        r = win.robot
+        r.clicked.connect(lambda: got.append("click"))
+        r.double_clicked.connect(lambda: got.append("double"))
+        orig_toggle, orig_click = win.toggle_wake, win.on_robot_clicked
+        r.clicked.disconnect(win.on_robot_clicked)
+        r.double_clicked.disconnect(win.toggle_wake)
+        try:
+            c = QPoint(r.width() // 2, r.height() // 2)
+            QTest.mouseClick(r, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c)
+            QTest.mouseClick(r, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c)
+            QTest.qWait(400)
+            need(got == ["double"], f"подвійний: {got}")
+            got.clear()
+            QTest.mouseClick(r, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c)
+            need(got == [], "одиночний клік спрацював, не дочекавшись другого")
+            QTest.qWait(400)
+            need(got == ["click"], f"одиночний: {got}")
+        finally:
+            r.clicked.connect(orig_click)
+            r.double_clicked.connect(orig_toggle)
+        return "ok"
+
+    def wake_flow():
+        """«Кру, яка погода?» → сервер → задача → відповідь голосом (навіть коли «відповідати голосом: ні») →
+        уточнення без імені; хибне спрацювання — мовчки; подвійний клік вимикає."""
+        from pathlib import Path
+
+        from PySide6.QtCore import QObject, Signal
+
+        from . import wake as wakemod
+
+        class FakeWake(QObject):
+            woke = Signal()
+            speech = Signal()
+            utterance = Signal(bytes, bool)
+            timeout = Signal()
+            failed = Signal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.active, self.level, self.calls = False, 0.3, []
+
+            def start(self, path, sens):
+                self.active = True
+                self.calls.append(("start", sens))
+                return True
+
+            def stop(self):
+                self.active = False
+                self.calls.append(("stop",))
+
+            def listen(self):
+                self.calls.append(("listen",))
+
+            def await_command(self, sec):
+                self.calls.append(("await", sec))
+
+            def pause(self):
+                self.calls.append(("pause",))
+
+        sent, played = [], []
+        orig = (win.conn.send, win.wake, wakemod.installed_model, win.player.play, win.chime.play)
+        win.conn.send = lambda msg: sent.append(msg) or True
+        fake = FakeWake()
+        win._wire_wake(fake)
+        wakemod.installed_model = lambda: Path("/fake/vosk-model")
+        win.chime.play = lambda wav, volume=1.0: played.append("chime") or True
+
+        def fake_play(wav, volume=1.0):
+            played.append("speech")
+            win.player.playing = True
+            win.player.started.emit()
+            return True
+
+        win.player.play = fake_play
+        voice_reply = win.settings.voice_reply
+        try:
+            win.new_chat()
+            win.busy = False
+            win.settings.voice_reply = "off"  # у режимі «Кру» відповідь однаково голосом
+            win._set_voice_caps({"stt": True, "tts": True})
+            win.robot.double_clicked.emit()
+            need(fake.active and win.robot.wake_mode and win.act_wake.isChecked(), "режим не ввімкнувся")
+            need(win.settings.wake_enabled, "не запам'ятав увімкнення")
+            fake.woke.emit()
+            need(win.robot.state == "listening" and "chime" in played, f"почув ім'я: {win.robot.state}")
+            fake.utterance.emit(b"RIFF-not-really", True)
+            vin = sent[-1]
+            need(vin["type"] == "voice_in" and vin["wake"] == "require", f"запит: {vin}")
+            win.on_event({"type": "voice_text", "id": vin["id"], "text": "", "ignored": True})
+            need(fake.calls[-1] == ("listen",) and not any(m["type"] == "task" for m in sent), "хибне спрацювання")
+            fake.utterance.emit(b"RIFF", True)
+            win.on_event({"type": "voice_text", "id": sent[-1]["id"], "text": "", "wake_only": True})
+            need(win.robot.state == "listening", "«Кру…» з паузою — має слухати питання")
+            QTest_wait(400)
+            need(fake.calls[-1] == ("await", 6), f"чекає питання: {fake.calls[-1]}")
+            fake.utterance.emit(b"RIFF", False)
+            need("wake" not in sent[-1], "уточнення без вимоги імені")
+            win.on_event({"type": "voice_text", "id": sent[-1]["id"], "text": "Яка сьогодні погода?"})
+            task = sent[-1]
+            need(task["type"] == "task" and task["text"] == "Яка сьогодні погода?", f"задача: {task}")
+            win.on_event({"type": "final", "text": "Сонячно, +12."})
+            win.on_event({"type": "status", "state": "idle"})
+            tts = sent[-1]
+            need(tts["type"] == "tts", "відповідь не озвучується")
+            import base64 as _b64
+
+            from .audio import make_wav
+
+            win.on_event({"type": "tts_audio", "id": tts["id"], "format": "wav",
+                          "data": _b64.b64encode(make_wav(b"\0\0" * 800, 16000)).decode()})
+            need(("pause",) in fake.calls, "слухав сам себе під час відповіді")
+            win.player.stop()
+            QTest_wait(400)
+            need(fake.calls[-1] == ("await", 6), f"уточнення після відповіді: {fake.calls[-1]}")
+            win.robot.double_clicked.emit()
+            need(not fake.active and not win.robot.wake_mode and not win.act_wake.isChecked(), "не вимкнувся")
+            need(not win.settings.wake_enabled, "вимкнення не запам'яталось")
+        finally:
+            win.conn.send = orig[0]
+            win._wire_wake(orig[1])
+            wakemod.installed_model, win.player.play, win.chime.play = orig[2], orig[3], orig[4]
+            win.settings.voice_reply = voice_reply
+            win.settings.wake_enabled = False
+            win.robot.wake_mode = False
+            win.busy = False
+            win.panel.set_busy(False)
+            win.new_chat()
+        return "ok"
+
+    def QTest_wait(ms):
+        from PySide6.QtTest import QTest
+
+        QTest.qWait(ms)
+
+    def vosk_check():
+        import vosk
+
+        need(hasattr(vosk, "KaldiRecognizer") and hasattr(vosk, "Model"), "vosk неповний")
+        return getattr(vosk, "__version__", "ok")
+
+    step(50, lambda: check("vosk_import", vosk_check))
+    step(50, lambda: check("double_click", double_click_check))
+    step(50, lambda: check("wake_flow", wake_flow))
     step(50, voice_cleanup)
     step(50, lambda: check("panel_height", overlap_flow))
     step(300, lambda: check("no_overlap", overlap_check))
