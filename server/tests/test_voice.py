@@ -39,9 +39,11 @@ class FakePiper:
 
     def __init__(self) -> None:
         self.said: list[tuple[str, int | None]] = []
+        self.length_scales: list[float] = []
 
     def synthesize_wav(self, text, wav, syn_config=None):
         self.said.append((text, syn_config.speaker_id))
+        self.length_scales.append(syn_config.length_scale)
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(22050)
@@ -51,7 +53,7 @@ class FakePiper:
 @pytest.fixture
 def voice_ready(monkeypatch):
     piper = types.ModuleType("piper")
-    piper.SynthesisConfig = lambda speaker_id=None: types.SimpleNamespace(speaker_id=speaker_id)
+    piper.SynthesisConfig = lambda **kw: types.SimpleNamespace(**{"speaker_id": None, "length_scale": None, **kw})
     monkeypatch.setitem(sys.modules, "piper", piper)
     monkeypatch.setattr(voice_mod, "decode_audio", lambda data: data)  # декодер перевіряє окремий тест
     monkeypatch.setattr(Voice, "stt_ok", property(lambda self: self.enabled))
@@ -80,7 +82,8 @@ def test_speech_text_reads_like_a_human():
 
 def test_caps_without_libraries(cfg):
     cfg.voice = "off"
-    assert Voice(cfg).caps() == {"stt": False, "tts": False}
+    caps = Voice(cfg).caps()
+    assert (caps["stt"], caps["tts"]) == (False, False) and caps["effects"]["robot"] == "М'який робот"
     cfg.voice = "auto"
     v = Voice(cfg)
     assert v.voice_path == cfg.data_dir / "voice" / "uk_UA-ukrainian_tts-medium.onnx"
@@ -89,6 +92,7 @@ def test_caps_without_libraries(cfg):
 
 async def test_transcribe_and_speak(cfg, voice_ready):
     cfg.piper_speaker = 2
+    cfg.voice_effect = "natural"  # без обробки — тут перевіряємо сам синтез
     agent = Agent(cfg, llm=FakeLLM([]))
     whisper, tts = voice_ready(agent)
     assert await agent.voice.transcribe(b"RIFF....") == "яка погода в Києві"
@@ -119,7 +123,8 @@ def test_ws_voice_roundtrip(cfg, voice_ready):
     client = TestClient(create_app(cfg, agent=agent))
     with client, client.websocket_connect("/ws?token=secret") as ws:
         hello = ws.receive_json()
-        assert hello["type"] == "hello" and hello["voice"] == {"stt": True, "tts": True}
+        assert hello["type"] == "hello" and (hello["voice"]["stt"], hello["voice"]["tts"]) == (True, True)
+        assert "droid" in hello["voice"]["effects"]
         ws.send_json({"type": "voice_in", "id": "v1", "data": base64.b64encode(b"RIFF").decode()})
         heard, _ = _until(ws, "voice_text")
         assert heard == {"type": "voice_text", "id": "v1", "text": "яка погода в Києві"}
@@ -138,7 +143,8 @@ def test_ws_voice_not_installed(cfg):
     cfg.voice = "off"
     client = TestClient(create_app(cfg, agent=Agent(cfg, llm=FakeLLM([]))))
     with client, client.websocket_connect("/ws?token=secret") as ws:
-        assert ws.receive_json()["voice"] == {"stt": False, "tts": False}
+        caps = ws.receive_json()["voice"]
+        assert (caps["stt"], caps["tts"]) == (False, False)
         ws.send_json({"type": "tts", "id": "t", "text": "привіт"})
         assert "voice.sh install" in _until(ws, "tts_error")[0]["message"]
 
@@ -182,3 +188,41 @@ def test_decode_wav_without_pyav():
     assert np.allclose(stereo, [0.25, -0.5])
     resampled = decode_audio(wav(48000, 1, [8192] * 4800))  # 0,1 с з 48 кГц → 1600 відліків 16 кГц
     assert len(resampled) == 1600 and np.allclose(resampled, 0.25)
+
+
+def test_voice_options_and_effects(cfg, voice_ready):
+    """Звучання: голос/ефект/темп із запиту клієнта; ефект зберігає тривалість і не перевантажує звук."""
+    np = pytest.importorskip("numpy")
+    from kru_agent.voice_fx import EFFECTS, apply
+
+    v = Voice(cfg)
+    assert v.options() == (0, "robot", 1.0)  # типово — «М'який робот»
+    assert v.options(2, "droid", 1.2) == (2, "droid", 1.2)
+    assert v.options(-1, "невідомий", "швидко") == (0, "robot", 1.0)  # сміття з клієнта — до типових
+    assert v.options(None, None, 9) == (0, "robot", 1.6)
+
+    rate = 22050
+    t = np.arange(rate) / rate  # 1 с «голосу»: 220 Гц з обертонами
+    sig = (0.6 * np.sin(2 * np.pi * 220 * t) + 0.3 * np.sin(2 * np.pi * 440 * t)) * np.hanning(rate)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes((sig * 32767).astype("<i2").tobytes())
+    for name, fx in EFFECTS.items():
+        out = apply(buf.getvalue(), fx)
+        with wave.open(io.BytesIO(out)) as w:
+            y = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768
+            assert w.getframerate() == rate
+        assert abs(len(y) - rate / fx.pitch) <= 1, name  # pitch: Piper синтезує довше рівно на стільки ж
+        assert 0.8 < np.max(np.abs(y)) <= 0.9 and np.all(np.isfinite(y)), name
+        assert abs(y[0]) < 1e-3 and abs(y[-1]) < 1e-3, name  # без клацань на краях
+
+
+async def test_speak_uses_requested_voice(cfg, voice_ready):
+    agent = Agent(cfg, llm=FakeLLM([]))
+    _, tts = voice_ready(agent)
+    await agent.voice.speak("Привіт", speaker=1, effect="droid", speed=1.25)
+    assert tts.said[-1] == ("Привіт.", 1)
+    assert tts.length_scales[-1] == pytest.approx(1.14 / 1.25)  # вища висота й швидший темп

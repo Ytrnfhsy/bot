@@ -114,6 +114,7 @@ class Config:
     whisper_device: str = "cpu"  # відеопам'ять зайнята моделлю агента
     piper_voice: str = ""  # шлях до .onnx; порожньо — <data_dir>/voice/uk_UA-ukrainian_tts-medium.onnx
     piper_speaker: int = 0  # ukrainian_tts: 0 — Лада, 1 — Микита, 2 — Тетяна
+    voice_effect: str = "robot"  # звучання за замовчуванням (voice_fx.EFFECTS); клієнт може обрати своє
     shell_timeout: int = 120
     python_timeout: int = 120
     searxng_url: str = ""
@@ -185,6 +186,7 @@ class Config:
             whisper_device=_env("WHISPER_DEVICE", d.whisper_device),
             piper_voice=_env("PIPER_VOICE", d.piper_voice),
             piper_speaker=int(_env("PIPER_SPEAKER", str(d.piper_speaker))),
+            voice_effect=_env("VOICE_EFFECT", d.voice_effect),
             shell_timeout=int(_env("SHELL_TIMEOUT", str(d.shell_timeout))),
             python_timeout=int(_env("PYTHON_TIMEOUT", str(d.python_timeout))),
             searxng_url=_env("SEARXNG_URL", d.searxng_url),

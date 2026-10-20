@@ -57,8 +57,12 @@ class Voice:
     def tts_ok(self) -> bool:
         return self.enabled and _importable("piper") and self.voice_path.is_file()
 
-    def caps(self) -> dict[str, bool]:
-        return {"stt": self.stt_ok, "tts": self.tts_ok}
+    def caps(self) -> dict:
+        from .voice_fx import EFFECTS
+
+        return {"stt": self.stt_ok, "tts": self.tts_ok,
+                "effects": {k: e.title for k, e in EFFECTS.items()},
+                "speakers": ["Лада", "Микита", "Тетяна"] if DEFAULT_VOICE in self.voice_path.name else []}
 
     # ---------------- розпізнавання ----------------
     def _load_stt(self):
@@ -101,7 +105,24 @@ class Voice:
             self._tts = PiperVoice.load(str(self.voice_path))
         return self._tts
 
-    def _speak(self, text: str) -> bytes:
+    def options(self, speaker=None, effect=None, speed=None) -> tuple[int, str, float]:
+        """Голос, звучання й темп: з запиту клієнта, інакше — з налаштувань сервера."""
+        from .voice_fx import EFFECTS
+
+        sp = speaker if isinstance(speaker, int) and not isinstance(speaker, bool) and speaker >= 0 \
+            else self.config.piper_speaker
+        fx = effect if effect in EFFECTS else (self.config.voice_effect if self.config.voice_effect in EFFECTS
+                                               else "natural")
+        try:
+            sd = min(1.6, max(0.6, float(speed))) if speed is not None else 1.0
+        except (TypeError, ValueError):
+            sd = 1.0
+        return sp, fx, sd
+
+    def _speak(self, text: str, speaker: int, effect: str, speed: float) -> bytes:
+        from .voice_fx import EFFECTS, apply
+
+        fx = EFFECTS[effect]
         voice = self._load_tts()
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wav:
@@ -109,14 +130,22 @@ class Voice:
                 from piper import SynthesisConfig
 
                 speakers = int(getattr(voice.config, "num_speakers", 1) or 1)
-                speaker = self.config.piper_speaker if 0 <= self.config.piper_speaker < speakers else None
-                voice.synthesize_wav(text, wav, syn_config=SynthesisConfig(speaker_id=speaker))
+                # вища висота = синтезуємо повільніше на той самий коефіцієнт, а voice_fx «прискорює» назад
+                voice.synthesize_wav(text, wav, syn_config=SynthesisConfig(
+                    speaker_id=speaker if 0 <= speaker < speakers else None, length_scale=fx.pitch / speed))
             except ImportError:  # старіший piper-tts (1.2)
-                voice.synthesize(text, wav, speaker_id=self.config.piper_speaker or None)
-        return buf.getvalue()
+                voice.synthesize(text, wav, speaker_id=speaker or None, length_scale=fx.pitch / speed)
+        audio = buf.getvalue()
+        if effect == "natural":
+            return audio
+        try:
+            return apply(audio, fx)
+        except ImportError:  # без numpy (Piper зазвичай тягне його сам) — звичайний голос, а не помилка
+            log.warning("numpy не встановлено — звучання «%s» недоступне, голос без обробки", effect)
+            return audio
 
-    async def speak(self, text: str) -> bytes:
-        """Текст відповіді → WAV."""
+    async def speak(self, text: str, speaker=None, effect=None, speed=None) -> bytes:
+        """Текст відповіді → WAV (голос speaker, звучання effect — див. voice_fx.EFFECTS, темп speed)."""
         if not self.tts_ok:
             raise VoiceError("Озвучення не встановлено на сервері: deploy/voice.sh install")
         speech = speech_text(text)
@@ -124,7 +153,7 @@ class Voice:
             raise VoiceError("Нема чого озвучувати")
         async with self._tts_lock:
             try:
-                return await asyncio.to_thread(self._speak, speech)
+                return await asyncio.to_thread(self._speak, speech, *self.options(speaker, effect, speed))
             except Exception as e:  # noqa: BLE001
                 log.exception("Озвучення не вдалося")
                 raise VoiceError(f"Не вдалося озвучити: {e}") from e

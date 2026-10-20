@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLineEdit,
+    QPushButton,
     QMenu,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -37,8 +39,16 @@ from .settings import Settings, new_session_id
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
 
+# що сервер уміє, якщо він ще не сказав (старіший сервер чи немає з'єднання)
+DEFAULT_EFFECTS = {"natural": "Звичайний", "robot": "М'який робот", "digital": "Цифровий помічник",
+                   "droid": "Маленький дроїд", "mech": "Великий робот"}
+DEFAULT_SPEAKERS = ["Лада", "Микита", "Тетяна"]
+PREVIEW_TEXT = "Привіт! Я Kru. Ось так тепер звучить мій голос. Чим можу допомогти?"
+
+
 class SettingsDialog(QDialog):
-    def __init__(self, s: Settings, parent: QWidget | None = None) -> None:
+    def __init__(self, s: Settings, parent: QWidget | None = None, voice_caps: dict | None = None,
+                 preview=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Налаштування Kru")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
@@ -76,6 +86,33 @@ class SettingsDialog(QDialog):
         self.voice_reply.setToolTip("Голосом питаєш — утримуй персонажа й говори (або кнопка мікрофона в чаті).\n"
                                     "Потрібно встановити голос на сервері: deploy/voice.sh install")
         self.voice_volume = QSpinBox(minimum=0, maximum=100, value=s.voice_volume, suffix=" %")
+        caps = voice_caps or {}
+        self.voice_speaker = QComboBox()
+        for i, name in enumerate(caps.get("speakers") or DEFAULT_SPEAKERS):
+            self.voice_speaker.addItem(name, i)
+        self.voice_speaker.setCurrentIndex(max(0, self.voice_speaker.findData(s.voice_speaker)))
+        self.voice_effect = QComboBox()
+        for key, title in (caps.get("effects") or DEFAULT_EFFECTS).items():
+            self.voice_effect.addItem(title, key)
+        self.voice_effect.setCurrentIndex(max(0, self.voice_effect.findData(s.voice_effect)))
+        self.voice_speed = QDoubleSpinBox(minimum=0.7, maximum=1.5, singleStep=0.05, value=s.voice_speed,
+                                          suffix=" ×", decimals=2)
+        self.voice_speed.setToolTip("Темп мовлення: більше — швидше")
+        self.btn_preview = QPushButton("▶ Прослухати")
+        self.btn_preview.setToolTip("Озвучити пробну фразу вибраним голосом" if caps.get("tts") else
+                                    "Озвучення ще не встановлено на сервері: deploy/voice.sh install")
+        self.btn_preview.setEnabled(bool(caps.get("tts")) and preview is not None)
+        if preview is not None:
+            self.btn_preview.clicked.connect(lambda: preview(self.voice_speaker.currentData(),
+                                                             self.voice_effect.currentData(),
+                                                             round(self.voice_speed.value(), 2),
+                                                             self.voice_volume.value()))
+        voice_row = QHBoxLayout()
+        voice_row.addWidget(self.voice_speaker, 1)
+        voice_row.addWidget(self.voice_effect, 2)
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(self.voice_speed)
+        speed_row.addWidget(self.btn_preview, 1)
         form.addRow("Сервер (WebSocket):", self.url)
         form.addRow("Токен:", self.token)
         form.addRow("Персонаж:", self.character)
@@ -83,6 +120,8 @@ class SettingsDialog(QDialog):
         form.addRow("Шрифт чату:", self.font_px)
         form.addRow("Відповідати голосом:", self.voice_reply)
         form.addRow("Гучність голосу:", self.voice_volume)
+        form.addRow("Голос і звучання:", voice_row)
+        form.addRow("Темп мовлення:", speed_row)
         form.addRow("", self.think)
         form.addRow("", self.thinking)
         form.addRow("", self.tools)
@@ -177,6 +216,7 @@ class RobotWindow(QWidget):
         # голос: запис (утримання персонажа / кнопка мікрофона) → сервер розпізнає → задача;
         # відповідь сервер озвучує, персонаж «говорить» у такт
         self.voice_caps = {"stt": False, "tts": False}
+        self._speech_volume = settings.voice_volume  # пробна фраза в налаштуваннях — зі ще не збереженою гучністю
         self.recorder = Recorder(self)
         self.recorder.finished.connect(self._on_recorded)
         self.recorder.failed.connect(self._on_record_failed)
@@ -362,7 +402,7 @@ class RobotWindow(QWidget):
             self.act_hide.setIcon(menu_icon("hide"))
 
     def open_settings(self) -> None:
-        dlg = SettingsDialog(self.settings)
+        dlg = SettingsDialog(self.settings, voice_caps=self.voice_caps, preview=self.preview_voice)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         s = self.settings
@@ -376,6 +416,9 @@ class RobotWindow(QWidget):
         s.font_size = dlg.font_px.value()
         s.voice_reply = dlg.voice_reply.currentData()
         s.voice_volume = dlg.voice_volume.value()
+        s.voice_speaker = dlg.voice_speaker.currentData()
+        s.voice_effect = dlg.voice_effect.currentData()
+        s.voice_speed = round(dlg.voice_speed.value(), 2)
         self.panel.set_font_size(s.font_size)
         self.panel.set_show_tools(s.show_tools)
         if dlg.autostart is not None and dlg.autostart.isChecked() != autostart_enabled():
@@ -498,9 +541,20 @@ class RobotWindow(QWidget):
         mode = self.settings.voice_reply
         return self.voice_caps["tts"] and (mode == "always" or (mode == "voice" and self._voice_task))
 
-    def _speak(self, text: str) -> None:
+    def _speak(self, text: str, speaker=None, effect=None, speed=None, volume=None) -> None:
+        s = self.settings
         self._voice_seq += 1
-        self.conn.send({"type": "tts", "id": f"t{self._voice_seq}", "text": text})
+        self._speech_volume = s.voice_volume if volume is None else volume
+        self.conn.send({"type": "tts", "id": f"t{self._voice_seq}", "text": text,
+                        "speaker": s.voice_speaker if speaker is None else speaker,
+                        "effect": s.voice_effect if effect is None else effect,
+                        "speed": s.voice_speed if speed is None else speed})
+
+    def preview_voice(self, speaker: int, effect: str, speed: float, volume: int) -> None:
+        """«▶ Прослухати» в налаштуваннях: пробна фраза ще не збереженими голосом і звучанням."""
+        if self.busy or self.recorder.active:
+            return
+        self._speak(PREVIEW_TEXT, speaker, effect, speed, volume)
 
     def _on_tts_audio(self, ev: dict) -> None:
         try:
@@ -509,7 +563,7 @@ class RobotWindow(QWidget):
             return
         if self.recorder.active or self.busy:
             return  # уже говорить сам користувач або пішла нова задача — стара відповідь неактуальна
-        if self.player.play(wav, self.settings.voice_volume / 100):
+        if self.player.play(wav, self._speech_volume / 100):
             self.robot.set_state("talking")
             self._level_timer.start()
 
@@ -525,7 +579,9 @@ class RobotWindow(QWidget):
 
     def _set_voice_caps(self, caps) -> None:
         caps = caps if isinstance(caps, dict) else {}
-        self.voice_caps = {"stt": caps.get("stt") is True, "tts": caps.get("tts") is True}
+        self.voice_caps = {"stt": caps.get("stt") is True, "tts": caps.get("tts") is True,
+                           "effects": caps.get("effects") if isinstance(caps.get("effects"), dict) else {},
+                           "speakers": caps.get("speakers") if isinstance(caps.get("speakers"), list) else []}
         self.robot.hold_enabled = self.voice_caps["stt"]
         self.panel.set_voice(self.voice_caps["stt"])
 
