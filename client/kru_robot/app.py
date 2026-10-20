@@ -446,6 +446,7 @@ class RobotWindow(QWidget):
             self.panel.set_recording(True)
             self.panel.set_activity("🎤 Слухаю… відпусти, коли договориш")
             self._level_timer.start()
+            self._feed_level()  # одразу, не чекаючи першого тіку таймера
 
     def stop_listening(self) -> None:
         if self.recorder.active:
@@ -891,8 +892,13 @@ class RobotWindow(QWidget):
         self.robot.set_state("working" if approved else "thinking")
 
     # ---------------- події сервера ----------------
+    def _voice_active(self) -> bool:
+        """Слухає чи говорить: обрив чи відновлення з'єднання не перебиває цю анімацію."""
+        return self.recorder.active or self.player.playing
+
     def on_connected(self) -> None:
-        self.robot.set_state("happy", 1.5)
+        if not self._voice_active():
+            self.robot.set_state("happy", 1.5)
         text, self._pending_task = getattr(self, "_pending_task", None), None
         self._sent_on_connect = bool(text)  # тоді hello не перезавантажує чат: задача щойно пішла
         if text and self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
@@ -912,7 +918,8 @@ class RobotWindow(QWidget):
             self.panel.drop_confirms()
             self.panel.clear_draft()
             self.panel.set_activity("📡 Зв'язок втрачено — задача продовжується на сервері, чекаю на з'єднання…")
-        self.robot.set_state("offline")
+        if not self._voice_active():
+            self.robot.set_state("offline")
 
     def on_event(self, ev: dict) -> None:  # noqa: C901
         self.touch()

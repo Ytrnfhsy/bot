@@ -15,11 +15,12 @@ from fastapi.testclient import TestClient
 
 from kru_agent.agent import Agent
 from kru_agent.server import create_app
-from kru_agent.voice import Voice, VoiceError, speech_text
+from kru_agent import voice as voice_mod
+from kru_agent.voice import Voice, VoiceError, decode_audio, speech_text
 
 from .conftest import FakeLLM, call, text
 from .test_server import _until
-from .test_telegram_bot import CHAT, make, msg
+from .test_telegram_bot import make, msg
 
 
 class FakeWhisper:
@@ -28,7 +29,7 @@ class FakeWhisper:
         self.calls: list[dict] = []
 
     def transcribe(self, audio, **kw):
-        self.calls.append({"bytes": audio.read(), **kw})
+        self.calls.append({"bytes": audio, **kw})
         seg = types.SimpleNamespace(text=f" {self.words} ")
         return iter([seg] if self.words else []), None
 
@@ -52,6 +53,7 @@ def voice_ready(monkeypatch):
     piper = types.ModuleType("piper")
     piper.SynthesisConfig = lambda speaker_id=None: types.SimpleNamespace(speaker_id=speaker_id)
     monkeypatch.setitem(sys.modules, "piper", piper)
+    monkeypatch.setattr(voice_mod, "decode_audio", lambda data: data)  # декодер перевіряє окремий тест
     monkeypatch.setattr(Voice, "stt_ok", property(lambda self: self.enabled))
     monkeypatch.setattr(Voice, "tts_ok", property(lambda self: self.enabled))
     whisper, tts = FakeWhisper(), FakePiper()
@@ -159,3 +161,24 @@ async def test_telegram_voice_not_installed(cfg):
     gw, agent, bot = make(cfg, [])
     await gw.handle(msg(voice={"file_id": "vf"}))
     assert "ще не підключено" in bot.texts()[0] and agent.llm.calls == []
+
+
+def test_decode_wav_without_pyav():
+    """WAV з персонажа декодуємо самі: faster_whisper.decode_audio падає з PyAV 15+ (metadata_errors)."""
+    np = pytest.importorskip("numpy")
+
+    def wav(rate, channels, frames):
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(np.asarray(frames, dtype="<i2").tobytes())
+        return buf.getvalue()
+
+    mono = decode_audio(wav(16000, 1, [0, 16384, -16384, 32767]))
+    assert mono.dtype == np.float32 and np.allclose(mono, [0, 0.5, -0.5, 32767 / 32768])
+    stereo = decode_audio(wav(16000, 2, [16384, 0, -16384, -16384]))  # канали усереднюються
+    assert np.allclose(stereo, [0.25, -0.5])
+    resampled = decode_audio(wav(48000, 1, [8192] * 4800))  # 0,1 с з 48 кГц → 1600 відліків 16 кГц
+    assert len(resampled) == 1600 and np.allclose(resampled, 0.25)

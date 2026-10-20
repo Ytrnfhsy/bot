@@ -73,7 +73,7 @@ class Voice:
     def _transcribe(self, data: bytes) -> str:
         model = self._load_stt()
         segments, _info = model.transcribe(
-            io.BytesIO(data), language=self.config.whisper_language or None, vad_filter=True, beam_size=5,
+            decode_audio(data), language=self.config.whisper_language or None, vad_filter=True, beam_size=5,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()
 
@@ -128,6 +128,44 @@ class Voice:
             except Exception as e:  # noqa: BLE001
                 log.exception("Озвучення не вдалося")
                 raise VoiceError(f"Не вдалося озвучити: {e}") from e
+
+
+def decode_audio(data: bytes, rate: int = 16000):
+    """Аудіо → numpy float32, моно, 16 кГц (те, що їсть Whisper).
+
+    Декодуємо самі, а не через faster_whisper.decode_audio: та передає в av.open() аргумент
+    metadata_errors, якого PyAV 15+ уже не приймає. WAV (з персонажа) читаємо стандартним wave,
+    решту (OGG/Opus з Telegram, MP3…) — через PyAV.
+    """
+    import numpy as np
+
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        try:
+            with wave.open(io.BytesIO(data)) as w:
+                if w.getsampwidth() == 2:
+                    ch, src_rate = w.getnchannels(), w.getframerate()
+                    pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768
+                    if ch > 1:
+                        pcm = pcm[: len(pcm) // ch * ch].reshape(-1, ch).mean(axis=1)
+                    if src_rate != rate and len(pcm):
+                        n = int(round(len(pcm) * rate / src_rate))
+                        pcm = np.interp(np.linspace(0, len(pcm) - 1, n), np.arange(len(pcm)), pcm)
+                    return pcm.astype(np.float32)
+        except (wave.Error, EOFError):
+            pass  # нестандартний WAV — хай розбирається PyAV
+    import av
+
+    chunks = []
+    with av.open(io.BytesIO(data), mode="r") as container:
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=rate)
+        for frame in container.decode(audio=0):
+            for out in resampler.resample(frame):
+                chunks.append(out.to_ndarray().reshape(-1))
+        for out in resampler.resample(None):  # залишок у буфері ресемплера
+            chunks.append(out.to_ndarray().reshape(-1))
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+    return (np.concatenate(chunks).astype(np.float32) / 32768).astype(np.float32)
 
 
 _CODE_BLOCK = re.compile(r"```.*?(```|$)", re.DOTALL)
