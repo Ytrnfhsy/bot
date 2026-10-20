@@ -628,6 +628,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         from .audio import make_wav
 
         sent = state["voice_sent"]
+        win.on_disconnected("перевірка", "")  # обрив зв'язку під час запису не збиває «слухаю»
         need(win.robot.state == "listening", f"стан: {win.robot.state}")
         need(win.panel.btn_mic.property("recording") is True, "кнопка не показує запис")
         need(win.robot.voice_level > 0, "персонаж не чує гучності")
