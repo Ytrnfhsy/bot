@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 
 FONT_FILE = "NotoColorEmoji.ttf"
-FONT_URL = "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf"
+# закріплена версія: у гілці main репозиторію теки fonts/ більше немає (404)
+FONT_URL = "https://raw.githubusercontent.com/googlefonts/noto-emoji/v2.048/fonts/NotoColorEmoji.ttf"
 
 
 def font_dir() -> Path:

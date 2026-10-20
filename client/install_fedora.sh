@@ -40,7 +40,7 @@ FONT_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/kru-robot/fonts"
 if [[ ! -s "${FONT_DIR}/NotoColorEmoji.ttf" ]]; then
   mkdir -p "${FONT_DIR}"
   curl -fsSL --retry 2 -o "${FONT_DIR}/NotoColorEmoji.ttf.part" \
-      "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf" \
+      "https://raw.githubusercontent.com/googlefonts/noto-emoji/v2.048/fonts/NotoColorEmoji.ttf" \
     && mv "${FONT_DIR}/NotoColorEmoji.ttf.part" "${FONT_DIR}/NotoColorEmoji.ttf" \
     || { rm -f "${FONT_DIR}/NotoColorEmoji.ttf.part"; echo "   (не вдалося завантажити — буде системний шрифт емодзі, якщо є)"; }
 fi
