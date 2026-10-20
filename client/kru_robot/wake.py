@@ -39,6 +39,13 @@ END_SILENCE = 0.9  # пауза, після якої фраза вважаєть
 MAX_COMMAND = 15.0  # найдовша фраза після імені
 WAKE_WORDS = ("кру", "крю", "кроу", "крук", "круг")  # як модель може «почути» ім'я (сервер перевіряє точніше)
 SENSITIVITY = ("low", "medium", "high")
+# Часті слова — «куди падати» звичайному мовленню в граматиці, якщо модель не має [unk]
+FILLER_WORDS = (
+    "так ні що це як і в на не я ти ми він вона вони добре привіт дякую будь ласка де коли чому скільки "
+    "котра година погода сьогодні завтра зараз може треба хочу слухай там тут вже ще дуже ну а о один два "
+    "три чотири п'ять дім робота мама тато кіт вода хліб машина телефон комп'ютер гра музика книга день ніч "
+    "ранок вечір рік час люди слово справи світло кружка круто"
+).split()
 
 
 class WakeLogic:
@@ -312,7 +319,12 @@ def make_recognizer(model_path: Path, rate: int):
     known = [w for w in WAKE_WORDS if model.vosk_model_find_word(w) >= 0]  # слова, які модель знає
     debug(f"модель {model_path.name}, частота {rate} Гц, слова імені в словнику: {known or 'жодного'}")
     if known:
-        rec = KaldiRecognizer(model, rate, json.dumps(known + ["[unk]"], ensure_ascii=False))
+        # решта мовлення має кудись «падати», інакше модель підганяє будь-який звук під ім'я:
+        # [unk] («щось інше»), а якщо маленька модель його не має — звичайні часті слова
+        others = ["[unk]"] if model.vosk_model_find_word("[unk]") >= 0 else \
+            [w for w in FILLER_WORDS if model.vosk_model_find_word(w) >= 0]
+        debug(f"інше мовлення: {'[unk]' if others == ['[unk]'] else f'{len(others)} частих слів'}")
+        rec = KaldiRecognizer(model, rate, json.dumps(known + others, ensure_ascii=False))
     else:
         rec = KaldiRecognizer(model, rate)
     rec.SetWords(True)
