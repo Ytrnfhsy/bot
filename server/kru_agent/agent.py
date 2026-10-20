@@ -15,13 +15,14 @@ from typing import Any, Awaitable, Callable
 from .config import Config
 from .images import find_image_refs, is_image, load_image
 from .llm import ChatResult, OllamaClient, OpenAICompatClient, ToolsNotSupported, VisionNotSupported, create_llm
-from . import sandbox
+from . import sandbox, ssh
 from .semantic import Embedder, MemoryIndex
 from .storage import Storage
 from .timezones import describe_tz, get_tz, server_tz
 from .tools import ToolContext, ToolError, ToolRegistry, build_registry, truncate
 from .tools.memory import format_memories
 from .tools.plan import PLAN_TOOLS, SUBAGENT_DENIED, format_plan
+from .tools.ssh import SSH_TOOLS
 from .voice import Voice
 
 SANDBOX_TOOLS = frozenset({"run_shell", "run_python"})  # виконуються в пісочниці, якщо її увімкнено
@@ -271,7 +272,8 @@ class Agent:
             workspace=ws,
             allow_outside=self.config.allow_outside_workspace and user.is_admin,
             # у пісочниці shell і Python безпечні й для звичайних користувачів (бачать лише свою теку)
-            denied_tools=frozenset() if user.is_admin or sandbox.enabled(self.config) else ADMIN_ONLY_TOOLS,
+            denied_tools=frozenset() if user.is_admin else (
+                SSH_TOOLS | (frozenset() if sandbox.enabled(self.config) else ADMIN_ONLY_TOOLS)),
             vision_ok=self.vision,
             memory=self.memory,
             llm=self.llm,
@@ -325,7 +327,7 @@ class Agent:
                 if sandbox.enabled(self.config) else
                 "- run_shell, run_python, write_file and edit_file require user approval; if the user declines, "
                 "adapt or ask."
-            ),
+            ) + self._ssh_prompt(ctx),
         )
         if not self.native_tools:
             prompt += JSON_PROTOCOL.format(catalog=self.registry.text_catalog(ctx.denied_tools))
@@ -814,7 +816,7 @@ class Agent:
         await emit({"type": "tool_call", "id": call_id, "name": name, "args": args, "summary": summary})
 
         if (tool and tool.dangerous and not self.config.auto_approve and not self._auto_approved(name, args, ctx)
-                and not self._sandboxed(name)):
+                and not self._sandboxed(name) and not self._trusted_host(name, args)):
             await emit({"type": "status", "state": "waiting_confirm"})
             approved = await confirm(name, summary, args)
             if approved == "task" and name in AUTO_FILE_TOOLS:  # «дозволяти до кінця задачі»
@@ -859,6 +861,18 @@ class Agent:
     def _sandboxed(self, name: str) -> bool:
         """Команда піде в ізольовану пісочницю — дозвіл не потрібен (якщо не KRU_SANDBOX_CONFIRM)."""
         return name in SANDBOX_TOOLS and sandbox.enabled(self.config) and not self.config.sandbox_confirm
+
+    def _ssh_prompt(self, ctx: ToolContext) -> str:
+        """Підключені SSH-машини — лише тим, кому SSH дозволено."""
+        section = ssh.prompt_section(self.config) if SSH_TOOLS - ctx.denied_tools else ""
+        return "\n" + section.rstrip("\n") if section else ""
+
+    def _trusted_host(self, name: str, args: dict[str, Any]) -> bool:
+        """SSH на машину, яку власник позначив «без запитів» (тестове середовище)."""
+        if name not in SSH_TOOLS:
+            return False
+        host = ssh.load_hosts(self.config).get(str(args.get("host", "")).strip())
+        return host is not None and not host.confirm
 
     @staticmethod
     def _auto_approved(name: str, args: dict[str, Any], ctx: ToolContext) -> bool:

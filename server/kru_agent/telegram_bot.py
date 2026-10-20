@@ -28,6 +28,8 @@ ACTIVITY = {
     "web_search": "🔎 Шукаю в інтернеті", "fetch_url": "🌐 Читаю сторінку", "deep_research": "📚 Досліджую тему",
     "read_file": "📖 Читаю файл", "list_dir": "📂 Дивлюся файли", "search_files": "📂 Шукаю у файлах",
     "write_file": "✍️ Записую файл", "edit_file": "✍️ Редагую файл", "run_shell": "⚙️ Виконую команду",
+    "ssh_run": "🖥 Працюю на віддаленій машині", "ssh_upload": "🖥 Передаю файли на машину",
+    "ssh_download": "🖥 Забираю файли з машини",
     "run_python": "🧮 Рахую", "remember": "🧠 Запам'ятовую", "recall": "🧠 Пригадую",
     "view_image": "👁 Дивлюся на зображення", "delegate": "🤝 Працює субагент", "schedule_task": "⏰ Планую",
     "send_telegram": "✈️ Пишу в Telegram", "send_file": "📎 Надсилаю файл",

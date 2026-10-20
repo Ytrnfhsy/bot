@@ -518,6 +518,90 @@ def _telegram_command(cfg: Config, args: argparse.Namespace, parser: argparse.Ar
         raise SystemExit(str(e)) from e
 
 
+def _ssh_command(cfg: Config, args, parser) -> None:
+    """kru ssh add|list|test|remove|forget|key — машини, до яких агент має SSH-доступ."""
+    import shutil
+    import subprocess
+
+    from . import ssh
+
+    try:
+        if args.ssh_cmd == "add":
+            pub = ssh.ensure_key(cfg)
+            host = ssh.add_host(cfg, args.name, args.target, args.port, confirm=args.confirm, note=args.note or "")
+            print(f"✅ Машину додано: {host.describe()}")
+            if _ssh_ok(cfg, host):
+                print("🔑 Підключення працює — агент уже може нею користуватися.")
+                return
+            key = pub.read_text().strip()
+            user = host.target.split("@", 1)[0]
+            home = "/root" if user == "root" else f"/home/{user}"
+            print("\nТепер дозволь ключу агента вхід на машину. Виконай на ній (під своїм звичайним користувачем):")
+            print(f"  sudo install -d -m 700 -o {user} -g {user} {home}/.ssh && echo '{key}' | sudo tee -a "
+                  f"{home}/.ssh/authorized_keys >/dev/null && sudo chown {user}: {home}/.ssh/authorized_keys && "
+                  f"sudo chmod 600 {home}/.ssh/authorized_keys")
+            print(f"і перевір: kru ssh test {host.name}")
+            if shutil.which("ssh-copy-id") and sys.stdin.isatty():
+                print(f"\nЯкщо в {user} на машині є пароль, можна інакше — ssh-copy-id (спитає цей пароль).")
+                if input("Запустити ssh-copy-id зараз? [т/Н] ").strip().lower() in {"т", "так", "y", "yes"}:
+                    subprocess.run(["ssh-copy-id", "-i", str(pub), "-o",
+                                    f"UserKnownHostsFile={ssh.ssh_dir(cfg) / 'known_hosts'}",
+                                    "-p", str(host.port), host.target])
+                    print("🔑 Підключення працює." if _ssh_ok(cfg, host) else
+                          "⚠ Ключем увійти ще не вдалося — перевір: kru ssh test " + host.name)
+        elif args.ssh_cmd == "list":
+            hosts = ssh.load_hosts(cfg)
+            if not hosts:
+                print("Машин немає. Додати: kru ssh add test-vm kru@100.92.10.5 --no-confirm")
+            for h in hosts.values():
+                print("·", h.describe())
+        elif args.ssh_cmd == "test":
+            host = ssh.load_hosts(cfg).get(args.name)
+            if host is None:
+                raise ssh.SSHError(f"Немає машини {args.name!r} (kru ssh list)")
+            if not _ssh_ok(cfg, host, verbose=True):
+                raise SystemExit(1)
+        elif args.ssh_cmd == "remove":
+            print("Видалено." if ssh.remove_host(cfg, args.name) else "Немає такої машини.")
+        elif args.ssh_cmd == "forget":
+            host = ssh.load_hosts(cfg).get(args.name)
+            if host is None:
+                raise ssh.SSHError(f"Немає машини {args.name!r}")
+            addr = host.target.split("@", 1)[1]
+            known = ssh.ssh_dir(cfg) / "known_hosts"
+            for entry in (addr, f"[{addr}]:{host.port}"):
+                subprocess.run(["ssh-keygen", "-R", entry, "-f", str(known)], capture_output=True)
+            print("Ключ машини забуто — при наступному підключенні буде запам'ятовано новий.")
+        elif args.ssh_cmd == "key":
+            print(ssh.ensure_key(cfg).read_text().strip())
+        else:
+            parser.print_help()
+    except ssh.SSHError as e:
+        raise SystemExit(f"❌ {e}") from e
+
+
+def _ssh_ok(cfg: Config, host, verbose: bool = False) -> bool:
+    import subprocess
+
+    from . import ssh
+
+    cmd = ssh.ssh_command(cfg, host, "echo ok; uname -sr; (. /etc/os-release && echo $PRETTY_NAME) 2>/dev/null; "
+                                     "sudo -n true 2>/dev/null && echo sudo: так || echo sudo: потрібен пароль")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if verbose:
+            print(f"❌ {e}")
+        return False
+    if r.returncode == 0 and r.stdout.startswith("ok"):
+        if verbose:
+            print("✅ " + " · ".join(r.stdout.split("\n")[1:]).strip(" ·"))
+        return True
+    if verbose:
+        print("❌ " + (r.stderr.strip() or r.stdout.strip() or f"код {r.returncode}"))
+    return False
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="kru", description="Kru — агент на Qwen3.6 з інструментами")
     sub = parser.add_subparsers(dest="cmd")
@@ -554,8 +638,23 @@ def main(argv: list[str] | None = None) -> None:
         p = tg_sub.add_parser(name, help=help_)
         p.add_argument("--user", help="для якого користувача (типово — власник)")
 
+    p_ssh = sub.add_parser("ssh", help="машини, до яких агент має SSH-доступ (тестова ВМ тощо)")
+    ssh_sub = p_ssh.add_subparsers(dest="ssh_cmd")
+    p = ssh_sub.add_parser("add", help="додати машину: kru ssh add test-vm kru@100.92.10.5 --no-confirm")
+    p.add_argument("name", help="коротка назва, якою її кличе агент (test-vm)")
+    p.add_argument("target", help="користувач@адреса (IP чи ім'я в NetBird)")
+    p.add_argument("--port", type=int, default=22)
+    p.add_argument("--no-confirm", dest="confirm", action="store_false",
+                   help="виконувати команди без запиту дозволу (тестове середовище)")
+    p.add_argument("--note", help="що це за машина — агент це бачить (напр. «Ubuntu 24.04, можна ламати»)")
+    ssh_sub.add_parser("list", help="список машин")
+    for name, help_ in (("test", "перевірити підключення"), ("remove", "прибрати машину"),
+                        ("forget", "забути ключ машини (після перевстановлення ВМ)")):
+        ssh_sub.add_parser(name, help=help_).add_argument("name")
+    ssh_sub.add_parser("key", help="показати публічний ключ агента")
+
     args = parser.parse_args(argv)
-    if args.cmd in {"user", "telegram"}:
+    if args.cmd in {"user", "telegram", "ssh"}:
         # ті самі налаштування, що й у сервісу (DATA_DIR, KRU_TOKEN)
         from .config import _load_dotenv
         from pathlib import Path
@@ -583,6 +682,8 @@ def main(argv: list[str] | None = None) -> None:
         _user_command(cfg, args, p_user)
     elif args.cmd == "telegram":
         _telegram_command(cfg, args, p_tg)
+    elif args.cmd == "ssh":
+        _ssh_command(cfg, args, p_ssh)
     elif args.cmd == "health":
         from .llm import create_llm
 
