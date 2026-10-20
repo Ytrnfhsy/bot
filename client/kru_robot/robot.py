@@ -65,6 +65,7 @@ class RobotWidget(QWidget):
     context_requested = Signal(QPointF)
     hold_started = Signal()  # утримує персонажа — почати слухати (голос)
     hold_finished = Signal()  # відпустив — надіслати сказане
+    double_clicked = Signal()  # подвійний клік — увімкнути/вимкнути «завжди слухаю»
     HOLD_MS = 450
 
     def __init__(self, scale: float = 1.0, parent: QWidget | None = None) -> None:
@@ -108,6 +109,10 @@ class RobotWidget(QWidget):
         self._hold_timer.timeout.connect(self._on_hold)
         self.voice_level = 0.0
         self._level = 0.0
+        self.wake_mode = False  # «завжди слухаю»: на грудях замість серця — мікрофон
+        # одиночний клік чекає, чи не буде другого (тоді це подвійний — не відкривати панель)
+        self._click_timer = QTimer(self, singleShot=True, interval=280)
+        self._click_timer.timeout.connect(self.clicked)
         # перетягування файлів
         self._drop_hover = False
         self.setAcceptDrops(True)
@@ -346,13 +351,34 @@ class RobotWidget(QWidget):
         p.setBrush(glow)
         p.drawEllipse(QPointF(100, 152), 16 * beat, 16 * beat)
         p.setBrush(c)
-        self._heart(p, QPointF(100, 152), 7 * beat)
+        if self.wake_mode:
+            self._mic(p, QPointF(100, 152), c, 1.0 + 0.25 * self._level)
+        else:
+            self._heart(p, QPointF(100, 152), 7 * beat)
 
         # ніжки
         p.setPen(outline)
         p.setBrush(QColor("#AFC0D6"))
         for x in (80, 120):
             p.drawRoundedRect(QRectF(x - 9, 184, 18, 12), 6, 6)
+
+    def _mic(self, p: QPainter, center: QPointF, c: QColor, k: float) -> None:
+        """Мікрофон на грудях — режим «завжди слухаю»; трохи «дихає» в такт почутому звуку."""
+        x, y = center.x(), center.y()
+        p.save()
+        p.translate(x, y)
+        p.scale(k, k)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(c)
+        p.drawRoundedRect(QRectF(-4.5, -11, 9, 14), 4.5, 4.5)
+        p.setPen(_pen(c, 2.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        arc = QPainterPath(QPointF(-8, -3))
+        arc.cubicTo(QPointF(-8, 8), QPointF(8, 8), QPointF(8, -3))
+        p.drawPath(arc)
+        p.drawLine(QPointF(0, 5.5), QPointF(0, 10))
+        p.drawLine(QPointF(-4.5, 10.5), QPointF(4.5, 10.5))
+        p.restore()
 
     def _heart(self, p: QPainter, center: QPointF, size: float) -> None:
         x, y = center.x(), center.y()
@@ -653,7 +679,11 @@ class RobotWidget(QWidget):
             self.drag_finished.emit()
         else:
             self.poke()
-            self.clicked.emit()  # одразу, без очікування подвійного кліку
+            if self._click_timer.isActive():  # другий клік підряд — подвійний
+                self._click_timer.stop()
+                self.double_clicked.emit()
+            else:
+                self._click_timer.start()
         self._press_pos = None
         self._dragging = False
 

@@ -17,7 +17,8 @@
   {"type": "chat_list"} | {"type": "chat_open", "id"} | {"type": "chat_delete", "id"}
   {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
   {"type": "chat_search", "query": "відпустка море"}  — пошук за назвою й текстом розмов
-  {"type": "voice_in", "id": "...", "data": "<base64 WAV/OGG>"}  — розпізнати сказане (faster-whisper)
+  {"type": "voice_in", "id": "...", "data": "<base64 WAV/OGG>", "wake": "require"}  — розпізнати сказане (faster-whisper);
+      wake=require — режим «завжди слухаю»: фраза має починатися з імені «Кру», яке прибирається з тексту
   {"type": "tts", "id": "...", "text": "...", "voice": "Speaker_67", "effect": "natural", "speed": 1.0}  — озвучити
       (HolosTTS або Piper); voice/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_TTS_VOICE, KRU_VOICE_EFFECT)
   {"type": "ping"}
@@ -47,7 +48,8 @@
   {"type": "chat_export", "title", "markdown"}
   {"type": "chat_search", "query", "chats": [{id, title, count, created_at, updated_at, snippet}]}
   {"type": "chat_error", "message"}
-  {"type": "voice_text", "id", "text"} | {"type": "voice_error", "id", "message"}
+  {"type": "voice_text", "id", "text", "ignored"?: true, "wake_only"?: true} | {"type": "voice_error", "id", "message"}
+      ignored — імені не почуто (хибне спрацювання); wake_only — лише «Кру» без питання
   {"type": "tts_audio", "id", "format": "wav", "data": "<base64>"} | {"type": "tts_error", "id", "message"}
   {"type": "error", "message": "..."}
   {"type": "pong"}
@@ -75,7 +77,7 @@ from .scheduler import Scheduler
 from .tools import ToolError
 from .tools.files import shared_file
 from .users import User, UserStore, workspace_for
-from .voice import MAX_AUDIO, VoiceError
+from .voice import MAX_AUDIO, VoiceError, strip_wake
 
 log = logging.getLogger("kru.server")
 
@@ -346,15 +348,26 @@ class Connection:
             if len(raw) > MAX_AUDIO * 4 // 3 + 4:
                 raise VoiceError("Запис задовгий")
             data = base64.b64decode(raw, validate=True)
-            text = await voice.transcribe(data)
+            # у режимі «завжди слухаю» підказуємо Whisper, як пишеться ім'я
+            text = await voice.transcribe(data, "Кру, " if msg.get("wake") == "require" else None)
         except (binascii.Error, ValueError):
             await self.send({"type": "voice_error", "id": vid, "message": "пошкоджений запис"})
             return
         except VoiceError as e:
             await self.send({"type": "voice_error", "id": vid, "message": str(e)})
             return
-        log.info("Розпізнано голос: %d символів", len(text))
-        await self.send({"type": "voice_text", "id": vid, "text": text})
+        reply: dict[str, Any] = {"type": "voice_text", "id": vid, "text": text}
+        if msg.get("wake") == "require":  # режим «завжди слухаю»: фраза має починатися з імені
+            found, rest = strip_wake(text)
+            if not found:
+                log.info("Режим «Кру»: імені не почуто — ігнорую")
+                reply.update(text="", ignored=True)
+            elif not rest:
+                reply.update(text="", wake_only=True)  # «Кру…» і пауза — клієнт слухатиме питання далі
+            else:
+                reply["text"] = rest
+        log.info("Розпізнано голос: %d символів", len(reply["text"]))
+        await self.send(reply)
 
     async def _chats(self, kind: str, msg: dict[str, Any]) -> None:
         """Чати (зберігаються автоматично): список / відкрити / перейменувати / видалити / експорт."""

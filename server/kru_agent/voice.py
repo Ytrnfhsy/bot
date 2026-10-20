@@ -116,14 +116,15 @@ class Voice:
                                      compute_type="int8")
         return self._stt
 
-    def _transcribe(self, data: bytes) -> str:
+    def _transcribe(self, data: bytes, prompt: str | None = None) -> str:
         model = self._load_stt()
         segments, _info = model.transcribe(
             decode_audio(data), language=self.config.whisper_language or None, vad_filter=True, beam_size=5,
+            initial_prompt=prompt,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()
 
-    async def transcribe(self, data: bytes) -> str:
+    async def transcribe(self, data: bytes, prompt: str | None = None) -> str:
         """Аудіо (WAV, OGG/Opus з Telegram, MP3…) → текст."""
         if not self.stt_ok:
             raise VoiceError("Розпізнавання мовлення не встановлено на сервері: deploy/voice.sh install")
@@ -131,7 +132,7 @@ class Voice:
             raise VoiceError("Запис задовгий")
         async with self._stt_lock:
             try:
-                return await asyncio.to_thread(self._transcribe, data)
+                return await asyncio.to_thread(self._transcribe, data, prompt)
             except VoiceError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -278,6 +279,25 @@ def decode_audio(data: bytes, rate: int = 16000):
     if not chunks:
         return np.zeros(0, dtype=np.float32)
     return (np.concatenate(chunks).astype(np.float32) / 32768).astype(np.float32)
+
+
+# Як Whisper записує ім'я «Кру» (і як люди звертаються перед ним)
+_WAKE = re.compile(r"^(кру|крю|кроу|кру-кру|kru|krew|crew|krу)$")
+_BEFORE_WAKE = {"ну", "агов", "гей", "ей", "ой", "о", "слухай", "привіт", "алло", "а"}
+
+
+def strip_wake(text: str) -> tuple[bool, str]:
+    """«Кру, яка сьогодні погода?» → (True, "Яка сьогодні погода?"). Ім'я має бути серед перших слів
+    (перед ним можна «агов», «привіт»…); інакше (False, text) — режим «завжди слухаю» спрацював хибно."""
+    words = text.strip().split()
+    for i, raw in enumerate(words[:4]):
+        w = re.sub(r"[^\w'-]", "", raw.lower()).strip("-")
+        if _WAKE.match(w):
+            rest = " ".join(words[i + 1:]).lstrip(" ,.!?:;—-").strip()
+            return True, rest[:1].upper() + rest[1:]
+        if w not in _BEFORE_WAKE:
+            break
+    return False, text
 
 
 _CODE_BLOCK = re.compile(r"```.*?(```|$)", re.DOTALL)

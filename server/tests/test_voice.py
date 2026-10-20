@@ -303,3 +303,38 @@ async def test_holos_tts(cfg, monkeypatch):
         await v.speak("Привіт")
     await v.refresh_voices(force=True)  # сервіс ще не запустився — список лишається, без помилки
     assert v.voices() == ["Speaker_67", "Гаська Шиян", "Speaker_0"]
+
+
+def test_strip_wake():
+    from kru_agent.voice import strip_wake
+
+    assert strip_wake("Кру, яка сьогодні погода?") == (True, "Яка сьогодні погода?")
+    assert strip_wake("Агов, Кру! увімкни світло.") == (True, "Увімкни світло.")
+    assert strip_wake("Ну, крю, допоможи") == (True, "Допоможи")
+    assert strip_wake("Кру.") == (True, "")
+    for miss in ("Це круто, правда?", "Кружка на столі", "Скажи, кру, котра година", ""):
+        assert strip_wake(miss)[0] is False, miss
+
+
+def test_ws_wake_mode(cfg, voice_ready):
+    """«Завжди слухаю»: сервер перевіряє, що фраза починається з імені, і прибирає його."""
+    cfg.token = "secret"
+    agent = Agent(cfg, llm=FakeLLM([]))
+    whisper, _ = voice_ready(agent)
+    client = TestClient(create_app(cfg, agent=agent))
+    data = base64.b64encode(b"RIFF").decode()
+    with client, client.websocket_connect("/ws?token=secret") as ws:
+        ws.receive_json()
+        cases = [("Кру, яка сьогодні погода?", {"text": "Яка сьогодні погода?"}),
+                 ("Це було круто", {"text": "", "ignored": True}),
+                 ("Кру", {"text": "", "wake_only": True})]
+        for i, (heard, expected) in enumerate(cases):
+            whisper.words = heard
+            ws.send_json({"type": "voice_in", "id": f"w{i}", "data": data, "wake": "require"})
+            got, _ = _until(ws, "voice_text")
+            assert {k: v for k, v in got.items() if k not in {"type", "id"}} == expected, heard
+        assert whisper.calls[-1]["initial_prompt"] == "Кру, "  # Whisper знає, як пишеться ім'я
+        whisper.words = "Кру, без режиму"  # звичайний запис (утримання робота) — текст як є
+        ws.send_json({"type": "voice_in", "id": "plain", "data": data})
+        assert _until(ws, "voice_text")[0]["text"] == "Кру, без режиму"
+        assert whisper.calls[-1]["initial_prompt"] is None

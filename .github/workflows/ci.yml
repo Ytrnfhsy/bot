@@ -93,7 +93,7 @@ jobs:
       - name: PyInstaller
         run: >
           pyinstaller --noconfirm --windowed --name Kru --icon build/robot.ico
-          --collect-submodules kru_robot client/windows/launcher.py
+          --collect-submodules kru_robot --collect-all vosk client/windows/launcher.py
       - name: Самоперевірка exe
         timeout-minutes: 3
         shell: pwsh
