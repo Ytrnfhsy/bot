@@ -577,41 +577,41 @@ kru ssh add test-vm kru@100.92.10.5 --no-confirm --note "Ubuntu 24.04, тест�
    Прев'ю, які повертає PhotoCraft, агент бачить сам (якщо модель уміє дивитися на зображення). Вони зберігаються
    в `workspace/mcp/`.
 
-**PhotoCraft на твоєму ПК, і видно, що робить агент.** У режимі «міст» (`--bridge`) агент керує відкритою
-програмою PhotoCraft на ПК: кожен крок видно у вікні, а агент може ще й робити скриншоти інтерфейсу, тиснути
-меню, рухати мишу. Сервер Kru запускає `photocraft-cli` на ПК через SSH.
+**PhotoCraft на твоєму ПК, і видно, що робить агент (через робота).** MCP-сервери можна запускати й на ПК
+з роботом: робот сам запускає їх і пробрасує серверу тим самим з'єднанням, що й чат — без SSH, відкритих портів
+і ключів. У режимі «міст» (`--bridge`) агент керує відкритою програмою PhotoCraft: кожен крок видно у вікні,
+а ще він може робити скриншоти інтерфейсу, тиснути меню, рухати мишу.
 
-1. **На ПК** увімкни SSH і згенеруй токен керування (64 шістнадцяткові символи — придумуєш сам):
+1. **Токен керування** PhotoCraft (64 шістнадцяткові символи — придумуєш сам, один раз):
    ```bash
-   sudo systemctl enable --now sshd
    mkdir -p ~/.config/photocraft ~/Pictures/kru
    openssl rand -hex 32 > ~/.config/photocraft/control.token && chmod 600 ~/.config/photocraft/control.token
    ```
-2. **На ПК** відкривай PhotoCraft із керуванням (агент бачитиме й писатиме лише в `~/Pictures/kru`):
+2. **Відкривай PhotoCraft із керуванням** (агент бачитиме й писатиме лише в `~/Pictures/kru`):
    ```bash
    photocraft --control 7878 --control-token-file ~/.config/photocraft/control.token \
      --automation-read-root ~/Pictures/kru --automation-write-root ~/Pictures/kru
    ```
-3. **На сервері** дай Kru доступ до ПК (покаже, як додати ключ агента на ПК):
+3. **Налаштування робота** — `~/.config/kru-robot/mcp.json` (Windows: `%APPDATA%\kru-robot\mcp.json`):
    ```bash
-   kru ssh add mypc ти@IP-ПК --note "мій ПК з PhotoCraft; фото — ~/Pictures/kru"
-   kru ssh test mypc
+   cp ~/bot/client/mcp.example.json ~/.config/kru-robot/mcp.json
    ```
-4. **На сервері** в `~/.config/kru/mcp.json`:
    ```json
-   {"mcpServers": {"photocraft": {
-     "command": "ssh",
-     "args": ["-i", "{data_dir}/ssh/id_ed25519", "-o", "BatchMode=yes",
-              "-o", "UserKnownHostsFile={data_dir}/ssh/known_hosts", "ти@IP-ПК",
-              "photocraft-cli", "mcp", "--bridge", "127.0.0.1:7878",
-              "--control-token-file", "/home/ти/.config/photocraft/control.token"],
-     "confirm": false}}}
+   {"exchange_dir": "~/Pictures/kru",
+    "mcpServers": {"photocraft": {
+      "command": "photocraft-cli",
+      "args": ["mcp", "--bridge", "127.0.0.1:7878",
+               "--control-token-file", "~/.config/photocraft/control.token"],
+      "confirm": false}}}
    ```
-   `kru mcp list` → `systemctl --user restart kru`. Якщо ПК вимкнений або PhotoCraft ще не відкритий, Kru
-   щохвилини пробує підключитися знову — інструменти з'являться самі.
-5. Поклади фото в `~/Pictures/kru` і попроси: «Відкрий у PhotoCraft kru/cat.jpg, розмий фон і збережи як
-   cat-blur.png». Фото, надіслане роботу чи в Telegram, лежить на сервері — агент перекине його на ПК сам
-   (`ssh_upload`) і спитає дозволу.
+   `exchange_dir` — тека обміну: туди агент кладе фото, надіслані тобою (з робота чи Telegram), і звідти забирає
+   результат (інструменти `pc_put_file` / `pc_get_file`). Тому вона має збігатися з текою PhotoCraft.
+4. Перезапусти робота: `kru-robot --quit; kru-robot`. Діагностика — `KRU_MCP_DEBUG=1 kru-robot`.
+   Якщо PhotoCraft закритий, робот щохвилини пробує підключитися знову; інструменти з'являються в агента самі.
+5. Попроси: «Відкрий у PhotoCraft фото, яке я надіслав, розмий фон і надішли мені результат».
+
+Інструменти ПК називаються `pc_<сервер>_<інструмент>`, доступні лише тобі (власникові робота) і лише поки
+робот підключений. Можна й з Telegram — головне, щоб робот на ПК був увімкнений.
 
 Налаштування сервера в `mcp.json`:
 - `command`, `args`, `env`, `cwd` — як запускати (у значеннях працюють `{workspace}` і `{data_dir}`);

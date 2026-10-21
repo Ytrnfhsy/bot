@@ -21,6 +21,8 @@
       wake=require — режим «завжди слухаю»: фраза має починатися з імені «Кру», яке прибирається з тексту;
       wake=followup — уточнення без імені: те, що Whisper «чує» в шумі, повертається як ignored;
       wake=detected — фразу-активатор («Чуєш, Кру») уже впізнала модель на ПК: звертання й ім'я прибираються
+  {"type": "mcp_tools", "servers": {...}, "exchange": bool} / {"type": "mcp_result", "id", "result"|"error"}
+      — MCP-сервери на ПК користувача, які пробрасує робот (relay.py); сервер шле mcp_call / pc_put / pc_get
   {"type": "wake_model"}  — модель своєї фрази для робота (kru wakeword train) → wake_model з files (base64)
   {"type": "tts", "id": "...", "text": "...", "voice": "Speaker_67", "effect": "natural", "speed": 1.0}  — озвучити
       (HolosTTS або Piper); voice/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_TTS_VOICE, KRU_VOICE_EFFECT)
@@ -503,6 +505,11 @@ class Connection:
                     await self._save_upload(msg)
                 elif kind == "file_get":
                     await self._send_file(msg)
+                elif kind == "mcp_tools":  # робот пробрасує MCP-сервери зі свого ПК
+                    names = self.agent.relay.attach(self.user.name, self, msg)
+                    await self.send({"type": "mcp_ready", "tools": len(names)})
+                elif kind == "mcp_result":
+                    self.agent.relay.resolve(self, msg)
                 elif kind == "wake_model":
                     await self._wake_model()
                 elif kind == "tts_stop":
@@ -525,6 +532,7 @@ class Connection:
             for rt in self.hub.tasks.values():
                 rt.subscribers.discard(self)
             self.hub.connections.get(self.user.name, set()).discard(self)
+            self.agent.relay.detach(self)
 
 
 SCHEDULED_PREFIX = (
