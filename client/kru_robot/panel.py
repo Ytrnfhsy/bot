@@ -329,6 +329,9 @@ class ChatPanel(QWidget):
         QShortcut(QKeySequence("Ctrl+="), self, activated=lambda: self.set_font_size(self.font_px + 1, user=True))
         QShortcut(QKeySequence.StandardKey.ZoomOut, self, activated=lambda: self.set_font_size(self.font_px - 1, user=True))
         QShortcut(QKeySequence("Ctrl+0"), self, activated=lambda: self.set_font_size(13, user=True))
+        # швидко знайти свої повідомлення в довгому чаті
+        QShortcut(QKeySequence("Alt+Up"), self, activated=lambda: self.jump_to_mine(-1))
+        QShortcut(QKeySequence("Alt+Down"), self, activated=lambda: self.jump_to_mine(1))
         self.view.setOpenLinks(False)  # посилання відкриваємо самі: серед них — кнопки файлів від агента
         self.view.anchorClicked.connect(self._on_link)
         self.files: dict[str, dict] = {}  # кнопки файлів у стрічці: id → {path, name, size, state, saved, error}
@@ -1200,6 +1203,72 @@ class ChatPanel(QWidget):
         self.show_tools = show
         self._render()
 
+    USER_BUBBLE = "#DCEBFF"  # фон твоїх повідомлень — їх видно й у довгому чаті
+
+    def _icon_html(self, kind: str) -> str:
+        px = getattr(self.view, "icon_px", 15)
+        return f'<img src="kru-icon:{kind}" width="{px}" height="{px}" style="vertical-align: middle">'
+
+    def _user_bubble(self, index: int, text: str) -> str:
+        """Твоє повідомлення — «бульбашка» праворуч із кольоровим фоном (як у месенджерах); якір u<index> —
+        для переходу між своїми повідомленнями (Alt+↑ / Alt+↓)."""
+        lines = []
+        for n, line in enumerate(text.split("\n")):
+            kind = next((k for mark, k in LEAD_ICONS if line.startswith(mark)), None)
+            if kind and (n == 0 or line.startswith("📎")):  # «⏰ …» — заплановане завдання, «📎 …» — вкладення
+                body = lead_icon(line)[1]
+                lines.append(f"{self._icon_html(kind)}&nbsp;{html.escape(body)}")
+            else:
+                lines.append(html.escape(line))
+        return (f'<table align="right" cellpadding="7" cellspacing="0" style="background-color: {self.USER_BUBBLE}; '
+                f'margin-left: 40px; margin-top: 6px; margin-bottom: 2px"><tr><td><a name="u{index}"></a>'
+                + "<br>".join(lines) + "</td></tr></table>")
+
+    def _md_html(self, md: str, cache: bool = True) -> str:
+        """Markdown одного запису → HTML-фрагмент (вміст <body>), з кешем: стрічка перемальовується на кожен токен."""
+        if not hasattr(self, "_md_cache"):
+            self._md_cache: dict[str, str] = {}
+        if cache and md in self._md_cache:
+            return self._md_cache[md]
+        from PySide6.QtGui import QTextDocument
+
+        doc = QTextDocument()
+        doc.setDefaultFont(self.view.document().defaultFont())
+        doc.setMarkdown(md)
+        full = doc.toHtml()
+        body = full[full.find(">", full.find("<body")) + 1: full.rfind("</body>")]
+        if cache:
+            if len(self._md_cache) > 500:
+                self._md_cache.clear()
+            self._md_cache[md] = body
+        return body
+
+    def jump_to_mine(self, direction: int) -> bool:
+        """Alt+↑ / Alt+↓: прокрутити до попереднього / наступного свого повідомлення. → чи було куди."""
+        from PySide6.QtGui import QTextCursor
+
+        doc, sb = self.view.document(), self.view.verticalScrollBar()
+        tops = []
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if any(a.startswith("u") for a in frag.charFormat().anchorNames()):
+                    cur = QTextCursor(doc)
+                    cur.setPosition(frag.position())
+                    tops.append(self.view.cursorRect(cur).top() + sb.value())
+                    break
+                it += 1
+            block = block.next()
+        now = sb.value()
+        target = (max((y for y in tops if y < now - 4), default=None) if direction < 0
+                  else min((y for y in tops if y > now + 4), default=None))
+        if target is None:
+            return False
+        sb.setValue(max(0, target - 10))
+        return True
+
     def _render(self) -> None:
         self._think_timer.stop()
         parts = []
@@ -1208,10 +1277,7 @@ class ChatPanel(QWidget):
             if role == "tool" and not getattr(self, "show_tools", False) and not text.startswith(("📎", "🧠", "🤝")):
                 continue
             if role == "user":
-                mark, body = lead_icon(text)  # «⏰ …» — заплановане завдання
-                lines = body.split("\n")
-                rest = [f"{lead_icon(ln)[0]}{lead_icon(ln)[1]}" if ln.startswith("📎") else ln for ln in lines[1:]]
-                parts.append("  \n".join([f"{mark or icon('user') + ' '}**{lines[0]}**", *rest]))
+                parts.append(("html", self._user_bubble(i, text)))
             elif role == "tool":
                 mark, body = lead_icon(text)
                 parts.append(f"{mark}<small>{html.escape(body)}</small>")
@@ -1225,10 +1291,14 @@ class ChatPanel(QWidget):
             else:
                 parts.append(text)
         if self.draft:
-            parts.append(self._plain_md(self.draft) + " ▍")
+            parts.append(("draft", self._plain_md(self.draft) + " ▍"))
         elif not getattr(self, "busy", False) and any(role == "user" for role, _ in self.entries):
             parts.append(f"{icon('retry')} [Повторити](kru-retry:last)")  # як у ChatGPT/Gemini: та сама задача ще раз
-        self.view.setMarkdown("\n\n".join(parts))
+        # стрічка — HTML: Markdown кожного запису перетворюється окремо (з кешем), а бульбашки твоїх повідомлень
+        # вставляються готовим HTML (усередині Markdown Qt відкидає <img> із таблиці)
+        self.view.setHtml("".join(p[1] if isinstance(p, tuple) and p[0] == "html" else
+                                  self._md_html(p[1], cache=False) if isinstance(p, tuple) else self._md_html(p)
+                                  for p in parts))
         visible = bool(parts) and not self.history_shown
         self.view.setVisible(visible)
         if visible:
