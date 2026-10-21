@@ -103,7 +103,11 @@ class Voice:
     def caps(self) -> dict:
         from .voice_fx import EFFECTS
 
+        from . import wakeword
+
+        ww = wakeword.info(self.config)
         return {"stt": self.stt_ok, "tts": self.tts_ok, "engine": self.engine,
+                "wakeword": {"phrase": ww.get("phrase"), "version": ww.get("version")} if ww else None,
                 "effects": {k: e.title for k, e in EFFECTS.items()}, "voices": self.voices(),
                 "speakers": self.voices() if self.engine == "piper" else []}  # speakers — для старих клієнтів
 
@@ -317,7 +321,8 @@ WAKE_PROMPT = "Розмова з голосовим помічником Кру.
 _WAKE = re.compile(r"^(кру|крю|кроу|кру-кру|kru|krew|crew|krу)$")
 # звертання перед ім'ям; Whisper на коротких фразах часом пише їх по-російськи («Привет, Кру!»)
 _BEFORE_WAKE = {"ну", "агов", "гей", "ей", "ой", "о", "слухай", "послухай", "привіт", "привітик", "вітаю", "алло", "а",
-                "хей", "хай", "здоров", "привет", "эй", "хэй", "слушай", "послушай", "алё"}
+                "хей", "хай", "здоров", "привет", "эй", "хэй", "слушай", "послушай", "алё",
+                "чуєш", "чуеш", "чуешь", "слышишь", "чуєте"}
 
 
 # що Whisper «чує» в тиші й шумі (навчений на субтитрах відео)
@@ -331,6 +336,23 @@ def is_noise_text(text: str) -> bool:
     """Порожньо, без літер чи типова «вигадка» Whisper на шумі — не уточнення, а шум."""
     t = text.strip()
     return len(re.sub(r"[^\w]", "", t)) < 3 or bool(_NOISE_TEXT.search(t))
+
+
+def strip_detected(text: str) -> str:
+    """Фразу-активатор уже впізнала модель на ПК: прибрати звертання й ім'я з початку, навіть якщо Whisper
+    записав ім'я інакше («Чуєш, Крю, …», «Чуєш, кру…»)."""
+    found, rest = strip_wake(text)
+    if found:
+        return rest
+    words = text.strip().split()
+    i = 0
+    while i < min(len(words), 3) and re.sub(r"[^\w'-]", "", words[i].lower()) in _BEFORE_WAKE:
+        i += 1
+    if i and i < len(words) and re.sub(r"[^\w'-]", "", words[i].lower()).startswith(("кр", "kr", "cr")) and \
+            len(re.sub(r"[^\w]", "", words[i])) <= 5:
+        i += 1  # ім'я, почуте трохи інакше
+    rest = " ".join(words[i:]).lstrip(" ,.!?:;—-").strip()
+    return rest[:1].upper() + rest[1:]
 
 
 def strip_wake(text: str) -> tuple[bool, str]:

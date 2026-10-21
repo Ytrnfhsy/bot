@@ -7,7 +7,8 @@ name = "kru-robot"
 version = "0.1.0"
 description = "Десктоп-оболонка агента Kru: анімований персонаж поверх усіх вікон"
 requires-python = ">=3.10"
-dependencies = ["PySide6>=6.6", "vosk>=0.3.45"]  # vosk — розпізнавання імені «Кру» (офлайн)
+# vosk — ім'я «Кру» офлайн; numpy + onnxruntime — своя фраза-активатор («Чуєш, Кру», wakeword.py)
+dependencies = ["PySide6>=6.6", "vosk>=0.3.45", "numpy", "onnxruntime"]
 
 [project.gui-scripts]
 kru-robot = "kru_robot.app:main"

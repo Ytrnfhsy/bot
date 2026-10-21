@@ -782,6 +782,55 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
     check("wake_logic", wake_logic_check)
 
+    def wakeword_check():
+        """Своя фраза: потоковий детектор (заглушки мереж відбитків) і його місце в логіці слухання."""
+        from . import wakeword as wwmod
+
+        if wwmod.available():
+            return "немає numpy/onnxruntime — пропущено"
+        import numpy as np
+
+        from .wake import WakeLogic
+
+        calls = {"mel": 0, "emb": 0}
+
+        def mel(x):
+            calls["mel"] += 1
+            need(x.shape == (1, 1760), f"шматок для спектрограми: {x.shape}")
+            return np.full((1, 1, 8, 32), float(np.abs(x).mean() > 1000), np.float32)
+
+        def emb(x):
+            calls["emb"] += 1
+            need(x.shape == (1, 76, 32, 1), f"вікно для відбитка: {x.shape}")
+            return np.full((1, 1, 1, 96), (float(x[0, -8:].mean()) - 2) * 10, np.float32)  # спектр мав /10 + 2
+
+        rng = np.random.default_rng(0)
+        d = 16 * 96
+        params = {"w1": np.ones((d, 4), np.float32) / d, "b1": np.zeros(4, np.float32),
+                  "w2": np.eye(4, dtype=np.float32), "b2": np.zeros(4, np.float32),
+                  "w3": np.ones((4, 1), np.float32) * 20, "b3": np.array([-6.0], np.float32),
+                  "mean": np.zeros(d, np.float32), "std": np.ones(d, np.float32), "threshold": np.float32(0.6)}
+        det = wwmod.Detector(mel=mel, emb=emb, params=params, sensitivity="high")
+        need(abs(det.threshold - 0.45) < 1e-6, f"чутливість зсуває поріг: {det.threshold}")
+        loud = (np.sin(np.arange(16000) / 3) * 8000).astype("<i2").tobytes()
+        quiet = bytes(32000)
+        need(det.feed(quiet[:2000]) == 0.0, "рахує, не дочекавшись 80 мс")
+        need(det.feed(quiet) < 0.1, "тиша — не фраза")
+        scores = [det.feed(loud[i:i + 960]) for i in range(0, len(loud), 960)]
+        need(max(scores) > 0.9, f"фраза не впізнана: {max(scores):.2f}")
+        det.reset()
+        need(det.feed(quiet[:2560]) < 0.1, "після reset пам'ятає стару фразу")
+        lg = WakeLogic(16000, None)
+        lg.detector = det
+        ev = lg.feed(bytes(16000) + loud)
+        need([e[0] for e in ev] == ["wake"], f"фраза → wake: {ev}")
+        lg.listen()
+        need(lg.feed(bytes(3200)) == [], "після listen спрацював на давню фразу")
+        _ = rng
+        return "ok"
+
+    check("wakeword", wakeword_check)
+
     def double_click_check():
         """Клік відкриває панель (з паузою ~0,3 с), подвійний — режим «Кру», а не два кліки."""
         from PySide6.QtCore import QPoint
@@ -831,8 +880,8 @@ def run_selftest(app: QApplication, report_path: str) -> int:
                 super().__init__()
                 self.active, self.level, self.calls = False, 0.3, []
 
-            def start(self, path, sens):
-                self.active = True
+            def start(self, path, sens, phrase_model=None):
+                self.active, self.phrase_model = True, phrase_model
                 self.calls.append(("start", sens))
                 return True
 
@@ -907,6 +956,36 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             win.robot.double_clicked.emit()
             need(not fake.active and not win.robot.wake_mode and not win.act_wake.isChecked(), "не вимкнувся")
             need(not win.settings.wake_enabled, "вимкнення не запам'яталось")
+            # своя фраза («Чуєш, Кру»): модель — із сервера, фразу шукає ПК, сервер лише прибирає звертання
+            import tempfile
+
+            from . import wakeword as wwmod
+
+            tmp = Path(tempfile.mkdtemp(prefix="kru-ww-"))
+            ww_orig = (wwmod.folder, wwmod.available)
+            wwmod.folder, wwmod.available = (lambda: tmp), (lambda: "")
+            win.settings.wake_engine = "phrase"
+            try:
+                win._set_voice_caps({"stt": True, "tts": True, "wakeword": {"phrase": "Чуєш, Кру", "version": 5}})
+                sent.clear()
+                win.robot.double_clicked.emit()
+                need(sent and sent[-1] == {"type": "wake_model"} and not fake.active, f"модель фрази: {sent[-1:]}")
+                b64 = lambda data: _b64.b64encode(data).decode()  # noqa: E731
+                win.on_event({"type": "wake_model", "phrase": "Чуєш, Кру", "version": 5, "threshold": 0.6,
+                              "files": {"model": b64(b"npz"), "melspectrogram": b64(b"mel"), "embedding": b64(b"emb")}})
+                need(fake.active and fake.phrase_model == tmp and wwmod.cached_version() == 5,
+                     f"запуск зі своєю фразою: {fake.calls[-1:]}, {wwmod.cached_version()}")
+                fake.woke.emit()
+                fake.utterance.emit(b"RIFF", True)
+                need(sent[-1].get("wake") == "detected", f"фразу впізнав ПК: {sent[-1]}")
+                win.robot.double_clicked.emit()
+                sent.clear()
+                win.robot.double_clicked.emit()  # модель уже є (та сама версія) — без запиту до сервера
+                need(fake.active and not any(m.get("type") == "wake_model" for m in sent), "забирав модель удруге")
+                win.robot.double_clicked.emit()
+            finally:
+                wwmod.folder, wwmod.available = ww_orig
+                win.settings.wake_engine = "server"
         finally:
             win.conn.send = orig[0]
             win._wire_wake(orig[1])

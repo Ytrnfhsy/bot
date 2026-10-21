@@ -36,6 +36,7 @@ from .winplatform import IS_WINDOWS, WinHotkey, autostart_enabled, set_autostart
 from .panel import ChatPanel
 from .robot import RobotWidget
 from . import wake as wakemod
+from . import wakeword as wakewordmod
 from .wake import WakeListener
 from .settings import Settings, new_session_id
 
@@ -114,7 +115,11 @@ class SettingsDialog(QDialog):
                                                              round(self.voice_speed.value(), 2),
                                                              self.voice_volume.value()))
         self.wake_engine = QComboBox()
+        phrase = (caps.get("wakeword") or {}).get("phrase") if isinstance(caps.get("wakeword"), dict) else ""
         for key, title in WAKE_ENGINE.items():
+            if key == "phrase":
+                title = f"цей ПК — своя фраза «{phrase}» (точно)" if phrase else \
+                    "цей ПК — своя фраза (спершу на сервері: kru wakeword train)"
             self.wake_engine.addItem(title, key)
         self.wake_engine.setCurrentIndex(max(0, self.wake_engine.findData(s.wake_engine)))
         self.wake_engine.setToolTip("Сервер чує так само точно, як при утриманні робота, але кожна фраза в кімнаті "
@@ -125,9 +130,9 @@ class SettingsDialog(QDialog):
         self.wake_sensitivity.setCurrentIndex(max(0, self.wake_sensitivity.findData(s.wake_sensitivity)))
         self.wake_sensitivity.setToolTip("Як легко робот відгукується на «Кру» (лише коли ім'я шукає ПК). "
                                          "Якщо реагує на схожі слова — знизь")
-        self.wake_sensitivity.setEnabled(s.wake_engine == "local")
+        self.wake_sensitivity.setEnabled(s.wake_engine in {"local", "phrase"})
         self.wake_engine.currentIndexChanged.connect(
-            lambda: self.wake_sensitivity.setEnabled(self.wake_engine.currentData() == "local"))
+            lambda: self.wake_sensitivity.setEnabled(self.wake_engine.currentData() in {"local", "phrase"}))
         self.wake_followup = QCheckBox(f"Після відповіді ще {FOLLOWUP_SEC} с слухати уточнення без імені")
         self.wake_followup.setChecked(s.wake_followup)
         voice_row = QHBoxLayout()
@@ -213,7 +218,8 @@ TOOL_ACTIVITY = {
 }
 
 
-WAKE_ENGINE = {"server": "сервер (Whisper) — точно", "local": "цей ПК (Vosk) — офлайн, менш точно"}
+WAKE_ENGINE = {"phrase": "", "server": "сервер (Whisper) — кожна фраза йде на сервер",
+               "local": "цей ПК (Vosk) — офлайн, менш точно"}
 WAKE_SENSITIVITY = {"low": "низька — рідше помиляється", "medium": "середня", "high": "висока — чує здалеку"}
 FOLLOWUP_SEC = 6  # стільки слухаємо уточнення без імені після відповіді
 BUSY_PHRASE = "Зачекай хвилинку, я ще працюю над попередньою задачею."
@@ -723,6 +729,11 @@ class RobotWindow(QWidget):
         if not self.voice_caps["stt"]:
             problem = ("на сервері ще не встановлено розпізнавання мовлення: deploy/voice.sh install"
                        if self.conn.is_connected() else "немає з'єднання з сервером")
+        elif self.settings.wake_engine == "phrase":
+            problem = wakewordmod.available() or (
+                "" if self.voice_caps.get("wakeword") else
+                "на сервері ще не навчено фразу — виконай там: kru wakeword train "
+                "(або вибери в налаштуваннях інший спосіб)")
         elif self.settings.wake_engine == "local":
             try:
                 import vosk  # noqa: F401
@@ -738,6 +749,15 @@ class RobotWindow(QWidget):
         self.settings.save()
         self.robot.wake_mode = True
         self._sync_wake_action(True)
+        if self.settings.wake_engine == "phrase":
+            if wakewordmod.cached_version() == (self.voice_caps.get("wakeword") or {}).get("version"):
+                self._start_wake(None)
+                return
+            self._wake_loading = True  # модель фрази (новіша) — забираємо з сервера, далі wake_model
+            self.panel.set_activity("👂 Забираю з сервера модель фрази…")
+            if not self.conn.send({"type": "wake_model"}):
+                self._on_wake_model(OSError("немає з'єднання з сервером"))
+            return
         if self.settings.wake_engine != "local":
             self._start_wake(None)  # ім'я шукає сервер — модель на ПК не потрібна
             return
@@ -771,8 +791,23 @@ class RobotWindow(QWidget):
             return
         self._start_wake(result)
 
+    def _on_wake_bundle(self, ev: dict) -> None:
+        """Сервер надіслав модель своєї фрази."""
+        if not self._wake_loading:
+            return
+        if ev.get("error"):
+            self._on_wake_model(RuntimeError(str(ev["error"])))
+            return
+        try:
+            wakewordmod.save_bundle(ev)
+        except (OSError, ValueError) as e:
+            self._on_wake_model(e)
+            return
+        self._on_wake_model(None)
+
     def _start_wake(self, path) -> None:
-        if not self.wake.start(path, self.settings.wake_sensitivity):
+        phrase = wakewordmod.folder() if self.settings.wake_engine == "phrase" else None
+        if not self.wake.start(path, self.settings.wake_sensitivity, phrase_model=phrase):
             return  # причину покаже failed
         self.robot.wake_mode = True
         self._sync_wake_action(True)
@@ -808,7 +843,8 @@ class RobotWindow(QWidget):
 
     def _on_wake_utterance(self, wav: bytes, need_name: bool) -> None:
         """Фраза записана — на сервер (він перевірить, що вона починається з «Кру»)."""
-        server_name = need_name and self.settings.wake_engine != "local"  # ім'я шукає сервер: це будь-яка фраза
+        engine = self.settings.wake_engine
+        server_name = need_name and engine not in {"local", "phrase"}  # ім'я шукає сервер: це будь-яка фраза
         if self.busy and server_name:
             self.wake.listen()  # агент працює, а чи кликали його — невідомо: мовчки слухаємо далі
             return
@@ -820,7 +856,9 @@ class RobotWindow(QWidget):
         self._voice_seq += 1
         vid = f"w{self._voice_seq}"
         msg = {"type": "voice_in", "id": vid, "data": base64.b64encode(wav).decode("ascii")}
-        msg["wake"] = "require" if need_name else "followup"  # followup — сервер відсіє вигадки Whisper на шумі
+        # require — сервер перевірить ім'я; detected — фразу вже впізнала своя модель на ПК;
+        # followup — уточнення без імені: сервер відсіє вигадки Whisper на шумі
+        msg["wake"] = ("detected" if engine == "phrase" else "require") if need_name else "followup"
         if not self.conn.send(msg):
             self.robot.set_state("idle")
             self.panel.set_activity("📡 Немає з'єднання з сервером")
@@ -869,7 +907,8 @@ class RobotWindow(QWidget):
         self.voice_caps = {"stt": caps.get("stt") is True, "tts": caps.get("tts") is True,
                            "effects": caps.get("effects") if isinstance(caps.get("effects"), dict) else {},
                            "voices": [v for v in (caps.get("voices") or caps.get("speakers") or [])
-                                      if isinstance(v, str)]}
+                                      if isinstance(v, str)],
+                           "wakeword": caps.get("wakeword") if isinstance(caps.get("wakeword"), dict) else None}
         self.robot.hold_enabled = self.voice_caps["stt"]
         self.panel.set_voice(self.voice_caps["stt"])
         if self.settings.wake_enabled and self.voice_caps["stt"] and not (self.wake.active or self._wake_loading):
@@ -1301,6 +1340,9 @@ class RobotWindow(QWidget):
             return
         if t == "voice_text":
             self._on_voice_text(ev)
+            return
+        if t == "wake_model":
+            self._on_wake_bundle(ev)
             return
         if t in {"voice_error", "tts_error"}:
             if t == "voice_error" and self._wake_pending is not None and ev.get("id") == self._wake_pending:

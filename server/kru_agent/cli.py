@@ -518,6 +518,32 @@ def _telegram_command(cfg: Config, args: argparse.Namespace, parser: argparse.Ar
         raise SystemExit(str(e)) from e
 
 
+def _wakeword_command(cfg: Config, args, parser) -> None:
+    """kru wakeword train|status — своя фраза-активатор для режиму «завжди слухаю» (робот, wakeword.py)."""
+    from . import wakeword
+
+    if args.wake_cmd == "train":
+        print(f"Навчаю фразу «{args.phrase}» — це займе 10–40 хвилин (найдовше — озвучення прикладів).")
+        try:
+            meta = wakeword.train(cfg, args.phrase, quick=args.quick, extra=not args.no_extra)
+        except ImportError as e:
+            raise SystemExit(f"❌ Бракує {e.name} — спершу: deploy/voice.sh install") from e
+        except (RuntimeError, OSError) as e:
+            raise SystemExit(f"❌ {e}") from e
+        print(f"{GREEN}Готово:{RESET} «{meta['phrase']}», поріг {meta['threshold']}, на перевірочних прикладах "
+              f"впізнано {meta['recall']:.0%}, хибних спрацювань {meta['false_alarms']:.2%} "
+              f"({meta['seconds'] // 60} хв).")
+        print("У роботі: Налаштування → «Хто шукає «Кру»» → «цей ПК — своя фраза». Модель робот забере сам.")
+    elif args.wake_cmd == "status":
+        meta = wakeword.info(cfg)
+        if not meta:
+            print("Фразу ще не навчено: kru wakeword train")
+            return
+        print(json.dumps(meta, ensure_ascii=False, indent=1))
+    else:
+        parser.print_help()
+
+
 def _ssh_command(cfg: Config, args, parser) -> None:
     """kru ssh add|list|test|remove|forget|key — машини, до яких агент має SSH-доступ."""
     import shutil
@@ -653,8 +679,17 @@ def main(argv: list[str] | None = None) -> None:
         ssh_sub.add_parser(name, help=help_).add_argument("name")
     ssh_sub.add_parser("key", help="показати публічний ключ агента")
 
+    p_wake = sub.add_parser("wakeword", help="своя фраза-активатор («Чуєш, Кру») для режиму «завжди слухаю»")
+    wake_sub = p_wake.add_subparsers(dest="wake_cmd")
+    p = wake_sub.add_parser("train", help="навчити модель фрази (озвучує її голосами HolosTTS/Piper)")
+    p.add_argument("--phrase", default="Чуєш, Кру", help="фраза (типово «Чуєш, Кру»)")
+    p.add_argument("--quick", action="store_true", help="швидко й менш точно (перевірити, що все працює)")
+    p.add_argument("--no-extra", action="store_true",
+                   help="не завантажувати ~180 МБ додаткових негативних прикладів openWakeWord")
+    wake_sub.add_parser("status", help="що навчено")
+
     args = parser.parse_args(argv)
-    if args.cmd in {"user", "telegram", "ssh"}:
+    if args.cmd in {"user", "telegram", "ssh", "wakeword"}:
         # ті самі налаштування, що й у сервісу (DATA_DIR, KRU_TOKEN)
         from .config import _load_dotenv
         from pathlib import Path
@@ -684,6 +719,8 @@ def main(argv: list[str] | None = None) -> None:
         _telegram_command(cfg, args, p_tg)
     elif args.cmd == "ssh":
         _ssh_command(cfg, args, p_ssh)
+    elif args.cmd == "wakeword":
+        _wakeword_command(cfg, args, p_wake)
     elif args.cmd == "health":
         from .llm import create_llm
 
