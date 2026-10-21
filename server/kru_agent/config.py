@@ -94,6 +94,8 @@ class Config:
     # Інструменти
     workspace: Path = field(default_factory=lambda: Path.home() / "kru-workspace")
     allow_outside_workspace: bool = False  # лише для адміністраторів
+    # MCP-сервери (PhotoCraft тощо) — інструменти агента; формат як у Claude Desktop (див. mcp.py)
+    mcp_config: Path = field(default_factory=lambda: Path.home() / ".config" / "kru" / "mcp.json")
     # робочі теки інших користувачів: <USERS_WORKSPACE>/<ім'я>/
     users_workspace: Path = field(default_factory=lambda: Path.home() / "kru-users")
     auto_approve: bool = False
@@ -178,6 +180,7 @@ class Config:
             agent_name=_env("AGENT_NAME", d.agent_name),
             persona=_env("PERSONA", d.persona),
             workspace=Path(_env("WORKSPACE", str(d.workspace))).expanduser(),
+            mcp_config=Path(_env("MCP_CONFIG", str(d.mcp_config))).expanduser(),
             allow_outside_workspace=_env_bool("ALLOW_OUTSIDE_WORKSPACE", d.allow_outside_workspace),
             users_workspace=Path(_env("USERS_WORKSPACE", str(d.users_workspace))).expanduser(),
             auto_approve=_env_bool("AUTO_APPROVE", d.auto_approve),

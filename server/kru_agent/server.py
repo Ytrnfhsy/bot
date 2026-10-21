@@ -108,6 +108,8 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
             lambda owner: app.state.hub.get(owner) is not None,
         )
         app.state.scheduler.start()
+        # MCP-сервери стартують у фоні: їхні інструменти з'являться за кілька секунд, сервер не чекає
+        app.state.mcp_start = asyncio.create_task(app.state.agent.start_mcp())
         app.state.telegram = None
         if cfg.telegram_bot_token and cfg.telegram_poll:
             from .telegram_bot import TelegramGateway
@@ -126,6 +128,7 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
         if not cfg.token and not users.list():
             log.warning("KRU_TOKEN не задано і користувачів немає — сервер доступний без авторизації!")
         yield
+        app.state.mcp_start.cancel()
         await app.state.scheduler.stop()
         if app.state.telegram:
             await app.state.telegram.stop()

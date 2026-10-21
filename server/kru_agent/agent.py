@@ -259,6 +259,9 @@ class Agent:
         self._vision_checked = 0.0
         self._session_locks: dict[str, asyncio.Lock] = {}
         self.voice = Voice(config)
+        from .mcp import MCPManager
+
+        self.mcp = MCPManager(config)  # інструменти MCP-серверів з'являються після start_mcp()
 
     def make_context(self, user: User | None = None) -> ToolContext:
         """Контекст задачі конкретного користувача: його тека, пам'ять і дозволені інструменти."""
@@ -273,7 +276,8 @@ class Agent:
             allow_outside=self.config.allow_outside_workspace and user.is_admin,
             # у пісочниці shell і Python безпечні й для звичайних користувачів (бачать лише свою теку)
             denied_tools=frozenset() if user.is_admin else (
-                SSH_TOOLS | (frozenset() if sandbox.enabled(self.config) else ADMIN_ONLY_TOOLS)),
+                SSH_TOOLS | frozenset(self.mcp.admin_only)
+                | (frozenset() if sandbox.enabled(self.config) else ADMIN_ONLY_TOOLS)),
             vision_ok=self.vision,
             memory=self.memory,
             llm=self.llm,
@@ -930,6 +934,11 @@ class Agent:
         title = chat["title"]
         return {"title": title, "markdown": to_markdown(title, chat["messages"], self.config.agent_name, chat["updated_at"])}
 
+    async def start_mcp(self) -> list[str]:
+        """Запустити MCP-сервери з ~/.config/kru/mcp.json і додати їхні інструменти. → помилки."""
+        return await self.mcp.start(self.registry)
+
     async def close(self) -> None:
+        await self.mcp.stop()
         await self.llm.close()
         await self.embedder.close()
