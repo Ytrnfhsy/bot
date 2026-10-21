@@ -279,6 +279,9 @@ class RobotWindow(QWidget):
         self._wire_wake(WakeListener(self))
         self.player = Player(self)
         self.player.stopped.connect(self._on_speech_done)
+        self._tts_id: str | None = None  # озвучення, що приходить частинами (по реченнях)
+        self._tts_queue: list[bytes] = []  # частини, що чекають своєї черги
+        self._tts_done = True  # остання частина вже прийшла
         self.player.started.connect(lambda: self.wake.active and self.wake.pause())  # не слухати самого себе
         self._voice_task = False  # поточну задачу поставлено голосом — відповідь озвучити
         self._voice_seq = 0
@@ -489,8 +492,8 @@ class RobotWindow(QWidget):
 
     def on_robot_clicked(self) -> None:
         self.touch()
-        if self.player.playing:  # клік під час озвучення — замовкнути
-            self.player.stop()
+        if self.player.playing or (self._tts_id and self.robot.state == "talking"):  # клік під час озвучення — замовкнути
+            self.stop_speech()
             return
         self.conn.reconnect_now()
         if self.robot.state == "sleeping":
@@ -502,7 +505,7 @@ class RobotWindow(QWidget):
 
     def send_task(self, text: str, by_voice: bool = False) -> None:
         self.touch()
-        self.player.stop()
+        self.stop_speech(quiet=True)
         self._voice_task = by_voice
         if not self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
                            "think": self.settings.think, "auto_files": self.settings.auto_files,
@@ -532,7 +535,7 @@ class RobotWindow(QWidget):
             self.panel.set_activity("⏳ Я ще працюю над попередньою задачею — скажеш, щойно закінчу")
             self.robot.set_state("waiting", 1.5, then=self.robot.state)
             return
-        self.player.stop()
+        self.stop_speech()
         if self.wake.active:
             self.wake.pause()
         if self.recorder.start():
@@ -597,12 +600,30 @@ class RobotWindow(QWidget):
 
     def _speak(self, text: str, voice=None, effect=None, speed=None, volume=None) -> None:
         s = self.settings
+        if self._tts_id and not self._tts_done:
+            self.conn.send({"type": "tts_stop", "id": self._tts_id})  # попереднє озвучення вже не потрібне
+        self._tts_queue = []
         self._voice_seq += 1
         self._speech_volume = s.voice_volume if volume is None else volume
-        self.conn.send({"type": "tts", "id": f"t{self._voice_seq}", "text": text,
-                        "voice": s.voice_name if voice is None else voice,
-                        "effect": s.voice_sound if effect is None else effect,
-                        "speed": s.voice_speed if speed is None else speed})
+        self._tts_id, self._tts_done = f"t{self._voice_seq}", False
+        # stream — частинами: перше речення звучить, поки сервер озвучує решту
+        if not self.conn.send({"type": "tts", "id": self._tts_id, "text": text, "stream": True,
+                               "voice": s.voice_name if voice is None else voice,
+                               "effect": s.voice_sound if effect is None else effect,
+                               "speed": s.voice_speed if speed is None else speed}):
+            self._tts_id, self._tts_done = None, True
+
+    def stop_speech(self, quiet: bool = False) -> None:
+        """Замовкнути: зупинити звук і сказати серверу не озвучувати решту відповіді.
+        quiet — без завершальних дій (стан робота, режим «Кру»): далі все одно піде нова задача."""
+        waiting = self._tts_id is not None and not self.player.playing and not quiet  # звуку ще нема, а робот «говорить»
+        if self._tts_id and not self._tts_done:
+            self.conn.send({"type": "tts_stop", "id": self._tts_id})
+        self._tts_id, self._tts_queue, self._tts_done = None, [], True
+        if self.player.playing:
+            self.player.stop()  # далі — _on_speech_done
+        elif waiting:
+            self._on_speech_done()
 
     def preview_voice(self, voice: str, effect: str, speed: float, volume: int) -> None:
         """«▶ Прослухати» в налаштуваннях: пробна фраза ще не збереженими голосом і звучанням."""
@@ -611,19 +632,37 @@ class RobotWindow(QWidget):
         self._speak(PREVIEW_TEXT, voice, effect, speed, volume)
 
     def _on_tts_audio(self, ev: dict) -> None:
+        if ev.get("id") != self._tts_id:
+            return  # частина озвучення, яке вже перебили
+        if ev.get("last", True):
+            self._tts_done = True
         try:
             wav = base64.b64decode(str(ev.get("data", "")))
         except ValueError:
             return
         if self.recorder.active or self.busy:
-            if self._wake_turn:
-                self._after_wake_reply()
+            self.stop_speech()  # (і повертає режим «Кру» до слухання)
             return  # уже говорить сам користувач або пішла нова задача — стара відповідь неактуальна
+        if self.player.playing:
+            self._tts_queue.append(wav)  # попередня частина ще звучить
+            return
+        self._play_part(wav)
+
+    def _play_part(self, wav: bytes) -> None:
         if self.player.play(wav, self._speech_volume / 100):
             self.robot.set_state("talking")
             self._level_timer.start()
+        else:
+            self.stop_speech()
 
     def _on_speech_done(self) -> None:
+        if self._tts_id is not None:
+            if self._tts_queue:  # наступна частина вже тут — одразу далі
+                self._play_part(self._tts_queue.pop(0))
+                return
+            if not self._tts_done:
+                return  # сервер ще озвучує наступне речення — «говорить» далі
+            self._tts_id = None
         if not self.wake.active:
             self._level_timer.stop()
         self.robot.voice_level = 0.0
@@ -1273,8 +1312,11 @@ class RobotWindow(QWidget):
             elif t == "voice_error":
                 self._on_record_failed(str(ev.get("message", "помилка")))
             else:
+                if ev.get("id") != self._tts_id:
+                    return
                 self.panel.set_activity(f"🔇 {ev.get('message', 'не вдалося озвучити')}")
-                if self.robot.state == "talking" or self._wake_turn:
+                self._tts_done = True
+                if not self.player.playing and (self.robot.state == "talking" or self._wake_turn):
                     self._on_speech_done()
             return
         if t == "tts_audio":

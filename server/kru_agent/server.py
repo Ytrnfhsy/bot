@@ -21,6 +21,7 @@
       wake=require — режим «завжди слухаю»: фраза має починатися з імені «Кру», яке прибирається з тексту
   {"type": "tts", "id": "...", "text": "...", "voice": "Speaker_67", "effect": "natural", "speed": 1.0}  — озвучити
       (HolosTTS або Piper); voice/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_TTS_VOICE, KRU_VOICE_EFFECT)
+      stream=true — частинами по реченнях: кілька tts_audio з part (0, 1, …) і last; {"type": "tts_stop", "id"} — досить
   {"type": "ping"}
 
 Задача не скасовується, коли з'єднання рветься: вона доробляється на сервері, а після перепідключення
@@ -60,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import re
 import logging
 import uuid
@@ -259,6 +261,7 @@ class Connection:
         self._send_lock = asyncio.Lock()
         self.closed = False
         self._bg: set[asyncio.Task] = set()
+        self._tts_now = None  # id озвучення, що зараз іде частинами (новий запит чи tts_stop його скасовують)
 
     async def send(self, ev: dict[str, Any]) -> None:
         if self.closed:
@@ -333,6 +336,22 @@ class Connection:
     async def _voice(self, kind: str, msg: dict[str, Any]) -> None:
         """Голос: запис з мікрофона → текст (voice_in) або текст відповіді → WAV (tts)."""
         vid, voice = msg.get("id"), self.agent.voice
+        if kind == "tts" and msg.get("stream"):
+            self._tts_now = vid
+            parts = voice.speak_parts(str(msg.get("text") or ""), msg.get("voice"), msg.get("effect"),
+                                      msg.get("speed"), msg.get("speaker"))
+            try:
+                async with contextlib.aclosing(parts):
+                    i = 0
+                    async for audio, last in parts:
+                        if self._tts_now != vid:
+                            return  # користувач перебив або попросив озвучити інше
+                        await self.send({"type": "tts_audio", "id": vid, "format": "wav", "part": i, "last": last,
+                                         "data": base64.b64encode(audio).decode("ascii")})
+                        i += 1
+            except VoiceError as e:
+                await self.send({"type": "tts_error", "id": vid, "message": str(e)})
+            return
         if kind == "tts":
             try:
                 audio = await voice.speak(str(msg.get("text") or ""), msg.get("voice"), msg.get("effect"),
@@ -454,6 +473,9 @@ class Connection:
                     await self._save_upload(msg)
                 elif kind == "file_get":
                     await self._send_file(msg)
+                elif kind == "tts_stop":
+                    if self._tts_now == msg.get("id"):
+                        self._tts_now = None
                 elif kind in {"voice_in", "tts"}:
                     # розпізнавання/озвучення — секунди роботи CPU: не блокуємо решту повідомлень
                     task = asyncio.create_task(self._voice(kind, msg))
