@@ -1,8 +1,9 @@
 """Режим «завжди слухаю»: робот чекає на своє ім'я — «Кру» — і тоді слухає питання.
 
 Як це влаштовано:
-  1. Мікрофон працює постійно, але звук нікуди не йде: маленька офлайн-модель Vosk тут, на ПК,
-     шукає лише ім'я (≈2–5 % одного ядра). Модель завантажується один раз при першому ввімкненні.
+  1. Мікрофон працює постійно. Ім'я шукає або сервер (за замовчуванням: кожна коротка фраза, що прозвучала
+     в кімнаті, іде до Whisper — той самий, що розпізнає утримання робота, тож чує точно), або маленька
+     офлайн-модель Vosk тут, на ПК (звук нікуди не йде, але маленька модель часто чує не те).
   2. Почувши «Кру», робот записує фразу до кінця (до паузи). Останні секунди звуку весь час
      тримаються в пам'яті, тож «Кру, яка сьогодні погода?» можна сказати одним духом.
   3. Запис іде на сервер — Whisper розпізнає точно й перевіряє, що фраза справді починається з імені
@@ -37,6 +38,7 @@ PRE_ROLL = 0.35  # с звуку перед початком мовлення, �
 BUFFER_SEC = 20  # стільки останніх секунд тримаємо в пам'яті
 END_SILENCE = 0.9  # пауза, після якої фраза вважається завершеною
 MAX_COMMAND = 15.0  # найдовша фраза після імені
+MIN_PHRASE = 0.25  # с — коротші звуки (клацання, стук) на сервер не надсилаємо
 WAKE_WORDS = ("кру", "крю", "кроу", "крук", "круг")  # як модель може «почути» ім'я (сервер перевіряє точніше)
 SENSITIVITY = ("low", "medium", "high")
 # Часті слова — «куди падати» звичайному мовленню в граматиці, якщо модель не має [unk]
@@ -75,6 +77,7 @@ class WakeLogic:
         self.deadline = 0  # кадр, до якого чекаємо на уточнення
         self._hits = 0  # «середня» чутливість: ім'я в кількох проміжних результатах поспіль
         self.level = 0.0
+        self.whole_phrases = recognizer is None  # без Vosk: кожна фраза йде на сервер, ім'я шукає Whisper
         self.loose = False  # модель не знає слова «кру» — шукаємо схожі слова у вільному розпізнаванні
         self.debug = None  # функція для діагностики (KRU_WAKE_DEBUG=1)
         self._last_partial = ""
@@ -146,6 +149,16 @@ class WakeLogic:
         if self.state == "await" and not self.speaking and self.n > self.deadline:
             self.state = "busy"
             return [("timeout",)]
+        if self.state == "idle" and self.whole_phrases:
+            too_long = self.speaking and (self.n - self.speech_start) * FRAME_MS / 1000 >= MAX_COMMAND
+            if (was_speaking and not self.speaking) or too_long:
+                spoken = (self.n - self.speech_start - self.silence) * FRAME_MS / 1000
+                if spoken >= MIN_PHRASE:
+                    self.state, self.need_wake = "busy", True
+                    if self.debug:
+                        self.debug(f"фраза {spoken:.1f} с → на сервер (шукаю ім'я)")
+                    events.append(("utterance", self._audio(self._preroll(self.speech_start)), True))
+            return events
         if self.state == "idle":
             hit = self._recognize(frame)
             if hit:
@@ -327,7 +340,7 @@ class Agc:
         if sys.byteorder == "big":
             a.byteswap()
         rms = math.sqrt(sum(x * x for x in a[::4]) / max(1, len(a[::4])))
-        self.peak = max(rms, self.peak * 0.997, 300.0)  # згасає за кілька секунд
+        self.peak = max(rms, self.peak * 0.997, 1000.0)  # згасає за кілька секунд; тишу більш ніж ×4 не підсилюємо
         want = min(self.MAX_GAIN, max(1.0, self.TARGET / self.peak))
         self.gain += (want - self.gain) * (0.5 if want < self.gain else 0.05)  # вниз — швидко, вгору — плавно
         if self.gain <= 1.05:
@@ -406,9 +419,9 @@ class WakeListener(QObject):
         logic = self.logic
         return logic.level if logic else 0.0
 
-    def start(self, model_path: Path, sensitivity: str = "medium") -> bool:
+    def start(self, model_path: Path | None, sensitivity: str = "medium") -> bool:
         """Відкриває мікрофон одразу, а модель вантажить у робочому потоці (інтерфейс не завмирає);
-        коли все готово — сигнал ready, якщо ні — failed."""
+        коли все готово — сигнал ready, якщо ні — failed. model_path=None — без Vosk, ім'я шукає сервер."""
         from .audio import MicError, open_input
 
         if self._source is not None:
@@ -500,19 +513,23 @@ class WakeListener(QObject):
             elif kind == "timeout":
                 self.timeout.emit()
 
-    def _work(self, model_path: Path, sensitivity: str) -> None:
-        try:
-            self._model, rec, limited = make_recognizer(model_path, RATE)
-        except Exception as e:  # noqa: BLE001 — немає vosk, пошкоджена модель тощо
-            self._events.put(("failed", f"не вдалося запустити розпізнавання імені: {e}"))
-            return
+    def _work(self, model_path: Path | None, sensitivity: str) -> None:
+        rec, limited = None, True
+        if model_path is not None:
+            try:
+                self._model, rec, limited = make_recognizer(model_path, RATE)
+            except Exception as e:  # noqa: BLE001 — немає vosk, пошкоджена модель тощо
+                self._events.put(("failed", f"не вдалося запустити розпізнавання імені: {e}"))
+                return
+        else:
+            debug("ім'я шукає сервер (Whisper): кожна фраза — на сервер")
         logic = WakeLogic(RATE, rec, sensitivity)
         logic.loose = not limited
         logic.debug = debug if DEBUG else None
         self.logic = logic
         self._events.put(("ready",))
         last_report = time.monotonic()
-        agc = Agc()
+        agc = Agc() if rec is not None else (lambda pcm: pcm)  # Whisper тихий звук чує й так
         while not self._stop.is_set():
             try:
                 item = self._queue.get(timeout=0.2)
@@ -540,5 +557,5 @@ class WakeListener(QObject):
             if DEBUG and time.monotonic() - last_report > 2:
                 last_report = time.monotonic()
                 debug(f"стан {logic.state}, рівень {logic.level:.2f}, шум {logic.floor:.0f}, мовлення {logic.speaking}, "
-                      f"підсилення ×{agc.gain:.1f}")
+                      f"підсилення ×{getattr(agc, 'gain', 1.0):.1f}")
         self._model = None

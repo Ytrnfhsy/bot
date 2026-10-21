@@ -49,7 +49,7 @@
   {"type": "chat_search", "query", "chats": [{id, title, count, created_at, updated_at, snippet}]}
   {"type": "chat_error", "message"}
   {"type": "voice_text", "id", "text", "ignored"?: true, "wake_only"?: true} | {"type": "voice_error", "id", "message"}
-      ignored — імені не почуто (хибне спрацювання); wake_only — лише «Кру» без питання
+      ignored — імені не почуто (heard — що почуто); wake_only — лише «Кру» без питання
   {"type": "tts_audio", "id", "format": "wav", "data": "<base64>"} | {"type": "tts_error", "id", "message"}
   {"type": "error", "message": "..."}
   {"type": "pong"}
@@ -77,7 +77,7 @@ from .scheduler import Scheduler
 from .tools import ToolError
 from .tools.files import shared_file
 from .users import User, UserStore, workspace_for
-from .voice import MAX_AUDIO, VoiceError, strip_wake
+from .voice import MAX_AUDIO, WAKE_PROMPT, VoiceError, strip_wake
 
 log = logging.getLogger("kru.server")
 
@@ -348,8 +348,8 @@ class Connection:
             if len(raw) > MAX_AUDIO * 4 // 3 + 4:
                 raise VoiceError("Запис задовгий")
             data = base64.b64decode(raw, validate=True)
-            # у режимі «завжди слухаю» підказуємо Whisper, як пишеться ім'я
-            text = await voice.transcribe(data, "Кру, " if msg.get("wake") == "require" else None)
+            # у режимі «завжди слухаю» підказуємо Whisper, як пишеться ім'я (не нав'язуючи його на початок фрази)
+            text = await voice.transcribe(data, WAKE_PROMPT if msg.get("wake") == "require" else None)
         except (binascii.Error, ValueError):
             await self.send({"type": "voice_error", "id": vid, "message": "пошкоджений запис"})
             return
@@ -361,7 +361,7 @@ class Connection:
             found, rest = strip_wake(text)
             if not found:
                 log.info("Режим «Кру»: імені не почуто — ігнорую")
-                reply.update(text="", ignored=True)
+                reply.update(text="", ignored=True, heard=text[:200])  # heard — для діагностики на клієнті
             elif not rest:
                 reply.update(text="", wake_only=True)  # «Кру…» і пауза — клієнт слухатиме питання далі
             else:
