@@ -448,6 +448,35 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
     step(50, lambda: check("thinking_toggle", thinking_flow))
 
+    def think_mode_check():
+        """Міркування: авто/завжди/ніколи → що йде на сервер; заміри відповіді — у рядку під чатом."""
+        from . import app as appmod
+
+        sent = []
+        orig, mode = win.conn.send, win.settings.think_mode
+        win.conn.send = lambda m: sent.append(m) or True
+        try:
+            for m, want in (("auto", "auto"), ("on", True), ("off", False)):
+                win.settings.think_mode = m
+                win.send_task(f"тест {m}")
+                win.on_event({"type": "final", "text": "ок", "stats": {"seconds": 3.24, "steps": 2, "think_steps": 0,
+                                                                     "thinking": 0, "gen_tps": 43.4}})
+                win.on_event({"type": "status", "state": "idle"})
+                task = next(x for x in reversed(sent) if x.get("type") == "task")
+                need(task["think"] == want, f"{m}: {task['think']}")
+            need(win.panel.activity_text == "⏱ 3,2 с · 2 кроки · без міркувань · 43 т/с",
+                 f"заміри: {win.panel.activity_text!r}")
+            line = appmod.stats_line({"seconds": 12, "steps": 5, "think_steps": 3, "thinking": 812})
+            need(line == "⏱ 12,0 с · 5 кроків · міркування ~812 т", line)
+            need(appmod.stats_line(None) == "", "без замірів (старий сервер)")
+        finally:
+            win.conn.send, win.settings.think_mode = orig, mode
+            win.busy = False
+            win.panel.set_busy(False)
+        return "ok"
+
+    step(50, lambda: check("think_mode", think_mode_check))
+
     def feed_icons_flow():
         """Службові позначки стрічки — намальовані іконки, а не емодзі (емодзі залежать від шрифтів системи)."""
         import re

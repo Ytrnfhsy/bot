@@ -164,7 +164,7 @@ LEAD_ICONS = (("↳ 🔧", "tool"), ("🔧", "tool"), ("🧠", "memory"), ("🤝
               ("📋", "plan"), ("⏰", "clock"), ("✗", "warn"), ("⚠️", "warn"), ("⚠", "warn"), ("✅", "ok"))
 # рядок стану під стрічкою («💭 Думаю…», «🔧 Працюю…»): перший символ-емодзі → іконка
 ACTIVITY_ICONS = {
-    "💭": "think", "🔧": "tool", "⚙️": "tool", "🧮": "tool", "⏳": "clock", "⏰": "clock", "🕒": "clock",
+    "💭": "think", "🔧": "tool", "⚙️": "tool", "🧮": "tool", "⏳": "clock", "⏱": "clock", "⏰": "clock", "🕒": "clock",
     "📡": "link", "🔄": "retry", "↻": "retry", "🗜": "plan", "📋": "plan", "📚": "search", "🔎": "search",
     "🌐": "search", "📖": "search", "👁": "show", "✏": "rename", "✍️": "rename", "📝": "new", "📂": "chats",
     "📤": "export", "⬇": "download", "🤝": "delegate", "🧠": "memory", "📎": "file", "✈️": "send",

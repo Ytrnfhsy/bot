@@ -33,7 +33,8 @@ class Settings:
     pos_x: int | None = None
     pos_y: int | None = None
     sleep_after_sec: int = 180
-    think: bool = True  # модель міркує перед відповіддю (розумніше, але повільніше)
+    think_mode: str = "auto"  # auto — міркувати лише над складними задачами | on — завжди | off — ніколи
+    show_stats: bool = True  # після відповіді: скільки тривало, кроків, чи були міркування
     show_thinking: bool = False
     show_tools: bool = False  # рядки «🔧 read_file: …» — що саме робить агент
     auto_files: bool = False  # запис файлів у робочій теці агента без запиту (копії — в .kru-backup)

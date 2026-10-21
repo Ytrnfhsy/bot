@@ -76,15 +76,17 @@ def test_ws_upload(cfg):
 
 
 def test_ws_task_think_switch(cfg):
-    client, agent = _client(cfg, [text("коротко"), text("подумавши")])
+    """Міркування: явно вимкнені/увімкнені — як просив клієнт; «авто» — лише для складних задач."""
+    client, agent = _client(cfg, [text("коротко"), text("так"), text("ось аналіз"), text("подумавши")])
     with client, client.websocket_connect("/ws?token=secret") as ws:
         ws.receive_json()
-        ws.send_json({"type": "task", "text": "швидко", "session_id": "t", "think": False})
-        _until(ws, "final")
-        _until(ws, "status")
-        ws.send_json({"type": "task", "text": "як звичайно", "session_id": "t"})
-        _until(ws, "final")
-    assert [c["think"] for c in agent.llm.calls] == [False, None]
+        for msg in ({"text": "швидко", "think": False}, {"text": "котра година?", "think": "auto"},
+                    {"text": "Проаналізуй і порівняй два підходи"}, {"text": "привіт", "think": True}):
+            ws.send_json({"type": "task", "session_id": "t", **msg})
+            final, _ = _until(ws, "final")
+            _until(ws, "status")
+            assert final["stats"]["steps"] == 1 and final["stats"]["seconds"] >= 0
+    assert [c["think"] for c in agent.llm.calls] == [False, False, True, True]
 
 
 def test_task_survives_disconnect_and_resumes_on_reconnect(cfg):
