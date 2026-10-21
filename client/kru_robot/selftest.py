@@ -896,6 +896,14 @@ def run_selftest(app: QApplication, report_path: str) -> int:
                     break
                 QTest.qWait(50)
             need(got and "завершився" in got[0]["error"] and not relay.payload()["servers"], f"падіння: {got}")
+            # застосунок: надсилання інструментів серверу (і без з'єднання, і з ним)
+            orig, sent = (win.mcp_relay, win.conn.send), []
+            win.mcp_relay, win.conn.send = relay, (lambda m: sent.append(m) or True)
+            try:
+                win._send_mcp_tools()
+                win.on_event({"type": "hello", "name": "Kru", "user": "owner", "voice": {}})
+            finally:
+                win.mcp_relay, win.conn.send = orig
         finally:
             relay.stop()
         return "ok"

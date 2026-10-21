@@ -735,7 +735,7 @@ class RobotWindow(QWidget):
         problem = ""
         if not self.voice_caps["stt"]:
             problem = ("на сервері ще не встановлено розпізнавання мовлення: deploy/voice.sh install"
-                       if self.conn.is_connected() else "немає з'єднання з сервером")
+                       if self.conn.is_connected else "немає з'єднання з сервером")
         elif self.settings.wake_engine == "phrase":
             problem = wakewordmod.available() or (
                 "" if self.voice_caps.get("wakeword") else
@@ -911,7 +911,7 @@ class RobotWindow(QWidget):
 
     def _send_mcp_tools(self) -> None:
         """Інструменти MCP-серверів цього ПК → серверу (після підключення й коли PhotoCraft з'явився/зник)."""
-        if self.mcp_relay.active and self.conn.is_connected():
+        if self.mcp_relay.active and self.conn.is_connected:
             self.conn.send(self.mcp_relay.payload())
 
     def _set_voice_caps(self, caps) -> None:
