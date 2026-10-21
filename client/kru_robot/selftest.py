@@ -743,6 +743,15 @@ def run_selftest(app: QApplication, report_path: str) -> int:
              f"уточнення: {ev}")
         lg.pause()
         need(lg.feed(tone(2.0)) == [], "на паузі слухає")
+        # без Vosk (ім'я шукає сервер): кожна фраза — на сервер, клацання — ні
+        lg = WakeLogic(rate, None)
+        need(lg.feed(quiet(1.0) + tone(0.1) + quiet(1.2)) == [], "клацання пішло на сервер")
+        ev = lg.feed(tone(1.5) + quiet(1.2))
+        need(len(ev) == 1 and ev[0][0] == "utterance" and ev[0][2] is True, f"фраза на сервер: {ev}")
+        need(1.6 < (len(ev[0][1]) - 44) / 2 / rate < 2.9, "довжина фрази для сервера")
+        need(lg.feed(tone(1.0) + quiet(1.2)) == [], "поки сервер думає — не надсилає ще")
+        lg.listen()
+        need([e[0] for e in lg.feed(tone(16.0))] == ["utterance"], "задовга фраза не обрізалась")
         return "ok"
 
     check("wake_logic", wake_logic_check)

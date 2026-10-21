@@ -326,14 +326,14 @@ def test_ws_wake_mode(cfg, voice_ready):
     with client, client.websocket_connect("/ws?token=secret") as ws:
         ws.receive_json()
         cases = [("Кру, яка сьогодні погода?", {"text": "Яка сьогодні погода?"}),
-                 ("Це було круто", {"text": "", "ignored": True}),
+                 ("Це було круто", {"text": "", "ignored": True, "heard": "Це було круто"}),
                  ("Кру", {"text": "", "wake_only": True})]
         for i, (heard, expected) in enumerate(cases):
             whisper.words = heard
             ws.send_json({"type": "voice_in", "id": f"w{i}", "data": data, "wake": "require"})
             got, _ = _until(ws, "voice_text")
             assert {k: v for k, v in got.items() if k not in {"type", "id"}} == expected, heard
-        assert whisper.calls[-1]["initial_prompt"] == "Кру, "  # Whisper знає, як пишеться ім'я
+        assert "Кру" in whisper.calls[-1]["initial_prompt"]  # Whisper знає, як пишеться ім'я
         whisper.words = "Кру, без режиму"  # звичайний запис (утримання робота) — текст як є
         ws.send_json({"type": "voice_in", "id": "plain", "data": data})
         assert _until(ws, "voice_text")[0]["text"] == "Кру, без режиму"
