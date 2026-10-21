@@ -49,6 +49,8 @@ case "${1:-}" in
     done
     echo "→ Модель розпізнавання Whisper «${model}» (завантажується один раз)…"
     "${VENV}/bin/python" -c "import sys; from faster_whisper import WhisperModel; WhisperModel(sys.argv[1], device='cpu', compute_type='int8')" "${model}"
+    echo "→ Легка модель Whisper «small» для режиму «Кру» (швидка перевірка імені)…"
+    "${VENV}/bin/python" -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
     echo "→ Перевіряю озвучення…"
     "${VENV}/bin/python" - "${VOICE_DIR}/${VOICE}.onnx" <<'PY'
 import io, sys, wave
