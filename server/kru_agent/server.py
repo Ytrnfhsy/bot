@@ -109,6 +109,8 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
             lambda owner: app.state.hub.get(owner) is not None,
         )
         app.state.scheduler.start()
+        # модель розпізнавання — у фоні одразу, щоб перше голосове не чекало її завантаження
+        app.state.stt_preload = asyncio.create_task(asyncio.to_thread(app.state.agent.voice.preload))
         app.state.telegram = None
         if cfg.telegram_bot_token and cfg.telegram_poll:
             from .telegram_bot import TelegramGateway
