@@ -36,7 +36,7 @@ RATE = 16000  # частота, на якій працюють Vosk і Whisper
 FRAME_MS = 30  # аналізуємо звук шматками по 30 мс
 PRE_ROLL = 0.35  # с звуку перед початком мовлення, що додається до запису (не обрізати перший склад)
 BUFFER_SEC = 20  # стільки останніх секунд тримаємо в пам'яті
-END_SILENCE = 0.9  # пауза, після якої фраза вважається завершеною
+END_SILENCE = 1.2  # пауза, після якої фраза вважається завершеною (паузи між словами коротші)
 MAX_COMMAND = 15.0  # найдовша фраза після імені
 MIN_PHRASE = 0.25  # с — коротші звуки (клацання, стук) на сервер не надсилаємо
 MIN_FOLLOWUP = 0.5  # с — уточнення без імені коротше за це вважаємо шумом і слухаємо далі
@@ -127,8 +127,10 @@ class WakeLogic:
         self.level = min(1.0, math.sqrt(rms / 32768) * 1.5)
         # уточнення без імені — суворіше: інакше шум у кімнаті стає «питанням»
         strict = self.state == "await" or (self.state == "capture" and not self.need_wake)
-        threshold = max(self.floor * (3.5 if strict else 2.5), 600.0 if strict else 350.0)
-        loud = rms > threshold
+        start = max(self.floor * (3.5 if strict else 2.5), 600.0 if strict else 350.0)
+        # почалось мовлення — далі досить і тихішого звуку: тихі склади й кінці слів не рвуть фразу
+        keep = max(self.floor * 1.6, 250.0)
+        loud = rms > (keep if self.speaking else start)
         if not loud:
             self.floor = 0.97 * self.floor + 0.03 * max(rms, 50.0)
         events: list[tuple] = []

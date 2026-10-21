@@ -744,33 +744,40 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         need(lg.feed(quiet(1.0)) == [], "тиша щось викликала")
         ev = lg.feed(tone(2.0))
         need([e[0] for e in ev] == ["wake"], f"ім'я: {ev}")
-        ev = lg.feed(quiet(1.2))
+        ev = lg.feed(quiet(1.5))
         need(len(ev) == 1 and ev[0][0] == "utterance" and ev[0][2] is True, f"фраза: {[e[0] for e in ev]}")
         need(3.0 < (len(ev[0][1]) - 44) / 2 / rate < 3.6, "довжина запису (з початком фрази)")
         need(lg.feed(tone(1.0)) == [], "після фрази чекає на застосунок")
         lg.await_command(0.5)
         need(lg.feed(quiet(0.8)) == [("timeout",)], "тайм-аут уточнення")
         lg.await_command(3)
-        ev = lg.feed(quiet(0.3) + tone(1.0) + quiet(1.2))
+        ev = lg.feed(quiet(0.3) + tone(1.0) + quiet(1.5))
         need([(e[0], e[2] if len(e) > 2 else None) for e in ev] == [("speech", None), ("utterance", False)],
              f"уточнення: {ev}")
         lg.await_command(3)
-        ev = lg.feed(tone(0.2) + quiet(1.2))  # стук чи шум — не уточнення
+        ev = lg.feed(tone(0.2) + quiet(1.5))  # стук чи шум — не уточнення
         need([e[0] for e in ev] == ["speech"] and lg.state == "await", f"шум як уточнення: {ev}, {lg.state}")
-        ev = lg.feed(tone(1.0) + quiet(1.2))
+        ev = lg.feed(tone(1.0) + quiet(1.5))
         need([(e[0], e[2] if len(e) > 2 else None) for e in ev] == [("speech", None), ("utterance", False)],
              f"уточнення після шуму: {ev}")
         lg.pause()
         need(lg.feed(tone(2.0)) == [], "на паузі слухає")
         # без Vosk (ім'я шукає сервер): кожна фраза — на сервер, клацання — ні
         lg = WakeLogic(rate, None)
-        need(lg.feed(quiet(1.0) + tone(0.1) + quiet(1.2)) == [], "клацання пішло на сервер")
-        ev = lg.feed(tone(1.5) + quiet(1.2))
+        need(lg.feed(quiet(1.0) + tone(0.1) + quiet(1.5)) == [], "клацання пішло на сервер")
+        ev = lg.feed(tone(1.5) + quiet(1.5))
         need(len(ev) == 1 and ev[0][0] == "utterance" and ev[0][2] is True, f"фраза на сервер: {ev}")
-        need(1.6 < (len(ev[0][1]) - 44) / 2 / rate < 2.9, "довжина фрази для сервера")
-        need(lg.feed(tone(1.0) + quiet(1.2)) == [], "поки сервер думає — не надсилає ще")
+        need(1.6 < (len(ev[0][1]) - 44) / 2 / rate < 3.3, "довжина фрази для сервера")
+        need(lg.feed(tone(1.0) + quiet(1.5)) == [], "поки сервер думає — не надсилає ще")
         lg.listen()
         need([e[0] for e in lg.feed(tone(16.0))] == ["utterance"], "задовга фраза не обрізалась")
+        lg.feed(quiet(2.0))
+        lg.listen()
+        # тихі склади посеред фрази (гучніші за шум, але тихіші за поріг початку) не рвуть її
+        soft = array.array("h", [int(420 * _m.sin(2 * _m.pi * 220 * i / rate)) for i in range(int(rate * 1.5))]).tobytes()
+        ev = lg.feed(tone(0.5) + soft + tone(0.3) + quiet(1.5))
+        need([e[0] for e in ev] == ["utterance"] and (len(ev[0][1]) - 44) / 2 / rate > 2.2,
+             f"фраза обірвалась на тихому: {[(e[0], (len(e[1]) - 44) / 2 / rate if len(e) > 1 else 0) for e in ev]}")
         return "ok"
 
     check("wake_logic", wake_logic_check)
@@ -997,7 +1004,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         need(_time.monotonic() - t0 < 0.2, "start() завмер на завантаженні моделі")
         state["listener"], state["listener_src"] = lst, src
         tone = array.array("h", [int(8000 * _m.sin(2 * _m.pi * 220 * i / rate)) for i in range(rate * 2)]).tobytes()
-        state["listener_audio"] = b"\0\0" * rate + tone + b"\0\0" * int(rate * 1.2)
+        state["listener_audio"] = b"\0\0" * rate + tone + b"\0\0" * int(rate * 1.6)
         return "ok"
 
     def listener_feed():
