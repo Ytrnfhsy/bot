@@ -37,6 +37,7 @@ from .panel import ChatPanel
 from .robot import RobotWidget
 from . import wake as wakemod
 from . import wakeword as wakewordmod
+from .mcp_relay import Relay
 from .wake import WakeListener
 from .settings import Settings, new_session_id
 
@@ -285,6 +286,12 @@ class RobotWindow(QWidget):
         self._wire_wake(WakeListener(self))
         self.player = Player(self)
         self.player.stopped.connect(self._on_speech_done)
+        # MCP-сервери цього ПК (PhotoCraft…) для агента — див. mcp_relay.py
+        self.mcp_relay = Relay(self)
+        self.mcp_relay.changed.connect(self._send_mcp_tools)
+        if self.mcp_relay.active and not demo:
+            self.mcp_relay.start()
+            QApplication.instance().aboutToQuit.connect(self.mcp_relay.stop)
         self._tts_id: str | None = None  # озвучення, що приходить частинами (по реченнях)
         self._tts_queue: list[bytes] = []  # частини, що чекають своєї черги
         self._tts_done = True  # остання частина вже прийшла
@@ -902,6 +909,11 @@ class RobotWindow(QWidget):
         else:
             QTimer.singleShot(300, self._wake_listen)
 
+    def _send_mcp_tools(self) -> None:
+        """Інструменти MCP-серверів цього ПК → серверу (після підключення й коли PhotoCraft з'явився/зник)."""
+        if self.mcp_relay.active and self.conn.is_connected():
+            self.conn.send(self.mcp_relay.payload())
+
     def _set_voice_caps(self, caps) -> None:
         caps = caps if isinstance(caps, dict) else {}
         self.voice_caps = {"stt": caps.get("stt") is True, "tts": caps.get("tts") is True,
@@ -1344,6 +1356,11 @@ class RobotWindow(QWidget):
         if t == "wake_model":
             self._on_wake_bundle(ev)
             return
+        if t in {"mcp_call", "pc_put", "pc_get"}:
+            self.mcp_relay.handle(ev, self.conn.send)
+            return
+        if t == "mcp_ready":
+            return
         if t in {"voice_error", "tts_error"}:
             if t == "voice_error" and self._wake_pending is not None and ev.get("id") == self._wake_pending:
                 self._wake_pending = None
@@ -1375,6 +1392,7 @@ class RobotWindow(QWidget):
             eye = {True: " · 👁", False: " · без зору"}.get(ev.get("vision"), "")
             user = f" · {ev['user']}" if ev.get("user") and ev.get("user") != "owner" else ""
             self._set_voice_caps(ev.get("voice"))
+            self._send_mcp_tools()
             mic = " · 🎤" if self.voice_caps["stt"] else ""
             self.panel.set_status(f"{name} · підключено · {model}{eye}{mic}{user}", True)
             if "user" not in ev:  # сервер ще старої версії — чати працюватимуть неправильно
