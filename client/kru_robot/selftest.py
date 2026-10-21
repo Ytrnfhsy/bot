@@ -754,6 +754,12 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         ev = lg.feed(quiet(0.3) + tone(1.0) + quiet(1.2))
         need([(e[0], e[2] if len(e) > 2 else None) for e in ev] == [("speech", None), ("utterance", False)],
              f"уточнення: {ev}")
+        lg.await_command(3)
+        ev = lg.feed(tone(0.2) + quiet(1.2))  # стук чи шум — не уточнення
+        need([e[0] for e in ev] == ["speech"] and lg.state == "await", f"шум як уточнення: {ev}, {lg.state}")
+        ev = lg.feed(tone(1.0) + quiet(1.2))
+        need([(e[0], e[2] if len(e) > 2 else None) for e in ev] == [("speech", None), ("utterance", False)],
+             f"уточнення після шуму: {ev}")
         lg.pause()
         need(lg.feed(tone(2.0)) == [], "на паузі слухає")
         # без Vosk (ім'я шукає сервер): кожна фраза — на сервер, клацання — ні
@@ -873,7 +879,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             QTest_wait(400)
             need(fake.calls[-1] == ("await", 6), f"чекає питання: {fake.calls[-1]}")
             fake.utterance.emit(b"RIFF", False)
-            need("wake" not in sent[-1], "уточнення без вимоги імені")
+            need(sent[-1].get("wake") == "followup", "уточнення без вимоги імені")
             win.on_event({"type": "voice_text", "id": sent[-1]["id"], "text": "Яка сьогодні погода?"})
             task = sent[-1]
             need(task["type"] == "task" and task["text"] == "Яка сьогодні погода?", f"задача: {task}")

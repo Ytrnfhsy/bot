@@ -820,8 +820,7 @@ class RobotWindow(QWidget):
         self._voice_seq += 1
         vid = f"w{self._voice_seq}"
         msg = {"type": "voice_in", "id": vid, "data": base64.b64encode(wav).decode("ascii")}
-        if need_name:
-            msg["wake"] = "require"
+        msg["wake"] = "require" if need_name else "followup"  # followup — сервер відсіє вигадки Whisper на шумі
         if not self.conn.send(msg):
             self.robot.set_state("idle")
             self.panel.set_activity("📡 Немає з'єднання з сервером")

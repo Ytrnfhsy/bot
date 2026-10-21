@@ -18,7 +18,8 @@
   {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
   {"type": "chat_search", "query": "відпустка море"}  — пошук за назвою й текстом розмов
   {"type": "voice_in", "id": "...", "data": "<base64 WAV/OGG>", "wake": "require"}  — розпізнати сказане (faster-whisper);
-      wake=require — режим «завжди слухаю»: фраза має починатися з імені «Кру», яке прибирається з тексту
+      wake=require — режим «завжди слухаю»: фраза має починатися з імені «Кру», яке прибирається з тексту;
+      wake=followup — уточнення без імені: те, що Whisper «чує» в шумі, повертається як ignored
   {"type": "tts", "id": "...", "text": "...", "voice": "Speaker_67", "effect": "natural", "speed": 1.0}  — озвучити
       (HolosTTS або Piper); voice/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_TTS_VOICE, KRU_VOICE_EFFECT)
       stream=true — частинами по реченнях: кілька tts_audio з part (0, 1, …) і last; {"type": "tts_stop", "id"} — досить
@@ -79,7 +80,7 @@ from .scheduler import Scheduler
 from .tools import ToolError
 from .tools.files import shared_file
 from .users import User, UserStore, workspace_for
-from .voice import MAX_AUDIO, WAKE_PROMPT, VoiceError, strip_wake
+from .voice import MAX_AUDIO, WAKE_PROMPT, VoiceError, is_noise_text, strip_wake
 
 log = logging.getLogger("kru.server")
 
@@ -369,7 +370,8 @@ class Connection:
             data = base64.b64decode(raw, validate=True)
             # у режимі «завжди слухаю» підказуємо Whisper, як пишеться ім'я (не нав'язуючи його на початок фрази)
             wake = msg.get("wake") == "require"
-            text = await voice.transcribe(data, WAKE_PROMPT if wake else None, fast=wake)
+            followup = msg.get("wake") == "followup"  # уточнення без імені: на шумі Whisper любить «вигадувати»
+            text = await voice.transcribe(data, WAKE_PROMPT if wake else None, fast=wake, strict=followup)
             if wake and voice.two_pass and (found := strip_wake(text))[0] and found[1]:
                 # ім'я почуто легкою моделлю — саму задачу розпізнає точна (якщо й вона чує ім'я)
                 full = await voice.transcribe(data, WAKE_PROMPT)
@@ -381,6 +383,9 @@ class Connection:
             await self.send({"type": "voice_error", "id": vid, "message": str(e)})
             return
         reply: dict[str, Any] = {"type": "voice_text", "id": vid, "text": text}
+        if followup and is_noise_text(text):
+            log.info("Режим «Кру»: уточнення схоже на шум — ігнорую")
+            reply.update(text="", ignored=True, heard=text[:200])
         if msg.get("wake") == "require":  # режим «завжди слухаю»: фраза має починатися з імені
             found, rest = strip_wake(text)
             if not found:

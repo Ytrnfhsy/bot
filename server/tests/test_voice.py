@@ -396,3 +396,24 @@ def test_ws_tts_stream(cfg, voice_ready):
         ws.send_json({"type": "tts", "id": "s2", "text": "Коротко.", "stream": True})
         one, _ = _until(ws, "tts_audio")
         assert (one["id"], one["part"], one["last"]) == ("s2", 0, True)
+
+
+def test_followup_noise(cfg, voice_ready):
+    """Уточнення без імені: типові «вигадки» Whisper на шумі відкидаються, справжнє питання — ні."""
+    from kru_agent.voice import is_noise_text
+
+    assert is_noise_text("Дякую за перегляд!") and is_noise_text("Субтитри зробив DimaTorzok")
+    assert is_noise_text("Угу.") and is_noise_text("...") and is_noise_text("")
+    assert not is_noise_text("А завтра?") and not is_noise_text("Так") and not is_noise_text("Дякую, а що з погодою?")
+    cfg.token = "secret"
+    agent = Agent(cfg, llm=FakeLLM([]))
+    whisper, _ = voice_ready(agent)
+    client = TestClient(create_app(cfg, agent=agent))
+    data = base64.b64encode(b"RIFF").decode()
+    with client, client.websocket_connect("/ws?token=secret") as ws:
+        ws.receive_json()
+        for heard, expected in (("Дякую за перегляд!", ""), ("А завтра?", "А завтра?")):
+            whisper.words = heard
+            ws.send_json({"type": "voice_in", "id": heard, "data": data, "wake": "followup"})
+            got, _ = _until(ws, "voice_text")
+            assert got["text"] == expected and bool(got.get("ignored")) == (not expected), got
