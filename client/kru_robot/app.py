@@ -769,6 +769,10 @@ class RobotWindow(QWidget):
 
     def _on_wake_utterance(self, wav: bytes, need_name: bool) -> None:
         """Фраза записана — на сервер (він перевірить, що вона починається з «Кру»)."""
+        server_name = need_name and self.settings.wake_engine != "local"  # ім'я шукає сервер: це будь-яка фраза
+        if self.busy and server_name:
+            self.wake.listen()  # агент працює, а чи кликали його — невідомо: мовчки слухаємо далі
+            return
         if self.busy:  # агент ще працює — нову задачу не беремо (як і з чату)
             self.robot.set_state("waiting", 2.0, then="thinking")
             self.panel.set_activity("⏳ " + BUSY_PHRASE)
@@ -785,7 +789,7 @@ class RobotWindow(QWidget):
             self.wake.listen()
             return
         self._wake_pending = vid
-        if need_name and self.settings.wake_engine != "local":
+        if server_name:
             return  # кожна фраза в кімнаті — сюди; робот реагує, лише коли сервер почує ім'я
         self.robot.set_state("thinking")
         self.panel.set_activity("🎤 Розпізнаю…")
