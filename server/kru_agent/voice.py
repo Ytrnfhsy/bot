@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import re
+import threading
 import time
 import wave
 from pathlib import Path
@@ -44,6 +46,7 @@ class Voice:
         self._stt_fast: Any = None  # легка модель для перевірки імені (whisper_wake_model)
         self._tts: Any = None
         self._stt_lock = asyncio.Lock()
+        self._load_lock = threading.Lock()  # фонове завантаження при старті й перше голосове — не вдвох
         self._tts_lock = asyncio.Lock()
         self._holos_voices: list[str] = []
         self._holos_checked = 0.0
@@ -120,28 +123,56 @@ class Voice:
 
     def _load_stt(self, fast: bool = False):
         fast = fast and self.two_pass
+        with self._load_lock:
+            return self._load_stt_locked(fast)
+
+    def _load_stt_locked(self, fast: bool):
         if (self._stt_fast if fast else self._stt) is None:
             from faster_whisper import WhisperModel
 
             name = self.config.whisper_wake_model.strip() if fast else self.config.whisper_model
-            log.info("Завантажую модель розпізнавання мовлення %s…", name)
-            model = WhisperModel(name, device=self.config.whisper_device, compute_type="int8")
+            threads = self.config.whisper_threads or max(4, (os.cpu_count() or 8) // 2)
+            log.info("Завантажую модель розпізнавання мовлення %s (%s, потоків %d)…", name,
+                     self.config.whisper_device, threads)
+            started = time.monotonic()
+            model = WhisperModel(name, device=self.config.whisper_device, compute_type="int8", cpu_threads=threads)
+            log.info("Модель %s готова за %.1f с", name, time.monotonic() - started)
             if fast:
                 self._stt_fast = model
             else:
                 self._stt = model
         return self._stt_fast if fast else self._stt
 
+    def preload(self) -> None:
+        """Завантажити моделі розпізнавання заздалегідь (при старті сервера), щоб перше голосове не чекало."""
+        if not self.stt_ok:
+            return
+        try:
+            self._load_stt()
+            if self.two_pass:
+                self._load_stt(fast=True)
+        except Exception:  # noqa: BLE001 — не вийшло зараз: спробуємо при першому голосовому
+            log.exception("Не вдалося заздалегідь завантажити модель розпізнавання")
+
     def _transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False, strict: bool = False) -> str:
         model = self._load_stt(fast)
+        audio = decode_audio(data)
+        started = time.monotonic()
         segments, _info = model.transcribe(
-            decode_audio(data), language=self.config.whisper_language or None, vad_filter=True,
-            beam_size=1 if fast else 5, initial_prompt=prompt,
+            audio, language=self.config.whisper_language or None, vad_filter=True,
+            beam_size=1 if fast else max(1, self.config.whisper_beam), initial_prompt=prompt,
+            # короткі команди: без часових міток і без «підказки» з попереднього шматка — швидше
+            without_timestamps=True, condition_on_previous_text=False,
         )
+        segments = list(segments)  # розпізнавання відбувається саме тут (генератор)
         if strict:  # відкинути шматки, де модель сама не певна, що це мовлення
             segments = [s for s in segments if getattr(s, "no_speech_prob", 0.0) < 0.6
                         and getattr(s, "avg_logprob", 0.0) > -1.0]
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        log.info("Розпізнано за %.2f с (звук %.1f с, модель %s)", time.monotonic() - started,
+                 len(audio) / 16000, self.config.whisper_wake_model if fast and self.two_pass
+                 else self.config.whisper_model)
+        return text
 
     async def transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False,
                          strict: bool = False) -> str:

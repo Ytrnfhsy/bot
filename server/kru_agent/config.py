@@ -115,6 +115,10 @@ class Config:
     whisper_wake_model: str = "small"
     whisper_language: str = "uk"  # порожньо — визначати мову самому
     whisper_device: str = "cpu"  # відеопам'ять зайнята моделлю агента
+    # швидкість розпізнавання на CPU: пошук варіантів (1 — найшвидше, 5 — трохи точніше на довгих фразах)
+    # і потоки процесора (0 — половина логічних ядер, тобто приблизно фізичні)
+    whisper_beam: int = 1
+    whisper_threads: int = 0
     piper_voice: str = ""  # шлях до .onnx; порожньо — <data_dir>/voice/uk_UA-ukrainian_tts-medium.onnx
     piper_speaker: int = 0  # ukrainian_tts: 0 — Лада, 1 — Микита, 2 — Тетяна
     voice_effect: str = "natural"  # обробка голосу за замовчуванням (voice_fx.EFFECTS); клієнт може обрати свою
@@ -192,6 +196,8 @@ class Config:
             whisper_wake_model=_env("WHISPER_WAKE_MODEL", d.whisper_wake_model),
             whisper_language=_env("WHISPER_LANGUAGE", d.whisper_language),
             whisper_device=_env("WHISPER_DEVICE", d.whisper_device),
+            whisper_beam=int(_env("WHISPER_BEAM", str(d.whisper_beam))),
+            whisper_threads=int(_env("WHISPER_THREADS", str(d.whisper_threads))),
             piper_voice=_env("PIPER_VOICE", d.piper_voice),
             piper_speaker=int(_env("PIPER_SPEAKER", str(d.piper_speaker))),
             voice_effect=_env("VOICE_EFFECT", d.voice_effect),

@@ -129,6 +129,8 @@ def test_ws_voice_roundtrip(cfg, voice_ready):
         ws.send_json({"type": "voice_in", "id": "v1", "data": base64.b64encode(b"RIFF").decode()})
         heard, _ = _until(ws, "voice_text")
         assert heard == {"type": "voice_text", "id": "v1", "text": "яка погода в Києві"}
+        kw = agent.voice._stt.calls[-1]  # швидкі налаштування CPU: один варіант пошуку, без часових міток
+        assert kw["beam_size"] == 1 and kw["without_timestamps"] and not kw["condition_on_previous_text"]
         ws.send_json({"type": "task", "text": heard["text"], "session_id": "v"})
         final, _ = _until(ws, "final")
         ws.send_json({"type": "tts", "id": "t1", "text": final["text"]})
@@ -417,3 +419,22 @@ def test_followup_noise(cfg, voice_ready):
             ws.send_json({"type": "voice_in", "id": heard, "data": data, "wake": "followup"})
             got, _ = _until(ws, "voice_text")
             assert got["text"] == expected and bool(got.get("ignored")) == (not expected), got
+
+
+def test_preload_loads_models_with_threads(cfg, monkeypatch):
+    """При старті сервера моделі завантажуються заздалегідь, з потоками CPU (типово — ~фізичні ядра)."""
+    made = []
+    fw = types.ModuleType("faster_whisper")
+    fw.WhisperModel = lambda name, **kw: made.append((name, kw)) or object()
+    monkeypatch.setitem(sys.modules, "faster_whisper", fw)
+    monkeypatch.setattr(Voice, "stt_ok", property(lambda self: True))
+    monkeypatch.setattr(voice_mod.os, "cpu_count", lambda: 16)
+    v = Voice(cfg)
+    v.preload()
+    assert [(n, kw["cpu_threads"], kw["compute_type"]) for n, kw in made] == [("turbo", 8, "int8"), ("small", 8, "int8")]
+    v.preload()  # уже завантажено — вдруге не вантажить
+    assert len(made) == 2
+    cfg.whisper_threads = 3
+    v2 = Voice(cfg)
+    v2.preload()
+    assert made[-1][1]["cpu_threads"] == 3
