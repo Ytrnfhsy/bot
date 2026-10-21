@@ -19,7 +19,9 @@
   {"type": "chat_search", "query": "відпустка море"}  — пошук за назвою й текстом розмов
   {"type": "voice_in", "id": "...", "data": "<base64 WAV/OGG>", "wake": "require"}  — розпізнати сказане (faster-whisper);
       wake=require — режим «завжди слухаю»: фраза має починатися з імені «Кру», яке прибирається з тексту;
-      wake=followup — уточнення без імені: те, що Whisper «чує» в шумі, повертається як ignored
+      wake=followup — уточнення без імені: те, що Whisper «чує» в шумі, повертається як ignored;
+      wake=detected — фразу-активатор («Чуєш, Кру») уже впізнала модель на ПК: звертання й ім'я прибираються
+  {"type": "wake_model"}  — модель своєї фрази для робота (kru wakeword train) → wake_model з files (base64)
   {"type": "tts", "id": "...", "text": "...", "voice": "Speaker_67", "effect": "natural", "speed": 1.0}  — озвучити
       (HolosTTS або Piper); voice/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_TTS_VOICE, KRU_VOICE_EFFECT)
       stream=true — частинами по реченнях: кілька tts_audio з part (0, 1, …) і last; {"type": "tts_stop", "id"} — досить
@@ -80,7 +82,7 @@ from .scheduler import Scheduler
 from .tools import ToolError
 from .tools.files import shared_file
 from .users import User, UserStore, workspace_for
-from .voice import MAX_AUDIO, WAKE_PROMPT, VoiceError, is_noise_text, strip_wake
+from .voice import MAX_AUDIO, WAKE_PROMPT, VoiceError, is_noise_text, strip_detected, strip_wake
 
 log = logging.getLogger("kru.server")
 
@@ -334,6 +336,19 @@ class Connection:
         await self.send({"type": "file_data", "id": fid, "path": shown, "name": p.name, "size": len(data),
                          "data": base64.b64encode(data).decode("ascii")})
 
+    async def _wake_model(self) -> None:
+        """Модель своєї фрази-активатора для робота (kru wakeword train): класифікатор і мережі відбитків."""
+        from . import wakeword
+
+        files = await asyncio.to_thread(wakeword.bundle, self.agent.config)
+        meta = wakeword.info(self.agent.config) if files else None
+        if not files or not meta:
+            await self.send({"type": "wake_model", "error": "на сервері ще не навчено фразу: kru wakeword train"})
+            return
+        await self.send({"type": "wake_model", "phrase": meta.get("phrase"), "version": meta.get("version"),
+                         "threshold": meta.get("threshold"),
+                         "files": {k: base64.b64encode(v).decode("ascii") for k, v in files.items()}})
+
     async def _voice(self, kind: str, msg: dict[str, Any]) -> None:
         """Голос: запис з мікрофона → текст (voice_in) або текст відповіді → WAV (tts)."""
         vid, voice = msg.get("id"), self.agent.voice
@@ -370,8 +385,10 @@ class Connection:
             data = base64.b64decode(raw, validate=True)
             # у режимі «завжди слухаю» підказуємо Whisper, як пишеться ім'я (не нав'язуючи його на початок фрази)
             wake = msg.get("wake") == "require"
+            detected = msg.get("wake") == "detected"  # фразу-активатор уже впізнала своя модель на ПК
             followup = msg.get("wake") == "followup"  # уточнення без імені: на шумі Whisper любить «вигадувати»
-            text = await voice.transcribe(data, WAKE_PROMPT if wake else None, fast=wake, strict=followup)
+            text = await voice.transcribe(data, WAKE_PROMPT if wake or detected else None, fast=wake,
+                                          strict=followup)
             if wake and voice.two_pass and (found := strip_wake(text))[0] and found[1]:
                 # ім'я почуто легкою моделлю — саму задачу розпізнає точна (якщо й вона чує ім'я)
                 full = await voice.transcribe(data, WAKE_PROMPT)
@@ -383,6 +400,11 @@ class Connection:
             await self.send({"type": "voice_error", "id": vid, "message": str(e)})
             return
         reply: dict[str, Any] = {"type": "voice_text", "id": vid, "text": text}
+        if detected:
+            rest = strip_detected(text)
+            reply["text"] = rest
+            if not rest:
+                reply["wake_only"] = True  # лише фраза — робот слухатиме саме питання
         if followup and is_noise_text(text):
             log.info("Режим «Кру»: уточнення схоже на шум — ігнорую")
             reply.update(text="", ignored=True, heard=text[:200])
@@ -478,6 +500,8 @@ class Connection:
                     await self._save_upload(msg)
                 elif kind == "file_get":
                     await self._send_file(msg)
+                elif kind == "wake_model":
+                    await self._wake_model()
                 elif kind == "tts_stop":
                     if self._tts_now == msg.get("id"):
                         self._tts_now = None

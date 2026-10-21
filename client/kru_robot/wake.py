@@ -79,6 +79,7 @@ class WakeLogic:
         self._hits = 0  # «середня» чутливість: ім'я в кількох проміжних результатах поспіль
         self.level = 0.0
         self.whole_phrases = recognizer is None  # без Vosk: кожна фраза йде на сервер, ім'я шукає Whisper
+        self.detector = None  # своя фраза («Чуєш, Кру», wakeword.Detector) — шукає її сам, без сервера
         self.loose = False  # модель не знає слова «кру» — шукаємо схожі слова у вільному розпізнаванні
         self.debug = None  # функція для діагностики (KRU_WAKE_DEBUG=1)
         self._last_partial = ""
@@ -103,6 +104,8 @@ class WakeLogic:
 
     def _reset_rec(self) -> None:
         self._hits = 0
+        if self.detector is not None:
+            self.detector.reset()  # інакше щойно почута фраза спрацює ще раз
         if self.rec is not None:
             try:
                 self.rec.Reset()
@@ -154,7 +157,7 @@ class WakeLogic:
         if self.state == "await" and not self.speaking and self.n > self.deadline:
             self.state = "busy"
             return [("timeout",)]
-        if self.state == "idle" and self.whole_phrases:
+        if self.state == "idle" and self.whole_phrases and self.detector is None:
             too_long = self.speaking and (self.n - self.speech_start) * FRAME_MS / 1000 >= MAX_COMMAND
             if (was_speaking and not self.speaking) or too_long:
                 spoken = (self.n - self.speech_start - self.silence) * FRAME_MS / 1000
@@ -196,6 +199,11 @@ class WakeLogic:
         return events
 
     def _recognize(self, frame: bytes) -> bool:
+        if self.detector is not None:
+            score = self.detector.feed(frame)
+            if self.debug and score >= 0.2:
+                self.debug(f"схоже на фразу: {score:.2f} (поріг {self.detector.threshold:.2f})")
+            return score >= self.detector.threshold
         if self.rec is None:
             return False
         is_wake = _is_wake_loose if self.loose else _is_wake
@@ -434,9 +442,10 @@ class WakeListener(QObject):
         logic = self.logic
         return logic.level if logic else 0.0
 
-    def start(self, model_path: Path | None, sensitivity: str = "medium") -> bool:
+    def start(self, model_path: Path | None, sensitivity: str = "medium", phrase_model: Path | None = None) -> bool:
         """Відкриває мікрофон одразу, а модель вантажить у робочому потоці (інтерфейс не завмирає);
-        коли все готово — сигнал ready, якщо ні — failed. model_path=None — без Vosk, ім'я шукає сервер."""
+        коли все готово — сигнал ready, якщо ні — failed. model_path=None — без Vosk, ім'я шукає сервер;
+        phrase_model — тека своєї фрази («Чуєш, Кру», wakeword.py): шукає її сам ПК."""
         from .audio import MicError, open_input
 
         if self._source is not None:
@@ -455,7 +464,7 @@ class WakeListener(QObject):
         debug(f"мікрофон: {fmt[0]}, каналів {fmt[1]}, {fmt[2]} Гц → {RATE} Гц")
         io.readyRead.connect(self._read)
         self._stop.clear()
-        self._thread = threading.Thread(target=self._work, args=(model_path, sensitivity), name="kru-wake",
+        self._thread = threading.Thread(target=self._work, args=(model_path, sensitivity, phrase_model), name="kru-wake",
                                         daemon=True)
         self._thread.start()
         self._poll.start()
@@ -528,9 +537,18 @@ class WakeListener(QObject):
             elif kind == "timeout":
                 self.timeout.emit()
 
-    def _work(self, model_path: Path | None, sensitivity: str) -> None:
-        rec, limited = None, True
-        if model_path is not None:
+    def _work(self, model_path: Path | None, sensitivity: str, phrase_model: Path | None = None) -> None:
+        rec, limited, detector = None, True, None
+        if phrase_model is not None:
+            try:
+                from .wakeword import Detector
+
+                detector = Detector(phrase_model, sensitivity)
+            except Exception as e:  # noqa: BLE001 — немає onnxruntime, пошкоджена модель тощо
+                self._events.put(("failed", f"не вдалося запустити розпізнавання фрази: {e}"))
+                return
+            debug(f"фразу шукає ПК (своя модель), поріг {detector.threshold:.2f}")
+        elif model_path is not None:
             try:
                 self._model, rec, limited = make_recognizer(model_path, RATE)
             except Exception as e:  # noqa: BLE001 — немає vosk, пошкоджена модель тощо
@@ -539,12 +557,13 @@ class WakeListener(QObject):
         else:
             debug("ім'я шукає сервер (Whisper): кожна фраза — на сервер")
         logic = WakeLogic(RATE, rec, sensitivity)
+        logic.detector = detector
         logic.loose = not limited
         logic.debug = debug if DEBUG else None
         self.logic = logic
         self._events.put(("ready",))
         last_report = time.monotonic()
-        agc = Agc() if rec is not None else (lambda pcm: pcm)  # Whisper тихий звук чує й так
+        agc = Agc() if rec is not None else (lambda pcm: pcm)  # Whisper і своя модель тихий звук чують і так
         while not self._stop.is_set():
             try:
                 item = self._queue.get(timeout=0.2)
