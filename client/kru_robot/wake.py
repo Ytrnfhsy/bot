@@ -39,6 +39,7 @@ BUFFER_SEC = 20  # стільки останніх секунд тримаємо
 END_SILENCE = 0.9  # пауза, після якої фраза вважається завершеною
 MAX_COMMAND = 15.0  # найдовша фраза після імені
 MIN_PHRASE = 0.25  # с — коротші звуки (клацання, стук) на сервер не надсилаємо
+MIN_FOLLOWUP = 0.5  # с — уточнення без імені коротше за це вважаємо шумом і слухаємо далі
 WAKE_WORDS = ("кру", "крю", "кроу", "крук", "круг")  # як модель може «почути» ім'я (сервер перевіряє точніше)
 SENSITIVITY = ("low", "medium", "high")
 # Часті слова — «куди падати» звичайному мовленню в граматиці, якщо модель не має [unk]
@@ -124,7 +125,9 @@ class WakeLogic:
         self.n += 1
         rms = _rms(frame)
         self.level = min(1.0, math.sqrt(rms / 32768) * 1.5)
-        threshold = max(self.floor * 2.5, 350.0)
+        # уточнення без імені — суворіше: інакше шум у кімнаті стає «питанням»
+        strict = self.state == "await" or (self.state == "capture" and not self.need_wake)
+        threshold = max(self.floor * (3.5 if strict else 2.5), 600.0 if strict else 350.0)
         loud = rms > threshold
         if not loud:
             self.floor = 0.97 * self.floor + 0.03 * max(rms, 50.0)
@@ -176,6 +179,16 @@ class WakeLogic:
         if self.state == "capture":
             long_enough = (self.n - self.capture_started) * FRAME_MS / 1000 >= MAX_COMMAND
             if not self.speaking or long_enough:
+                spoken = (self.n - self.capture_started - self.silence) * FRAME_MS / 1000
+                if not self.need_wake and spoken < MIN_FOLLOWUP and not long_enough:
+                    if self.debug:
+                        self.debug(f"уточнення {spoken:.1f} с — схоже на шум, пропускаю")
+                    if self.n <= self.deadline:
+                        self.state = "await"  # ще чекаємо справжнього уточнення
+                    else:
+                        self.state = "busy"
+                        events.append(("timeout",))
+                    return events
                 events.append(("utterance", self._audio(self.capture_from), self.need_wake))
                 self.state = "busy"
         return events

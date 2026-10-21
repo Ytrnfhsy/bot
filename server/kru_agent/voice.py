@@ -128,15 +128,19 @@ class Voice:
                 self._stt = model
         return self._stt_fast if fast else self._stt
 
-    def _transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False) -> str:
+    def _transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False, strict: bool = False) -> str:
         model = self._load_stt(fast)
         segments, _info = model.transcribe(
             decode_audio(data), language=self.config.whisper_language or None, vad_filter=True,
             beam_size=1 if fast else 5, initial_prompt=prompt,
         )
+        if strict:  # відкинути шматки, де модель сама не певна, що це мовлення
+            segments = [s for s in segments if getattr(s, "no_speech_prob", 0.0) < 0.6
+                        and getattr(s, "avg_logprob", 0.0) > -1.0]
         return " ".join(seg.text.strip() for seg in segments).strip()
 
-    async def transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False) -> str:
+    async def transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False,
+                         strict: bool = False) -> str:
         """Аудіо (WAV, OGG/Opus з Telegram, MP3…) → текст. fast — легкою моделлю (перевірка імені)."""
         if not self.stt_ok:
             raise VoiceError("Розпізнавання мовлення не встановлено на сервері: deploy/voice.sh install")
@@ -144,7 +148,7 @@ class Voice:
             raise VoiceError("Запис задовгий")
         async with self._stt_lock:
             try:
-                return await asyncio.to_thread(self._transcribe, data, prompt, fast)
+                return await asyncio.to_thread(self._transcribe, data, prompt, fast, strict)
             except VoiceError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -314,6 +318,19 @@ _WAKE = re.compile(r"^(кру|крю|кроу|кру-кру|kru|krew|crew|krу)$
 # звертання перед ім'ям; Whisper на коротких фразах часом пише їх по-російськи («Привет, Кру!»)
 _BEFORE_WAKE = {"ну", "агов", "гей", "ей", "ой", "о", "слухай", "послухай", "привіт", "привітик", "вітаю", "алло", "а",
                 "хей", "хай", "здоров", "привет", "эй", "хэй", "слушай", "послушай", "алё"}
+
+
+# що Whisper «чує» в тиші й шумі (навчений на субтитрах відео)
+_NOISE_TEXT = re.compile(
+    r"дякую за (перегляд|увагу)|підписуйтес|субтитр|продовження (буде|слідує)|ставте лайк|"
+    r"спасибо за просмотр|подписывайтесь|редактор субтитров|продолжение следует|thanks for watching|"
+    r"^(дякую|спасибо|угу|ага|ммм*|е+|а+|о+|хм+|ну)[.!?…]*$", re.IGNORECASE)
+
+
+def is_noise_text(text: str) -> bool:
+    """Порожньо, без літер чи типова «вигадка» Whisper на шумі — не уточнення, а шум."""
+    t = text.strip()
+    return len(re.sub(r"[^\w]", "", t)) < 3 or bool(_NOISE_TEXT.search(t))
 
 
 def strip_wake(text: str) -> tuple[bool, str]:
