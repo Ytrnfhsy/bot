@@ -7,8 +7,10 @@ name = "kru-robot"
 version = "0.1.0"
 description = "Десктоп-оболонка агента Kru: анімований персонаж поверх усіх вікон"
 requires-python = ">=3.10"
-# vosk — ім'я «Кру» офлайн; numpy + onnxruntime — своя фраза-активатор («Чуєш, Кру», wakeword.py)
-dependencies = ["PySide6>=6.6", "vosk>=0.3.45", "numpy", "onnxruntime"]
+# vosk — ім'я «Кру» офлайн; numpy + onnxruntime — своя фраза-активатор («Чуєш, Кру», wakeword.py).
+# Для найновіших Python onnxruntime виходить із запізненням — тоді робот ставиться без нього (режим фрази підкаже)
+dependencies = ["PySide6>=6.6", "vosk>=0.3.45", "numpy; python_version < '3.15'",
+                "onnxruntime; python_version < '3.15'"]
 
 [project.gui-scripts]
 kru-robot = "kru_robot.app:main"
