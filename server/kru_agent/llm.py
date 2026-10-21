@@ -314,7 +314,9 @@ class OpenAICompatClient:
                             slot["name"] += fn.get("name") or ""
                             slot["arguments"] += fn.get("arguments") or ""
                     if chunk.get("usage"):
-                        result.stats = chunk["usage"]
+                        result.stats = {**result.stats, **chunk["usage"]}
+                    if chunk.get("timings"):  # llama-server: швидкість читання й генерації
+                        result.stats["timings"] = chunk["timings"]
         except httpx.ConnectError as e:
             raise OllamaError(f"Не вдалося підключитися до LLM ({self.base_url}): {e}") from e
         for _, slot in sorted(partial.items()):

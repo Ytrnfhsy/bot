@@ -309,3 +309,24 @@ async def test_agent_name_in_prompt(cfg):
     await agent.run("s", "хто ти?", rec.emit, rec.confirm)
     system = llm.calls[0]["messages"][0]["content"]
     assert "Your name is Kru" in system and "привітний, з гумором" in system
+
+
+def test_wants_thinking():
+    from kru_agent.agent import wants_thinking
+
+    for simple in ("привіт", "котра година?", "яка погода в Києві", "нагадай завтра о 9 про лікаря",
+                   "знайди новини про космос", "Як справи?"):
+        assert not wants_thinking(simple), simple
+    for heavy in ("Поясни, як працює TCP", "напиши скрипт для бекапу", "порахуй 17*23+5",
+                  "склади план поїздки на тиждень", "Порівняй iPhone і Pixel", "подумай уважно", "x" * 500,
+                  "```python\nprint(1)\n```"):
+        assert wants_thinking(heavy), heavy
+
+
+async def test_auto_think_after_tool_error(cfg):
+    """«Авто»: проста задача — без міркувань, але після помилки інструмента модель міркує, як виправитись."""
+    llm = FakeLLM([call("no_such_tool"), call("remember", content="x"), text("Готово")])
+    agent = Agent(cfg, llm=llm)
+    rec = Recorder()
+    await agent.run("s", "запам'ятай x", rec.emit, rec.confirm)
+    assert [c["think"] for c in llm.calls] == [False, True, False]

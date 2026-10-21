@@ -99,6 +99,24 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
+# що варто обміркувати (режим «авто»): код, розрахунки, аналіз, планування, «подумай»
+_HEAVY = re.compile(
+    r"поясни|проаналіз|аналіз|порівня|розплану|сплану|склади план|план дій|код\b|коду|кодом|скрипт|програм|"
+    r"функці|алгоритм|розрахуй|розрахун|порахуй|обчисл|доведи|розв.яжи|рівнянн|оптиміз|рефактор|баг|дебаг|"
+    r"дослід|стратегі|поміркуй|подумай|обдумай|крок за кроком|детально|розбери|"
+    r"объясни|проанализ|сравни|посчитай|подумай|explain|analy[sz]|compare|\bcode\b|script|debug|"
+    r"calculat|prove|step by step|think",
+    re.IGNORECASE)
+_MATH = re.compile(r"\d\s*[-+*/^×÷]\s*\(?\d")
+
+
+def wants_thinking(text: str) -> bool:
+    """Режим «авто»: на прості запити («котра година», «привіт», «знайди погоду») — одразу відповідь, без
+    прихованих міркувань (секунди очікування); на складні — міркувати."""
+    t = text.strip()
+    return len(t) > 400 or "```" in t or bool(_HEAVY.search(t)) or bool(_MATH.search(t))
+
+
 def strip_think(text: str) -> str:
     text = _THINK_RE.sub("", text)
     # незакритий <think> на початку (обрізаний стрім)
@@ -225,7 +243,7 @@ class Turn:
     user_text: str
     ctx: ToolContext
     persist: Callable[[], None] = lambda: None
-    think: bool | None = None
+    think: bool | None = None  # None — авто: міркувати лише над складними задачами (wants_thinking)
     summary: str = ""
     summary_upto: int = 0  # скільки перших повідомлень history охоплює summary
     memories: list[dict[str, Any]] = field(default_factory=list)
@@ -236,6 +254,10 @@ class Turn:
     note_time: str = ""  # що вже сказано моделі в службових примітках цієї задачі
     note_plan: str = ""
     note_reminder: int = 0
+    heavy: bool = False  # задача схожа на складну — у режимі «авто» модель міркує
+    tool_error: bool = False  # на попередньому кроці інструмент повернув помилку — варто подумати
+    stats: dict[str, Any] = field(default_factory=lambda: {"steps": 0, "think_steps": 0, "thinking": 0,
+                                                           "answer": 0, "started": time.monotonic()})
 
 
 class Agent:
@@ -675,6 +697,7 @@ class Agent:
             persist()
             summary, upto = self.storage.load_summary(session_id, ctx.owner)
             turn = Turn(session_id, history, user_text, ctx, persist, think, summary, upto)
+            turn.heavy = wants_thinking(user_text)
             turn.plan = self.storage.load_plan(session_id, ctx.owner)
             if turn.plan and all(s["status"] in {"done", "skipped"} for s in turn.plan):
                 turn.plan = []  # попередню велику задачу завершено — нова починається з чистого аркуша
@@ -712,7 +735,7 @@ class Agent:
             if not calls:
                 answer = strip_think(result.content) or "(порожня відповідь моделі)"
                 history.append({"role": "assistant", "content": answer})
-                await emit({"type": "final", "text": answer})
+                await emit({"type": "final", "text": answer, "stats": self._finish_stats(turn)})
                 await emit({"type": "status", "state": "idle"})
                 return answer
 
@@ -727,8 +750,10 @@ class Agent:
                 turn.steps_since_plan = 0
             elif turn.plan:
                 turn.steps_since_plan += 1
+            turn.tool_error = False
             for name, args in calls:
                 output = await self._execute(name, args, emit, confirm, ctx)
+                turn.tool_error = turn.tool_error or output.startswith("ПОМИЛКА")
                 if self.native_tools:
                     history.append({"role": "tool", "tool_name": name, "content": output})
                 else:
@@ -748,14 +773,53 @@ class Agent:
             "Уточни, будь ласка, або попроси продовжити."
         )
         history.append({"role": "assistant", "content": answer})
-        await emit({"type": "final", "text": answer})
+        await emit({"type": "final", "text": answer, "stats": self._finish_stats(turn)})
         await emit({"type": "status", "state": "idle"})
         return answer
 
+    def _think_now(self, turn: Turn) -> bool:
+        """Міркувати на цьому кроці? Явне налаштування користувача — як є; «авто» — лише над складною задачею,
+        великою (з планом) чи коли щойно щось пішло не так."""
+        if turn.think is not None:
+            return turn.think
+        return turn.heavy or bool(turn.plan) or turn.tool_error
+
+    @staticmethod
+    def _finish_stats(turn: Turn) -> dict[str, Any]:
+        """Підсумок задачі: скільки тривала, скільки кроків і міркувань (у журнал і клієнтові — у final)."""
+        st = turn.stats
+        st["seconds"] = round(time.monotonic() - st.pop("started", time.monotonic()), 1)
+        log.info("Задача: %.1f с, кроків %d (з міркуваннями %d), токенів міркувань ~%d, відповіді ~%d",
+                 st["seconds"], st["steps"], st["think_steps"], st["thinking"], st["answer"])
+        return dict(st)
+
+    @staticmethod
+    def _step_stats(turn: Turn, result: ChatResult, think: bool, seconds: float, first: float) -> None:
+        """Заміри кроку — у журнал сервера й підсумок задачі (видно, де йде час)."""
+        st = turn.stats
+        t = (result.stats or {}).get("timings") or {}
+        thinking = int(len(result.thinking) / 3.5)  # ~3,5 символу на токен (українська — більше)
+        answer = int(t.get("predicted_n") or result.stats.get("eval_count") or 0) - thinking if result.stats else 0
+        st["steps"] += 1
+        st["think_steps"] += int(think)
+        st["thinking"] += thinking
+        st["answer"] += max(answer, int(len(result.content) / 3.5))
+        if t.get("predicted_per_second"):
+            st["gen_tps"] = round(float(t["predicted_per_second"]), 1)
+        if t.get("prompt_n") is not None:
+            st["prompt_tokens"] = st.get("prompt_tokens", 0) + int(t["prompt_n"])
+        log.info("Крок %d: %.1f с (перший токен %.1f с), міркування %s ~%d т, читання %s т, %s т/с",
+                 st["steps"], seconds, first, "так" if think else "ні", thinking,
+                 t.get("prompt_n", "?"), round(float(t.get("predicted_per_second") or 0), 1) or "?")
+
     async def _call_llm(self, turn: Turn, emit: EmitFunc) -> ChatResult:
-        ctx, think = turn.ctx, turn.think
+        ctx = turn.ctx
+        think = self._think_now(turn)
+        started, first = time.monotonic(), [0.0]
 
         async def on_token(kind: str, text: str) -> None:
+            if not first[0]:
+                first[0] = time.monotonic() - started
             if kind == "thinking":
                 await emit({"type": "thinking", "text": text})
             elif self.native_tools:
@@ -769,13 +833,14 @@ class Agent:
             msgs = self._attach_images(msgs, ctx)
             messages = [{"role": "system", "content": self._system_prompt(turn)}, *msgs]
             try:
-                extra = {} if think is None else {"think": think}
-                return await self.llm.chat(
+                result = await self.llm.chat(
                     messages,
                     tools=self.registry.schemas(ctx.denied_tools) if self.native_tools else None,
                     on_token=on_token,
-                    **extra,
+                    think=think,
                 )
+                self._step_stats(turn, result, think, time.monotonic() - started, first[0])
+                return result
             except VisionNotSupported:
                 if not self.vision:
                     raise

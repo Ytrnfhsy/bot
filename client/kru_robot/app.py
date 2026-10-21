@@ -50,6 +50,24 @@ DEFAULT_EFFECTS = {"natural": "Звичайний", "robot": "М'який роб
 PREVIEW_TEXT = "Привіт! Я Kru. Ось так тепер звучить мій голос. Чим можу допомогти?"
 
 
+def stats_line(st) -> str:
+    """Заміри відповіді від сервера → рядок під чатом: «⏱ 4,2 с · 2 кроки · без міркувань · 43 т/с»."""
+    if not isinstance(st, dict) or "seconds" not in st:
+        return ""
+    steps = int(st.get("steps") or 0)
+    parts = [f"⏱ {float(st['seconds']):.1f} с".replace(".", ",")]
+    if steps > 1:
+        few = steps % 10 in (2, 3, 4) and steps % 100 not in (12, 13, 14)
+        parts.append(f"{steps} {'кроки' if few else 'кроків'}")
+    if int(st.get("think_steps") or 0):
+        parts.append(f"міркування ~{int(st.get('thinking') or 0)} т")
+    else:
+        parts.append("без міркувань")
+    if st.get("gen_tps"):
+        parts.append(f"{float(st['gen_tps']):.0f} т/с")
+    return " · ".join(parts)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, s: Settings, parent: QWidget | None = None, voice_caps: dict | None = None,
                  preview=None) -> None:
@@ -62,12 +80,18 @@ class SettingsDialog(QDialog):
         self.token = QLineEdit(s.token)
         self.token.setEchoMode(QLineEdit.EchoMode.Password)
         self.scale = QDoubleSpinBox(minimum=0.5, maximum=2.0, singleStep=0.1, value=s.scale)
-        self.think = QCheckBox("Думати перед відповіддю (розумніше, але повільніше)")
-        self.think.setChecked(s.think)
+        self.think = QComboBox()
+        for key, title in THINK_MODES.items():
+            self.think.addItem(title, key)
+        self.think.setCurrentIndex(max(0, self.think.findData(s.think_mode)))
+        self.think.setToolTip("Міркування перед відповіддю: розумніше, але кожні ~40 слів роздумів — це секунда "
+                              "очікування. «Авто» — думати лише над кодом, розрахунками, аналізом, планами")
         self.thinking = QCheckBox("Показувати хід думок моделі")
         self.thinking.setChecked(s.show_thinking)
-        self.thinking.setEnabled(s.think)  # без міркувань показувати нічого
-        self.think.toggled.connect(self.thinking.setEnabled)
+        self.thinking.setEnabled(s.think_mode != "off")  # без міркувань показувати нічого
+        self.think.currentIndexChanged.connect(lambda: self.thinking.setEnabled(self.think.currentData() != "off"))
+        self.stats = QCheckBox("Після відповіді показувати, скільки вона тривала")
+        self.stats.setChecked(s.show_stats)
         self.font_px = QSpinBox(minimum=10, maximum=24, value=s.font_size, suffix=" px")
         self.font_px.setToolTip("Шрифт стрічки чату й поля вводу. Швидко: Ctrl + колесо миші над чатом, Ctrl+= / Ctrl+− / Ctrl+0")
         self.tools = QCheckBox("Показувати дії агента (read_file, web_search…)")
@@ -152,7 +176,8 @@ class SettingsDialog(QDialog):
         form.addRow("Хто шукає «Кру»:", self.wake_engine)
         form.addRow("Чутливість до «Кру»:", self.wake_sensitivity)
         form.addRow("", self.wake_followup)
-        form.addRow("", self.think)
+        form.addRow("Міркування:", self.think)
+        form.addRow("", self.stats)
         form.addRow("", self.thinking)
         form.addRow("", self.tools)
         form.addRow("", self.auto_files)
@@ -218,6 +243,9 @@ TOOL_ACTIVITY = {
 }
 
 
+THINK_VALUE = {"on": True, "off": False}  # auto → "auto" (сервер вирішує сам)
+THINK_MODES = {"auto": "авто — лише складні задачі (швидко)", "on": "завжди (розумніше, повільніше)",
+               "off": "ніколи (найшвидше)"}
 WAKE_ENGINE = {"phrase": "", "server": "сервер (Whisper) — кожна фраза йде на сервер",
                "local": "цей ПК (Vosk) — офлайн, менш точно"}
 WAKE_SENSITIVITY = {"low": "низька — рідше помиляється", "medium": "середня", "high": "висока — чує здалеку"}
@@ -267,6 +295,7 @@ class RobotWindow(QWidget):
         self.busy = False
         self.last_activity = time.monotonic()
         self.thinking_buf = ""
+        self._last_stats = ""  # заміри останньої відповіді — показати, коли агент звільниться
         # голос: запис (утримання персонажа / кнопка мікрофона) → сервер розпізнає → задача;
         # відповідь сервер озвучує, персонаж «говорить» у такт
         self.voice_caps = {"stt": False, "tts": False}
@@ -411,7 +440,7 @@ class RobotWindow(QWidget):
         if self.act_thinking.isChecked() != show:
             self.act_thinking.setChecked(show)
         self.panel.set_show_thinking(show)
-        if show and not self.settings.think:
+        if show and self.settings.think_mode == "off":
             self.panel.set_activity("💭 Модель зараз не міркує — увімкни «Думати перед відповіддю» в налаштуваннях")
         QTimer.singleShot(0, self.position_panel)
 
@@ -461,7 +490,8 @@ class RobotWindow(QWidget):
         url = normalize_url(dlg.url.text())  # зберігаємо вже виправлену адресу — видно, куди підключаємось
         changed_conn = (url, dlg.token.text().strip()) != (s.server_url, s.token)
         s.server_url, s.token = url, dlg.token.text().strip()
-        s.think = dlg.think.isChecked()
+        s.think_mode = dlg.think.currentData()
+        s.show_stats = dlg.stats.isChecked()
         self.set_show_thinking(dlg.thinking.isChecked())
         s.show_tools = dlg.tools.isChecked()
         s.auto_files = dlg.auto_files.isChecked()
@@ -514,7 +544,7 @@ class RobotWindow(QWidget):
         self.stop_speech(quiet=True)
         self._voice_task = by_voice
         if not self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
-                           "think": self.settings.think, "auto_files": self.settings.auto_files,
+                           "think": THINK_VALUE.get(self.settings.think_mode, "auto"), "auto_files": self.settings.auto_files,
                            "tz": local_timezone()}):
             # немає з'єднання: пробуємо підключитися зараз і надішлемо задачу, щойно вийде
             self._pending_task = text
@@ -932,7 +962,7 @@ class RobotWindow(QWidget):
             return
         # text — для старого сервера, який не знає retry (він просто виконає задачу ще раз)
         if not self.conn.send({"type": "task", "text": text, "retry": True, "session_id": self.settings.session_id,
-                               "think": self.settings.think, "auto_files": self.settings.auto_files,
+                               "think": THINK_VALUE.get(self.settings.think_mode, "auto"), "auto_files": self.settings.auto_files,
                                "tz": local_timezone()}):
             self.conn.reconnect_now()
             self.panel.set_activity("📡 Немає зв'язку з сервером — повтори, коли з'єднаюсь")
@@ -1290,7 +1320,7 @@ class RobotWindow(QWidget):
         text, self._pending_task = getattr(self, "_pending_task", None), None
         self._sent_on_connect = bool(text)  # тоді hello не перезавантажує чат: задача щойно пішла
         if text and self.conn.send({"type": "task", "text": text, "session_id": self.settings.session_id,
-                           "think": self.settings.think, "auto_files": self.settings.auto_files,
+                           "think": THINK_VALUE.get(self.settings.think_mode, "auto"), "auto_files": self.settings.auto_files,
                            "tz": local_timezone()}):
             if text != self.settings.last_task:
                 self.settings.last_task = text
@@ -1415,6 +1445,9 @@ class RobotWindow(QWidget):
             elif state == "idle":
                 self.busy = False
                 self.panel.set_busy(False)
+                if self._last_stats:
+                    self.panel.set_activity(self._last_stats)
+                    self._last_stats = ""
         elif t == "plan":
             self.panel.set_plan(ev.get("steps", []))
         elif t == "progress":
@@ -1458,6 +1491,7 @@ class RobotWindow(QWidget):
         elif t == "final":
             text = ev.get("text", "")
             self.thinking_buf = ""
+            self._last_stats = stats_line(ev.get("stats")) if self.settings.show_stats else ""
             self.panel.add_entry("assistant", text)
             if self._wants_speech() and text.strip():
                 self._speak(text)  # «говорить» почне, щойно прийде звук
