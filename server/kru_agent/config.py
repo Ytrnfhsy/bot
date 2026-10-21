@@ -106,24 +106,19 @@ class Config:
     sandbox_memory: str = "2g"
     sandbox_cpus: float = 2.0
     sandbox_confirm: bool = False
-    # Голос: розпізнавання мовлення (faster-whisper, CPU) і озвучення відповідей (Piper). Встановлення —
-    # deploy/voice.sh install. auto — увімкнено, якщо бібліотеки й голос Piper є на сервері.
+    # Голос: розпізнавання мовлення (faster-whisper, CPU; deploy/voice.sh install) і озвучення відповідей
+    # (HolosTTS; deploy/holos.sh start). auto — увімкнено, якщо це встановлено на сервері.
     voice: str = "auto"
     whisper_model: str = "turbo"  # tiny | base | small | medium | turbo (large-v3-turbo) — точніше = повільніше
-    # швидка перевірка імені в режимі «Кру» (кожна фраза в кімнаті); саму задачу розпізнає whisper_model.
-    # Порожньо — усе розпізнає whisper_model (точніше, але на CPU кілька секунд на кожну фразу)
-    whisper_wake_model: str = "small"
     whisper_language: str = "uk"  # порожньо — визначати мову самому
     whisper_device: str = "cpu"  # відеопам'ять зайнята моделлю агента
     # швидкість розпізнавання на CPU: пошук варіантів (1 — найшвидше, 5 — трохи точніше на довгих фразах)
     # і потоки процесора (0 — половина логічних ядер, тобто приблизно фізичні)
     whisper_beam: int = 1
     whisper_threads: int = 0
-    piper_voice: str = ""  # шлях до .onnx; порожньо — <data_dir>/voice/uk_UA-ukrainian_tts-medium.onnx
-    piper_speaker: int = 0  # ukrainian_tts: 0 — Лада, 1 — Микита, 2 — Тетяна
     voice_effect: str = "natural"  # обробка голосу за замовчуванням (voice_fx.EFFECTS); клієнт може обрати свою
     # Озвучення через HolosTTS (deploy/holos.sh start): природний український голос, 27 дикторів.
-    # Порожньо — Piper (deploy/voice.sh install).
+    # Порожньо — без озвучення.
     tts_url: str = ""
     tts_voice: str = ""  # голос HolosTTS за замовчуванням (порожньо — типовий голос сервісу)
     shell_timeout: int = 120
@@ -193,13 +188,10 @@ class Config:
             sandbox_confirm=_env_bool("SANDBOX_CONFIRM", d.sandbox_confirm),
             voice=_env("VOICE", d.voice).lower(),
             whisper_model=_env("WHISPER_MODEL", d.whisper_model),
-            whisper_wake_model=_env("WHISPER_WAKE_MODEL", d.whisper_wake_model),
             whisper_language=_env("WHISPER_LANGUAGE", d.whisper_language),
             whisper_device=_env("WHISPER_DEVICE", d.whisper_device),
             whisper_beam=int(_env("WHISPER_BEAM", str(d.whisper_beam))),
             whisper_threads=int(_env("WHISPER_THREADS", str(d.whisper_threads))),
-            piper_voice=_env("PIPER_VOICE", d.piper_voice),
-            piper_speaker=int(_env("PIPER_SPEAKER", str(d.piper_speaker))),
             voice_effect=_env("VOICE_EFFECT", d.voice_effect),
             tts_url=_env("TTS_URL", d.tts_url).rstrip("/"),
             tts_voice=_env("TTS_VOICE", d.tts_voice),

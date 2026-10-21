@@ -681,7 +681,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p_wake = sub.add_parser("wakeword", help="своя фраза-активатор («Чуєш, Кру») для режиму «завжди слухаю»")
     wake_sub = p_wake.add_subparsers(dest="wake_cmd")
-    p = wake_sub.add_parser("train", help="навчити модель фрази (озвучує її голосами HolosTTS/Piper)")
+    p = wake_sub.add_parser("train", help="навчити модель фрази (озвучує її голосами HolosTTS)")
     p.add_argument("--phrase", default="Чуєш, Кру", help="фраза (типово «Чуєш, Кру»)")
     p.add_argument("--quick", action="store_true", help="швидко й менш точно (перевірити, що все працює)")
     p.add_argument("--no-extra", action="store_true",

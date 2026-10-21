@@ -47,9 +47,8 @@ class Settings:
     voice_name: str = ""  # голос (назва з сервера: HolosTTS «Гаська Шиян», Speaker_67…); порожньо — типовий
     voice_sound: str = "natural"  # обробка: natural | robot | digital | droid | mech (див. сервер voice_fx)
     voice_speed: float = 1.0  # темп мовлення
-    wake_enabled: bool = False  # «завжди слухаю» (подвійний клік): відгукуватися на «Кру, …»
-    wake_engine: str = "server"  # хто шукає ім'я: phrase (своя модель фрази на ПК) | server (Whisper) | local (Vosk)
-    wake_sensitivity: str = "medium"  # low | medium | high  # лише для local
+    wake_enabled: bool = False  # «завжди слухаю» (подвійний клік): відгукуватися на «Чуєш, Кру, …»
+    wake_sensitivity: str = "medium"  # low | medium | high — зсув порогу моделі фрази
     wake_followup: bool = True  # після відповіді ще кілька секунд слухати уточнення без імені
 
     @classmethod
