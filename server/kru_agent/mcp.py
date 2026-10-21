@@ -258,25 +258,46 @@ class MCPManager:
         self.cfg = cfg
         self.servers = {name: MCPServer(name, spec, cfg) for name, spec in load_specs(cfg).items()}
         self.admin_only: set[str] = set()  # імена інструментів лише для адміністраторів
+        self.retry_interval = 60.0
+        self._retry: asyncio.Task | None = None
 
-    async def start(self, registry) -> list[str]:
-        """Запустити сервери й додати їхні інструменти в реєстр агента. → помилки (по рядку на сервер)."""
-        errors = []
+    async def start(self, registry, retry: bool = True) -> list[str]:
+        """Запустити сервери й додати їхні інструменти в реєстр агента. → помилки (по рядку на сервер).
+        retry — недоступні (ПК вимкнений, програма ще не відкрита) пробувати знову щохвилини у фоні."""
+        errors, failed = [], []
         for name, server in self.servers.items():
-            try:
-                await server.start()
-            except (MCPError, OSError) as e:
-                errors.append(f"{name}: {e}")
-                log.error("MCP %s: %s", name, e)
-                continue
-            for spec in server.tools:
-                tool = self._tool(server, spec)
-                registry.register(tool)
-                if server.spec.get("admin_only", True) is not False:
-                    self.admin_only.add(tool.name)
+            if err := await self._connect(server, registry):
+                errors.append(f"{name}: {err}")
+                failed.append(server)
+        if failed and retry:
+            self._retry = asyncio.create_task(self._retry_loop(failed, registry))
         return errors
 
+    async def _connect(self, server: "MCPServer", registry) -> str:
+        try:
+            await server.start()
+        except (MCPError, OSError) as e:
+            log.warning("MCP %s: %s", server.name, e)
+            await server.stop()  # напівживий процес (не відповів на initialize) — прибрати
+            return str(e)
+        for spec in server.tools:
+            tool = self._tool(server, spec)
+            registry.register(tool)
+            if server.spec.get("admin_only", True) is not False:
+                self.admin_only.add(tool.name)
+        return ""
+
+    async def _retry_loop(self, failed: list["MCPServer"], registry) -> None:
+        while failed:
+            await asyncio.sleep(self.retry_interval)
+            for server in list(failed):
+                if not await self._connect(server, registry):
+                    log.info("MCP %s: підключено (%d інструментів)", server.name, len(server.tools))
+                    failed.remove(server)
+
     async def stop(self) -> None:
+        if self._retry is not None:
+            self._retry.cancel()
         await asyncio.gather(*(s.stop() for s in self.servers.values()), return_exceptions=True)
 
     def _tool(self, server: MCPServer, spec: dict[str, Any]) -> Tool:
