@@ -3,6 +3,7 @@
 import base64
 import json
 import sys
+from pathlib import Path
 
 PNG = base64.b64encode(bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
@@ -14,6 +15,10 @@ TOOLS = [
     {"name": "fail", "description": "Завжди помилка", "inputSchema": {"type": "object"}},
     {"name": "crash", "description": "Впасти", "inputSchema": {"type": "object"}},
 ]
+
+
+if len(sys.argv) > 1 and (Path(sys.argv[1]) / "down").exists():  # «ПК вимкнений / програма не відкрита»
+    sys.exit(1)
 
 
 def send(msg):

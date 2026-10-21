@@ -536,7 +536,7 @@ def _mcp_command(cfg: Config, args, parser) -> None:
     async def run() -> None:
         reg = ToolRegistry()
         try:
-            errors = await manager.start(reg)
+            errors = await manager.start(reg, retry=False)
         finally:
             await manager.stop()
         for name, server in manager.servers.items():

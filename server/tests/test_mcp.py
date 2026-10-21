@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -73,3 +74,24 @@ async def test_bad_command(cfg):
     errors = await manager.start(reg)
     assert errors and errors[0].startswith("nope: не вдалося запустити") and reg.tools == {}
     await manager.stop()
+
+
+async def test_retry_until_available(cfg):
+    """Сервер недоступний на старті (ПК вимкнений) — Kru підключає його пізніше сам."""
+    _config(cfg)
+    down = cfg.workspace / "down"
+    cfg.workspace.mkdir(parents=True, exist_ok=True)
+    down.write_text("")
+    manager, reg = MCPManager(cfg), ToolRegistry()
+    manager.retry_interval = 0.05
+    try:
+        errors = await manager.start(reg)
+        assert errors and reg.tools == {}
+        down.unlink()
+        for _ in range(400):  # до 20 с — з запасом для повільного CI
+            if reg.tools:
+                break
+            await asyncio.sleep(0.05)
+        assert "fake_pc_echo" in reg.tools and "fake_pc_echo" in manager.admin_only
+    finally:
+        await manager.stop()
