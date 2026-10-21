@@ -174,14 +174,22 @@ class WakeLogic:
         final = self.rec.AcceptWaveform(frame)
         if final:
             res = _json(self.rec.Result())
-            if self.debug and res.get("text"):
-                self.debug(f"почуто (фраза): {res.get('text')!r} {[(w.get('word'), round(float(w.get('conf', 0)), 2)) for w in res.get('result', []) if isinstance(w, dict)]}")
-            words = [w for w in res.get("result", []) if isinstance(w, dict)]
-            if words:
-                ok = any(is_wake(w.get("word", "")) and
-                         (self.sensitivity != "low" or float(w.get("conf", 1.0)) >= 0.6) for w in words)
-            else:
-                ok = any(is_wake(w) for w in res.get("text", "").split())
+            # кілька варіантів почутого (SetMaxAlternatives): ім'я хоч в одному — рахується
+            alts = res.get("alternatives") or [res]
+            if self.debug:
+                shown = [(a.get("text", ""), round(float(a.get("confidence", 0)), 1)) for a in alts if a.get("text")]
+                if shown:
+                    self.debug(f"почуто (фраза): {shown}")
+            ok = False
+            for a in alts[:3]:
+                words = [w for w in a.get("result", []) if isinstance(w, dict)]
+                if words:
+                    ok = ok or any(is_wake(w.get("word", "")) and
+                                   (self.sensitivity != "low" or float(w.get("conf", 1.0)) >= 0.6) for w in words)
+                else:
+                    ok = ok or any(is_wake(w) for w in a.get("text", "").split())
+                if self.sensitivity == "low":
+                    break  # «низька» — лише найімовірніший варіант
             self._hits = 0
             return ok
         if self.sensitivity == "low":
@@ -301,6 +309,36 @@ def download_model(progress=lambda text: None) -> Path:
     return found
 
 
+class Agc:
+    """Автопідсилення: тихий мікрофон (мовлення ледь вище шуму) підтягуємо до нормальної гучності —
+    і Vosk, і Whisper розпізнають помітно краще. Підсилення змінюється плавно й не «качає» тишу."""
+
+    TARGET = 4000.0  # бажаний рівень мовлення (RMS, 16 біт)
+    MAX_GAIN = 12.0
+
+    def __init__(self) -> None:
+        self.peak = 1500.0  # «пік» мовлення, що повільно згасає
+        self.gain = 1.0
+
+    def __call__(self, pcm16: bytes) -> bytes:
+        a = array.array("h", pcm16[: len(pcm16) // 2 * 2])
+        if not a:
+            return pcm16
+        if sys.byteorder == "big":
+            a.byteswap()
+        rms = math.sqrt(sum(x * x for x in a[::4]) / max(1, len(a[::4])))
+        self.peak = max(rms, self.peak * 0.997, 300.0)  # згасає за кілька секунд
+        want = min(self.MAX_GAIN, max(1.0, self.TARGET / self.peak))
+        self.gain += (want - self.gain) * (0.5 if want < self.gain else 0.05)  # вниз — швидко, вгору — плавно
+        if self.gain <= 1.05:
+            return pcm16
+        g = self.gain
+        out = array.array("h", (max(-32768, min(32767, int(x * g))) for x in a))
+        if sys.byteorder == "big":
+            out.byteswap()
+        return out.tobytes()
+
+
 DEBUG = os.environ.get("KRU_WAKE_DEBUG", "").lower() not in {"", "0", "false", "no"}
 
 
@@ -324,10 +362,14 @@ def make_recognizer(model_path: Path, rate: int):
         others = ["[unk]"] if model.vosk_model_find_word("[unk]") >= 0 else \
             [w for w in FILLER_WORDS if model.vosk_model_find_word(w) >= 0]
         debug(f"інше мовлення: {'[unk]' if others == ['[unk]'] else f'{len(others)} частих слів'}")
-        rec = KaldiRecognizer(model, rate, json.dumps(known + others, ensure_ascii=False))
+        # звертання перед ім'ям дають моделі контекст: «Привіт, Кру» чується надійніше за саме «Кру»
+        phrases = [f"{a} {w}" for a in ("привіт", "агов", "гей", "слухай") for w in known[:2]
+                   if model.vosk_model_find_word(a) >= 0]
+        rec = KaldiRecognizer(model, rate, json.dumps(known + phrases + others, ensure_ascii=False))
     else:
         rec = KaldiRecognizer(model, rate)
     rec.SetWords(True)
+    rec.SetMaxAlternatives(3)
     return model, rec, bool(known)
 
 
@@ -470,6 +512,7 @@ class WakeListener(QObject):
         self.logic = logic
         self._events.put(("ready",))
         last_report = time.monotonic()
+        agc = Agc()
         while not self._stop.is_set():
             try:
                 item = self._queue.get(timeout=0.2)
@@ -486,7 +529,7 @@ class WakeListener(QObject):
                 continue
             try:
                 if item:
-                    item = self._resample(to_mono16(item, self._fmt[0], self._fmt[1]))
+                    item = agc(self._resample(to_mono16(item, self._fmt[0], self._fmt[1])))
                 events = logic.feed(item)
             except Exception as e:  # noqa: BLE001
                 self._events.put(("failed", f"розпізнавання імені: {e}"))
@@ -496,5 +539,6 @@ class WakeListener(QObject):
                 self._events.put(ev)
             if DEBUG and time.monotonic() - last_report > 2:
                 last_report = time.monotonic()
-                debug(f"стан {logic.state}, рівень {logic.level:.2f}, шум {logic.floor:.0f}, мовлення {logic.speaking}")
+                debug(f"стан {logic.state}, рівень {logic.level:.2f}, шум {logic.floor:.0f}, мовлення {logic.speaking}, "
+                      f"підсилення ×{agc.gain:.1f}")
         self._model = None
