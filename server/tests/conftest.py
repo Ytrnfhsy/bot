@@ -52,8 +52,7 @@ def prompt(call_: dict[str, Any]) -> str:
 @pytest.fixture
 def cfg(tmp_path) -> Config:
     c = Config(workspace=tmp_path / "ws", data_dir=tmp_path / "data", users_workspace=tmp_path / "users",
-               embed_url="",  # модель ембедингів у тестах — лише фейкова (test_memory.py)
-               mcp_config=tmp_path / "mcp.json")  # не підхоплювати справжні MCP-сервери розробника
+               embed_url="")  # модель ембедингів у тестах — лише фейкова (test_memory.py)
     c.ensure_dirs()
     return c
 

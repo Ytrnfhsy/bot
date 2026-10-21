@@ -130,16 +130,11 @@ class ToolRegistry:
         if name in ctx.denied_tools:
             raise ToolError(f"Інструмент {name!r} недоступний цьому користувачу. Доступні: {allowed}")
         sig = inspect.signature(tool.func)
-        params = list(sig.parameters.values())[1:]
-        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):  # MCP: схему перевіряє сам сервер
-            accepted = dict(args)
-        else:
-            accepted = {k: v for k, v in args.items() if k in sig.parameters}
+        accepted = {k: v for k, v in args.items() if k in sig.parameters}
         missing = [
             p.name
-            for p in params
+            for p in list(sig.parameters.values())[1:]
             if p.default is inspect.Parameter.empty and p.name not in accepted
-            and p.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
         ]
         if missing:
             raise ToolError(f"Бракує обов'язкових параметрів: {', '.join(missing)}")
