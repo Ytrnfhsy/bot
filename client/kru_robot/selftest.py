@@ -642,8 +642,21 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         wav = make_wav(b"\0\0" * 8000, 16000)
         import base64
 
-        win.on_event({"type": "tts_audio", "id": tts["id"], "format": "wav", "data": base64.b64encode(wav).decode()})
+        need(tts.get("stream") is True, "озвучення не частинами")
+        data = base64.b64encode(wav).decode()
+        # відповідь частинами: друга приходить, поки звучить перша, — чекає черги
+        win.on_event({"type": "tts_audio", "id": tts["id"], "format": "wav", "part": 0, "last": False, "data": data})
         need(played and win.robot.state == "talking", f"не говорить: {win.robot.state}")
+        win.on_event({"type": "tts_audio", "id": tts["id"], "format": "wav", "part": 1, "last": False, "data": data})
+        need(len(played) == 1, "друга частина перебила першу")
+        win.player.stop()
+        need(len(played) == 2 and win.robot.state == "talking", f"друга частина: {len(played)}, {win.robot.state}")
+        win.player.stop()  # третя ще синтезується — робот «говорить» далі
+        need(win.robot.state == "talking", f"не дочекався третьої частини: {win.robot.state}")
+        win.on_event({"type": "tts_audio", "id": "чуже", "format": "wav", "part": 0, "last": True, "data": data})
+        need(len(played) == 2, "зіграв чуже озвучення")
+        win.on_event({"type": "tts_audio", "id": tts["id"], "format": "wav", "part": 2, "last": True, "data": data})
+        need(len(played) == 3, "третя частина не зіграла")
         win.player.stop()
         need(win.robot.state == "happy", f"після озвучення: {win.robot.state}")
         # текстова задача — без озвучення (режим «коли питаю голосом»)

@@ -242,7 +242,22 @@ class Voice:
         speech = speech_text(text)
         if not speech:
             raise VoiceError("Нема чого озвучувати")
+        return await self._synth(speech, self.options(voice, effect, speed, speaker))
+
+    async def speak_parts(self, text: str, voice=None, effect=None, speed=None, speaker=None):
+        """Те саме, що speak, але частинами: (WAV, остання?). Перше речення звучить, поки синтезується решта, —
+        довга відповідь не змушує чекати, доки озвучиться вся."""
+        if not self.engine:
+            raise VoiceError("Озвучення не налаштовано на сервері: deploy/holos.sh start (або deploy/voice.sh install)")
+        chunks = speech_chunks(speech_text(text))
+        if not chunks:
+            raise VoiceError("Нема чого озвучувати")
         opts = self.options(voice, effect, speed, speaker)
+        for i, chunk in enumerate(chunks):
+            yield await self._synth(chunk, opts), i == len(chunks) - 1
+
+    async def _synth(self, speech: str, opts: tuple[str, str, float]) -> bytes:
+        engine = self.engine
         async with self._tts_lock:
             try:
                 if engine == "holos":
@@ -318,6 +333,24 @@ def strip_wake(text: str) -> tuple[bool, str]:
 _CODE_BLOCK = re.compile(r"```.*?(```|$)", re.DOTALL)
 _URL = re.compile(r"https?://\S+")
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️‍]")
+
+
+def speech_chunks(speech: str, first: int = 140, rest: int = 450) -> list[str]:
+    """Текст для озвучення → частини по реченнях: перша коротка (швидше почне звучати), далі — довші."""
+    chunks: list[str] = []
+    cur = ""
+    for sentence in re.split(r"(?<=[.!?…;:])\s+", speech.strip()):
+        if not sentence:
+            continue
+        # перша частина — щойно набралось хоч трохи (≥ 20 знаків), щоб звук почався якнайшвидше
+        if cur and (len(cur) + 1 + len(sentence) > (rest if chunks else first) or (not chunks and len(cur) >= 20)):
+            chunks.append(cur)
+            cur = sentence
+        else:
+            cur = f"{cur} {sentence}" if cur else sentence
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def speech_text(markdown: str, limit: int = MAX_SPEECH) -> str:

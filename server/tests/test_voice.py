@@ -364,3 +364,35 @@ def test_ws_wake_two_models(cfg, voice_ready):
         ws.send_json({"type": "voice_in", "id": "c", "data": data, "wake": "require"})
         assert _until(ws, "voice_text")[0].get("wake_only") is True
         assert len(full.calls) == 1  # лише ім'я — друге розпізнавання не потрібне
+
+
+def test_speech_chunks():
+    from kru_agent.voice import speech_chunks
+
+    text = "Привіт! Сьогодні сонячно. " + "Це довге речення про погоду на завтра і післязавтра. " * 12
+    parts = speech_chunks(text.strip())
+    assert parts[0] == "Привіт! Сьогодні сонячно."  # перша частина коротка — звучить майже одразу
+    assert len(parts) > 2 and all(len(p) <= 450 for p in parts[1:])
+    assert " ".join(parts) == " ".join(text.split())  # нічого не загубилось
+    assert speech_chunks("") == [] and speech_chunks("Одне.") == ["Одне."]
+
+
+def test_ws_tts_stream(cfg, voice_ready):
+    """stream=true: відповідь озвучується частинами; tts_stop зупиняє решту."""
+    cfg.token = "secret"
+    agent = Agent(cfg, llm=FakeLLM([]))
+    _, tts = voice_ready(agent)
+    client = TestClient(create_app(cfg, agent=agent))
+    long = "Перше речення відповіді. " + "Далі йде доволі довге речення, щоб частин було кілька. " * 20
+    with client, client.websocket_connect("/ws?token=secret") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "tts", "id": "s1", "text": long, "stream": True})
+        got = []
+        while not got or not got[-1]["last"]:
+            got.append(_until(ws, "tts_audio")[0])
+        assert [g["part"] for g in got] == list(range(len(got))) and len(got) >= 3
+        assert all(g["id"] == "s1" and base64.b64decode(g["data"]).startswith(b"RIFF") for g in got)
+        assert tts.said[-len(got)][0] == "Перше речення відповіді."
+        ws.send_json({"type": "tts", "id": "s2", "text": "Коротко.", "stream": True})
+        one, _ = _until(ws, "tts_audio")
+        assert (one["id"], one["part"], one["last"]) == ("s2", 0, True)
