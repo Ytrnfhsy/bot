@@ -494,12 +494,38 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         emoji = re.findall("[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B07\u21BB\u23F3]", plain)
         need(not emoji, f"емодзі в позначках стрічки: {emoji}")
         imgs = re.findall(r'src="kru-icon:(\w+)"', win.panel.view.toHtml())
-        need({"user", "tool", "memory", "delegate", "warn", "file", "download"} <= set(imgs), f"іконки: {imgs}")
+        need({"tool", "memory", "delegate", "warn", "file", "download"} <= set(imgs), f"іконки: {imgs}")
+        need(imgs[0] == "file", f"вкладення в бульбашці без іконки: {imgs[:2]}")
         need("<img" in win.panel.activity.text() and "💭" not in win.panel.activity.text(), "рядок стану без іконки")
         win.new_chat()
         return sorted(set(imgs))
 
     step(50, lambda: check("feed_icons", feed_icons_flow))
+
+    def my_messages_flow():
+        """Мої повідомлення — бульбашки з фоном праворуч; Alt+↑ / Alt+↓ — перехід між ними в довгому чаті."""
+        p = win.panel
+        win.new_chat()
+        for n in range(6):
+            p.add_entry("user", f"Питання номер {n} <b>не тег</b>")
+            p.add_entry("assistant", "Довга відповідь.\n\n" + "\n\n".join(f"Абзац {k} відповіді." for k in range(8)))
+        p._render()
+        h = p.view.toHtml()
+        need(h.count("#dcebff") >= 6 or h.count("#DCEBFF") >= 6, "немає фону в моїх повідомленнях")
+        need("&lt;b&gt;не тег" in h, "текст повідомлення не екранований")
+        sb = p.view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        start = sb.value()
+        need(p.jump_to_mine(-1) and sb.value() < start, f"Alt+↑ не перейшов: {start} → {sb.value()}")
+        up = sb.value()
+        need(p.jump_to_mine(-1) and sb.value() < up, "другий Alt+↑ не перейшов вище")
+        need(p.jump_to_mine(1) and sb.value() > sb.minimum(), "Alt+↓ не перейшов нижче")
+        sb.setValue(0)
+        need(not p.jump_to_mine(-1), "вище першого повідомлення нікуди")
+        win.new_chat()
+        return "ok"
+
+    step(50, lambda: check("my_messages", my_messages_flow))
 
     def resize_font_flow():
         """Тягнути вікно чату за край і міняти шрифт: усе запам'ятовується; подвійний клік — як було."""
