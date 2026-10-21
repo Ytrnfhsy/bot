@@ -1,4 +1,4 @@
-"""Голос: запис → текст (faster-whisper), відповідь → WAV (Piper); WS-протокол і голосові в Telegram.
+"""Голос: запис → текст (faster-whisper), відповідь → WAV (HolosTTS); WS-протокол і голосові в Telegram.
 
 Справжні моделі тут не завантажуються — їх замінюють заглушки з тим самим API."""
 
@@ -35,34 +35,35 @@ class FakeWhisper:
         return iter([seg] if self.words else []), None
 
 
-class FakePiper:
-    config = types.SimpleNamespace(num_speakers=3)
+class FakeHolos:
+    """Заглушка HolosTTS: що й яким голосом озвучено (сам HTTP-обмін перевіряє test_holos_tts)."""
 
     def __init__(self) -> None:
-        self.said: list[tuple[str, int | None]] = []
-        self.length_scales: list[float] = []
+        self.said: list[tuple[str, str]] = []
+        self.opts: list[tuple[str, float]] = []
 
-    def synthesize_wav(self, text, wav, syn_config=None):
-        self.said.append((text, syn_config.speaker_id))
-        self.length_scales.append(syn_config.length_scale)
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(22050)
-        wav.writeframes(b"\0\0" * 100)
+    async def __call__(self, voice_obj, text, voice, effect, speed):
+        self.said.append((text, voice))
+        self.opts.append((effect, speed))
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(22050)
+            w.writeframes(b"\0\0" * 100)
+        return buf.getvalue()
 
 
 @pytest.fixture
 def voice_ready(monkeypatch):
-    piper = types.ModuleType("piper")
-    piper.SynthesisConfig = lambda **kw: types.SimpleNamespace(**{"speaker_id": None, "length_scale": None, **kw})
-    monkeypatch.setitem(sys.modules, "piper", piper)
     monkeypatch.setattr(voice_mod, "decode_audio", lambda data: data)  # декодер перевіряє окремий тест
     monkeypatch.setattr(Voice, "stt_ok", property(lambda self: self.enabled))
-    monkeypatch.setattr(Voice, "piper_ok", property(lambda self: True))
-    whisper, tts = FakeWhisper(), FakePiper()
+    whisper, tts = FakeWhisper(), FakeHolos()
+    monkeypatch.setattr(Voice, "_speak_holos", lambda self, *a: tts(self, *a))
 
     def attach(agent: Agent):
-        agent.voice._stt, agent.voice._stt_fast, agent.voice._tts = whisper, whisper, tts
+        agent.config.tts_url = agent.config.tts_url or "http://holos"
+        agent.voice._stt = whisper
         return whisper, tts
 
     return attach
@@ -87,12 +88,13 @@ def test_caps_without_libraries(cfg):
     assert (caps["stt"], caps["tts"]) == (False, False) and caps["effects"]["robot"] == "М'який робот"
     cfg.voice = "auto"
     v = Voice(cfg)
-    assert v.voice_path == cfg.data_dir / "voice" / "uk_UA-ukrainian_tts-medium.onnx"
-    assert v.tts_ok is False  # голосу на диску немає
+    assert v.tts_ok is False and v.engine == ""  # HolosTTS не налаштовано
+    cfg.tts_url = "http://127.0.0.1:8890"
+    assert Voice(cfg).tts_ok and Voice(cfg).engine == "holos"
 
 
 async def test_transcribe_and_speak(cfg, voice_ready):
-    cfg.piper_speaker = 2
+    cfg.tts_voice = "Гаська Шиян"
     cfg.voice_effect = "natural"  # без обробки — тут перевіряємо сам синтез
     agent = Agent(cfg, llm=FakeLLM([]))
     whisper, tts = voice_ready(agent)
@@ -101,7 +103,7 @@ async def test_transcribe_and_speak(cfg, voice_ready):
     audio = await agent.voice.speak("**Сонячно**, +18 °C ☀️")
     with wave.open(io.BytesIO(audio)) as w:
         assert w.getframerate() == 22050 and w.getnframes() == 100
-    assert tts.said == [("Сонячно, +18 °C.", 2)]
+    assert tts.said == [("Сонячно, +18 °C.", "Гаська Шиян")]
     with pytest.raises(VoiceError, match="Нема чого"):
         await agent.voice.speak("🚀\n\n---")
     with pytest.raises(VoiceError, match="задовгий"):
@@ -113,7 +115,7 @@ async def test_voice_disabled_errors(cfg):
     agent = Agent(cfg, llm=FakeLLM([]))
     with pytest.raises(VoiceError, match="voice.sh install"):
         await agent.voice.transcribe(b"x")
-    with pytest.raises(VoiceError, match="voice.sh install"):
+    with pytest.raises(VoiceError, match="holos.sh start"):
         await agent.voice.speak("привіт")
 
 
@@ -131,6 +133,7 @@ def test_ws_voice_roundtrip(cfg, voice_ready):
         assert heard == {"type": "voice_text", "id": "v1", "text": "яка погода в Києві"}
         kw = agent.voice._stt.calls[-1]  # швидкі налаштування CPU: один варіант пошуку, без часових міток
         assert kw["beam_size"] == 1 and kw["without_timestamps"] and not kw["condition_on_previous_text"]
+        assert kw["initial_prompt"] is None  # звичайний запис (утримання робота) — без підказки імені
         ws.send_json({"type": "task", "text": heard["text"], "session_id": "v"})
         final, _ = _until(ws, "final")
         ws.send_json({"type": "tts", "id": "t1", "text": final["text"]})
@@ -149,7 +152,7 @@ def test_ws_voice_not_installed(cfg):
         caps = ws.receive_json()["voice"]
         assert (caps["stt"], caps["tts"]) == (False, False)
         ws.send_json({"type": "tts", "id": "t", "text": "привіт"})
-        assert "voice.sh install" in _until(ws, "tts_error")[0]["message"]
+        assert "holos.sh start" in _until(ws, "tts_error")[0]["message"]
 
 
 async def test_telegram_voice_message(cfg, voice_ready):
@@ -198,11 +201,12 @@ def test_voice_options_and_effects(cfg, voice_ready):
     np = pytest.importorskip("numpy")
     from kru_agent.voice_fx import EFFECTS, apply
 
+    cfg.tts_voice = "Гаська Шиян"
     v = Voice(cfg)
-    assert v.options() == ("Лада", "natural", 1.0)  # типово — без обробки
-    assert v.options("Тетяна", "droid", 1.2) == ("Тетяна", "droid", 1.2)
-    assert v.options(None, "невідомий", "швидко") == ("Лада", "natural", 1.0)  # сміття з клієнта — до типових
-    assert v.options(None, None, 9, speaker=1) == ("Микита", "natural", 1.6)  # старі клієнти: номер диктора
+    assert v.options() == ("Гаська Шиян", "natural", 1.0)  # типово — голос сервера, без обробки
+    assert v.options("Speaker_67", "droid", 1.2) == ("Speaker_67", "droid", 1.2)
+    assert v.options(None, "невідомий", "швидко") == ("Гаська Шиян", "natural", 1.0)  # сміття — до типових
+    assert v.options(None, None, 9) == ("Гаська Шиян", "natural", 1.6)
 
     rate = 22050
     t = np.arange(rate) / rate  # 1 с «голосу»: 220 Гц з обертонами
@@ -218,7 +222,7 @@ def test_voice_options_and_effects(cfg, voice_ready):
         with wave.open(io.BytesIO(out)) as w:
             y = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768
             assert w.getframerate() == rate
-        assert abs(len(y) - rate / fx.pitch) <= 1, name  # pitch: Piper синтезує довше рівно на стільки ж
+        assert abs(len(y) - rate / fx.pitch) <= 1, name  # pitch: HolosTTS синтезує довше рівно на стільки ж
         assert 0.8 < np.max(np.abs(y)) <= 0.9 and np.all(np.isfinite(y)), name
         assert abs(y[0]) < 1e-3 and abs(y[-1]) < 1e-3, name  # без клацань на краях
 
@@ -226,9 +230,8 @@ def test_voice_options_and_effects(cfg, voice_ready):
 async def test_speak_uses_requested_voice(cfg, voice_ready):
     agent = Agent(cfg, llm=FakeLLM([]))
     _, tts = voice_ready(agent)
-    await agent.voice.speak("Привіт", voice="Микита", effect="droid", speed=1.25)
-    assert tts.said[-1] == ("Привіт.", 1)
-    assert tts.length_scales[-1] == pytest.approx(1.14 / 1.25)  # вища висота й швидший темп
+    await agent.voice.speak("Привіт", voice="Speaker_67", effect="droid", speed=1.25)
+    assert tts.said[-1] == ("Привіт.", "Speaker_67") and tts.opts[-1] == ("droid", 1.25)
 
 
 def _holos(monkeypatch, handler):
@@ -276,7 +279,7 @@ async def test_holos_tts(cfg, monkeypatch):
 
     _holos(monkeypatch, handler)
     v = Voice(cfg)
-    assert v.engine == "holos" and v.tts_ok  # Piper не потрібен
+    assert v.engine == "holos" and v.tts_ok
     await v.refresh_voices(force=True)
     caps = v.caps()
     assert caps["engine"] == "holos" and caps["voices"] == ["Speaker_67", "Гаська Шиян", "Speaker_0"]
@@ -317,55 +320,6 @@ def test_strip_wake():
     assert strip_wake("Привет, Кру!") == (True, "")  # Whisper на коротких фразах пише й по-російськи
     for miss in ("Це круто, правда?", "Кружка на столі", "Скажи, кру, котра година", ""):
         assert strip_wake(miss)[0] is False, miss
-
-
-def test_ws_wake_mode(cfg, voice_ready):
-    """«Завжди слухаю»: сервер перевіряє, що фраза починається з імені, і прибирає його."""
-    cfg.token = "secret"
-    agent = Agent(cfg, llm=FakeLLM([]))
-    whisper, _ = voice_ready(agent)
-    client = TestClient(create_app(cfg, agent=agent))
-    data = base64.b64encode(b"RIFF").decode()
-    with client, client.websocket_connect("/ws?token=secret") as ws:
-        ws.receive_json()
-        cases = [("Кру, яка сьогодні погода?", {"text": "Яка сьогодні погода?"}),
-                 ("Це було круто", {"text": "", "ignored": True, "heard": "Це було круто"}),
-                 ("Кру", {"text": "", "wake_only": True})]
-        for i, (heard, expected) in enumerate(cases):
-            whisper.words = heard
-            ws.send_json({"type": "voice_in", "id": f"w{i}", "data": data, "wake": "require"})
-            got, _ = _until(ws, "voice_text")
-            assert {k: v for k, v in got.items() if k not in {"type", "id"}} == expected, heard
-        assert "Кру" in whisper.calls[-1]["initial_prompt"]  # Whisper знає, як пишеться ім'я
-        whisper.words = "Кру, без режиму"  # звичайний запис (утримання робота) — текст як є
-        ws.send_json({"type": "voice_in", "id": "plain", "data": data})
-        assert _until(ws, "voice_text")[0]["text"] == "Кру, без режиму"
-        assert whisper.calls[-1]["initial_prompt"] is None
-
-
-def test_ws_wake_two_models(cfg, voice_ready):
-    """Ім'я перевіряє легка модель (швидко, на кожну фразу), а задачу після імені — точна."""
-    cfg.token = "secret"
-    agent = Agent(cfg, llm=FakeLLM([]))
-    full, _ = voice_ready(agent)
-    fast = FakeWhisper()
-    agent.voice._stt_fast = fast
-    assert agent.voice.two_pass  # типово small для імені, turbo для задачі
-    client = TestClient(create_app(cfg, agent=agent))
-    data = base64.b64encode(b"RIFF").decode()
-    with client, client.websocket_connect("/ws?token=secret") as ws:
-        ws.receive_json()
-        fast.words, full.words = "Ми говорили про кіно", "не має викликатись"
-        ws.send_json({"type": "voice_in", "id": "a", "data": data, "wake": "require"})
-        assert _until(ws, "voice_text")[0].get("ignored") is True
-        assert full.calls == [] and fast.calls[-1]["beam_size"] == 1  # без імені точна модель не працює
-        fast.words, full.words = "Кру, яка погода в кеві", "Кру, яка погода в Києві?"
-        ws.send_json({"type": "voice_in", "id": "b", "data": data, "wake": "require"})
-        assert _until(ws, "voice_text")[0]["text"] == "Яка погода в Києві?"
-        fast.words, full.words = "Привет, Кру!", "Привіт."
-        ws.send_json({"type": "voice_in", "id": "c", "data": data, "wake": "require"})
-        assert _until(ws, "voice_text")[0].get("wake_only") is True
-        assert len(full.calls) == 1  # лише ім'я — друге розпізнавання не потрібне
 
 
 def test_speech_chunks():
@@ -422,7 +376,7 @@ def test_followup_noise(cfg, voice_ready):
 
 
 def test_preload_loads_models_with_threads(cfg, monkeypatch):
-    """При старті сервера моделі завантажуються заздалегідь, з потоками CPU (типово — ~фізичні ядра)."""
+    """При старті сервера модель завантажується заздалегідь, з потоками CPU (типово — ~фізичні ядра)."""
     made = []
     fw = types.ModuleType("faster_whisper")
     fw.WhisperModel = lambda name, **kw: made.append((name, kw)) or object()
@@ -431,9 +385,9 @@ def test_preload_loads_models_with_threads(cfg, monkeypatch):
     monkeypatch.setattr(voice_mod.os, "cpu_count", lambda: 16)
     v = Voice(cfg)
     v.preload()
-    assert [(n, kw["cpu_threads"], kw["compute_type"]) for n, kw in made] == [("turbo", 8, "int8"), ("small", 8, "int8")]
+    assert [(n, kw["cpu_threads"], kw["compute_type"]) for n, kw in made] == [("turbo", 8, "int8")]
     v.preload()  # уже завантажено — вдруге не вантажить
-    assert len(made) == 2
+    assert len(made) == 1
     cfg.whisper_threads = 3
     v2 = Voice(cfg)
     v2.preload()

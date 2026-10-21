@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Голос для агента Kru: розпізнавання мовлення (faster-whisper) і озвучення відповідей (Piper, український голос).
-# Обидві моделі працюють на процесорі — відеопам'ять лишається моделі агента.
+# Голос для агента Kru: розпізнавання мовлення (faster-whisper). Озвучення відповідей — HolosTTS: deploy/holos.sh.
+# Модель працює на процесорі — відеопам'ять лишається моделі агента.
 #   deploy/voice.sh install [модель]  — встановити (модель Whisper: turbo — типово, small — легша, large-v3 — найточніша)
 #   deploy/voice.sh status            — що встановлено
 #   deploy/voice.sh off | on          — вимкнути / увімкнути голос, не видаляючи моделей
@@ -8,12 +8,6 @@ set -euo pipefail
 
 VENV="${HOME}/.local/share/kru/venv"
 ENV_FILE="${HOME}/.config/kru.env"
-DATA_DIR="$(grep -s '^KRU_DATA_DIR=' "${ENV_FILE}" | cut -d= -f2- || true)"
-DATA_DIR="${DATA_DIR:-${HOME}/.local/share/kru}"
-DATA_DIR="${DATA_DIR/#\~/${HOME}}"
-VOICE_DIR="${DATA_DIR}/voice"
-VOICE="uk_UA-ukrainian_tts-medium"
-VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/uk/uk_UA/ukrainian_tts/medium/${VOICE}.onnx"
 
 set_key() {  # set_key KEY VALUE — оновити (або додати) KRU_KEY у конфігу агента
   [[ -f "${ENV_FILE}" ]] || return 0
@@ -38,33 +32,15 @@ case "${1:-}" in
   install)
     need_venv
     model="${2:-turbo}"
-    echo "→ Встановлюю faster-whisper і piper-tts…"
-    "${VENV}/bin/pip" install --quiet --disable-pip-version-check "faster-whisper>=1.1" "piper-tts>=1.3"
-    echo "→ Український голос Piper (${VOICE}, ~75 МБ)…"
-    mkdir -p "${VOICE_DIR}"
-    for ext in onnx onnx.json; do
-      [[ -s "${VOICE_DIR}/${VOICE}.${ext}" ]] && continue
-      curl -fL --progress-bar -o "${VOICE_DIR}/${VOICE}.${ext}.part" "${VOICE_URL%.onnx}.${ext}"
-      mv "${VOICE_DIR}/${VOICE}.${ext}.part" "${VOICE_DIR}/${VOICE}.${ext}"
-    done
+    echo "→ Встановлюю faster-whisper…"
+    "${VENV}/bin/pip" install --quiet --disable-pip-version-check "faster-whisper>=1.1"
     echo "→ Модель розпізнавання Whisper «${model}» (завантажується один раз)…"
     "${VENV}/bin/python" -c "import sys; from faster_whisper import WhisperModel; WhisperModel(sys.argv[1], device='cpu', compute_type='int8')" "${model}"
-    echo "→ Легка модель Whisper «small» для режиму «Кру» (швидка перевірка імені)…"
-    "${VENV}/bin/python" -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
-    echo "→ Перевіряю озвучення…"
-    "${VENV}/bin/python" - "${VOICE_DIR}/${VOICE}.onnx" <<'PY'
-import io, sys, wave
-from piper import PiperVoice
-voice = PiperVoice.load(sys.argv[1])
-buf = io.BytesIO()
-with wave.open(buf, "wb") as w:
-    voice.synthesize_wav("Привіт! Я тебе чую.", w)
-print(f"   гаразд: {len(buf.getvalue()) // 1024} КБ звуку")
-PY
     set_key VOICE auto
     set_key WHISPER_MODEL "${model}"
     restart_agent
     echo "Готово. Утримуй персонажа (або 🎤 у панелі) і говори; у Telegram — надсилай голосові."
+    echo "Озвучення відповідей — HolosTTS: deploy/holos.sh start"
     ;;
   off)
     set_key VOICE off
@@ -76,14 +52,8 @@ PY
     ;;
   status)
     need_venv
-    "${VENV}/bin/python" - <<PY
-import importlib.util as u, pathlib
-ok = lambda m: "так" if u.find_spec(m) else "ні"
-print("faster-whisper:", ok("faster_whisper"))
-print("piper-tts:     ", ok("piper"))
-print("голос:         ", "так" if pathlib.Path("${VOICE_DIR}/${VOICE}.onnx").is_file() else "ні", "(${VOICE_DIR})")
-PY
-    grep -sE '^KRU_(VOICE|WHISPER_MODEL|PIPER_SPEAKER)=' "${ENV_FILE}" || echo "KRU_VOICE не задано (типово — auto)"
+    "${VENV}/bin/python" -c 'import importlib.util as u; print("faster-whisper:", "так" if u.find_spec("faster_whisper") else "ні")'
+    grep -sE '^KRU_(VOICE|WHISPER_MODEL|TTS_URL)=' "${ENV_FILE}" || echo "KRU_VOICE не задано (типово — auto)"
     ;;
   *)
     sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'

@@ -18,13 +18,13 @@
   {"type": "chat_list"} | {"type": "chat_open", "id"} | {"type": "chat_delete", "id"}
   {"type": "chat_rename", "id", "title"} | {"type": "chat_export", "id"}  — Markdown розмови
   {"type": "chat_search", "query": "відпустка море"}  — пошук за назвою й текстом розмов
-  {"type": "voice_in", "id": "...", "data": "<base64 WAV/OGG>", "wake": "require"}  — розпізнати сказане (faster-whisper);
-      wake=require — режим «завжди слухаю»: фраза має починатися з імені «Кру», яке прибирається з тексту;
-      wake=followup — уточнення без імені: те, що Whisper «чує» в шумі, повертається як ignored;
-      wake=detected — фразу-активатор («Чуєш, Кру») уже впізнала модель на ПК: звертання й ім'я прибираються
+  {"type": "voice_in", "id": "...", "data": "<base64 WAV/OGG>", "wake": "detected"}  — розпізнати сказане (Whisper);
+      wake=detected — режим «завжди слухаю»: фразу-активатор («Чуєш, Кру») уже впізнала модель на ПК —
+      звертання й ім'я прибираються; лише фраза без питання → wake_only;
+      wake=followup — уточнення без імені: те, що Whisper «чує» в шумі, повертається як ignored
   {"type": "wake_model"}  — модель своєї фрази для робота (kru wakeword train) → wake_model з files (base64)
   {"type": "tts", "id": "...", "text": "...", "voice": "Speaker_67", "effect": "natural", "speed": 1.0}  — озвучити
-      (HolosTTS або Piper); voice/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_TTS_VOICE, KRU_VOICE_EFFECT)
+      (HolosTTS); voice/effect/speed необов'язкові: типово — з налаштувань сервера (KRU_TTS_VOICE, KRU_VOICE_EFFECT)
       stream=true — частинами по реченнях: кілька tts_audio з part (0, 1, …) і last; {"type": "tts_stop", "id"} — досить
   {"type": "ping"}
 
@@ -33,7 +33,7 @@
 
 Сервер → клієнт:
   {"type": "hello", "name": "Kru", "model": ..., "version": ..., "user": "owner", "role": "admin",
-   "voice": {"stt": bool, "tts": bool, "engine": "holos|piper|", "voices": [назви голосів], "effects": {id: назва}}}
+   "voice": {"stt": bool, "tts": bool, "engine": "holos|", "voices": [назви голосів], "effects": {id: назва}}}
   {"type": "status", "state": "thinking|working|waiting_confirm|idle", ...}
   {"type": "thinking", "text": "..."}         — потік міркувань моделі
   {"type": "token", "text": "..."}            — потік тексту відповіді (чернетка)
@@ -54,7 +54,7 @@
   {"type": "chat_search", "query", "chats": [{id, title, count, created_at, updated_at, snippet}]}
   {"type": "chat_error", "message"}
   {"type": "voice_text", "id", "text", "ignored"?: true, "wake_only"?: true} | {"type": "voice_error", "id", "message"}
-      ignored — імені не почуто (heard — що почуто); wake_only — лише «Кру» без питання
+      ignored — схоже на шум (heard — що почуто); wake_only — лише звертання без питання
   {"type": "tts_audio", "id", "format": "wav", "data": "<base64>"} | {"type": "tts_error", "id", "message"}
   {"type": "error", "message": "..."}
   {"type": "pong"}
@@ -83,7 +83,7 @@ from .scheduler import Scheduler
 from .tools import ToolError
 from .tools.files import shared_file
 from .users import User, UserStore, workspace_for
-from .voice import MAX_AUDIO, WAKE_PROMPT, VoiceError, is_noise_text, strip_detected, strip_wake
+from .voice import MAX_AUDIO, WAKE_PROMPT, VoiceError, is_noise_text, strip_detected
 
 log = logging.getLogger("kru.server")
 
@@ -358,7 +358,7 @@ class Connection:
         if kind == "tts" and msg.get("stream"):
             self._tts_now = vid
             parts = voice.speak_parts(str(msg.get("text") or ""), msg.get("voice"), msg.get("effect"),
-                                      msg.get("speed"), msg.get("speaker"))
+                                      msg.get("speed"))
             try:
                 async with contextlib.aclosing(parts):
                     i = 0
@@ -374,7 +374,7 @@ class Connection:
         if kind == "tts":
             try:
                 audio = await voice.speak(str(msg.get("text") or ""), msg.get("voice"), msg.get("effect"),
-                                          msg.get("speed"), msg.get("speaker"))
+                                          msg.get("speed"))
             except VoiceError as e:
                 await self.send({"type": "tts_error", "id": vid, "message": str(e)})
                 return
@@ -386,16 +386,10 @@ class Connection:
             if len(raw) > MAX_AUDIO * 4 // 3 + 4:
                 raise VoiceError("Запис задовгий")
             data = base64.b64decode(raw, validate=True)
-            # у режимі «завжди слухаю» підказуємо Whisper, як пишеться ім'я (не нав'язуючи його на початок фрази)
-            wake = msg.get("wake") == "require"
             detected = msg.get("wake") == "detected"  # фразу-активатор уже впізнала своя модель на ПК
             followup = msg.get("wake") == "followup"  # уточнення без імені: на шумі Whisper любить «вигадувати»
-            text = await voice.transcribe(data, WAKE_PROMPT if wake or detected else None, fast=wake,
-                                          strict=followup)
-            if wake and voice.two_pass and (found := strip_wake(text))[0] and found[1]:
-                # ім'я почуто легкою моделлю — саму задачу розпізнає точна (якщо й вона чує ім'я)
-                full = await voice.transcribe(data, WAKE_PROMPT)
-                text = full if strip_wake(full)[0] else text
+            # підказуємо Whisper, як пишеться ім'я (не нав'язуючи його на початок фрази)
+            text = await voice.transcribe(data, WAKE_PROMPT if detected else None, strict=followup)
         except (binascii.Error, ValueError):
             await self.send({"type": "voice_error", "id": vid, "message": "пошкоджений запис"})
             return
@@ -411,15 +405,6 @@ class Connection:
         if followup and is_noise_text(text):
             log.info("Режим «Кру»: уточнення схоже на шум — ігнорую")
             reply.update(text="", ignored=True, heard=text[:200])
-        if msg.get("wake") == "require":  # режим «завжди слухаю»: фраза має починатися з імені
-            found, rest = strip_wake(text)
-            if not found:
-                log.info("Режим «Кру»: імені не почуто — ігнорую")
-                reply.update(text="", ignored=True, heard=text[:200])  # heard — для діагностики на клієнті
-            elif not rest:
-                reply.update(text="", wake_only=True)  # «Кру…» і пауза — клієнт слухатиме питання далі
-            else:
-                reply["text"] = rest
         log.info("Розпізнано голос: %d символів", len(reply["text"]))
         await self.send(reply)
 

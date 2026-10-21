@@ -764,9 +764,8 @@ def run_selftest(app: QApplication, report_path: str) -> int:
     step(50, lambda: check("voice_settings", voice_settings_flow))
 
     def wake_logic_check():
-        """Логіка «Кру» на синтетичному звуці: ім'я → запис до паузи; уточнення; тайм-аут."""
+        """Логіка «Кру» на синтетичному звуці: фраза → запис до паузи; уточнення; тайм-аут."""
         import array
-        import json as _json
         import math as _m
 
         from .wake import WakeLogic
@@ -779,26 +778,21 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         def quiet(sec):
             return b"\0\0" * int(rate * sec)
 
-        class FakeRec:  # «чує» ім'я після ~0,3 с гучного звуку
+        class FakeDet:  # «чує» фразу після ~0,3 с гучного звуку
+            threshold = 0.5
             loud = 0
 
-            def Reset(self):
+            def reset(self):
                 self.loud = 0
 
-            def AcceptWaveform(self, frame):
+            def feed(self, frame):
                 self.loud += max(abs(x) for x in array.array("h", frame)) > 2000
-                return False
+                return 1.0 if self.loud >= 10 else 0.0
 
-            def PartialResult(self):
-                return _json.dumps({"partial": "кру" if self.loud >= 10 else "[unk]"})
-
-            def Result(self):
-                return "{}"
-
-        lg = WakeLogic(rate, FakeRec(), "medium")
+        lg = WakeLogic(rate, FakeDet())
         need(lg.feed(quiet(1.0)) == [], "тиша щось викликала")
         ev = lg.feed(tone(2.0))
-        need([e[0] for e in ev] == ["wake"], f"ім'я: {ev}")
+        need([e[0] for e in ev] == ["wake"], f"фраза: {ev}")
         ev = lg.feed(quiet(1.5))
         need(len(ev) == 1 and ev[0][0] == "utterance" and ev[0][2] is True, f"фраза: {[e[0] for e in ev]}")
         need(3.0 < (len(ev[0][1]) - 44) / 2 / rate < 3.6, "довжина запису (з початком фрази)")
@@ -817,21 +811,14 @@ def run_selftest(app: QApplication, report_path: str) -> int:
              f"уточнення після шуму: {ev}")
         lg.pause()
         need(lg.feed(tone(2.0)) == [], "на паузі слухає")
-        # без Vosk (ім'я шукає сервер): кожна фраза — на сервер, клацання — ні
-        lg = WakeLogic(rate, None)
-        need(lg.feed(quiet(1.0) + tone(0.1) + quiet(1.5)) == [], "клацання пішло на сервер")
-        ev = lg.feed(tone(1.5) + quiet(1.5))
-        need(len(ev) == 1 and ev[0][0] == "utterance" and ev[0][2] is True, f"фраза на сервер: {ev}")
-        need(1.6 < (len(ev[0][1]) - 44) / 2 / rate < 3.3, "довжина фрази для сервера")
-        need(lg.feed(tone(1.0) + quiet(1.5)) == [], "поки сервер думає — не надсилає ще")
-        lg.listen()
-        need([e[0] for e in lg.feed(tone(16.0))] == ["utterance"], "задовга фраза не обрізалась")
+        lg = WakeLogic(rate, FakeDet())
+        need([e[0] for e in lg.feed(tone(16.0))] == ["wake", "utterance"], "задовга фраза не обрізалась")
         lg.feed(quiet(2.0))
         lg.listen()
         # тихі склади посеред фрази (гучніші за шум, але тихіші за поріг початку) не рвуть її
         soft = array.array("h", [int(420 * _m.sin(2 * _m.pi * 220 * i / rate)) for i in range(int(rate * 1.5))]).tobytes()
         ev = lg.feed(tone(0.5) + soft + tone(0.3) + quiet(1.5))
-        need([e[0] for e in ev] == ["utterance"] and (len(ev[0][1]) - 44) / 2 / rate > 2.2,
+        need([e[0] for e in ev] == ["wake", "utterance"] and (len(ev[-1][1]) - 44) / 2 / rate > 2.2,
              f"фраза обірвалась на тихому: {[(e[0], (len(e[1]) - 44) / 2 / rate if len(e) > 1 else 0) for e in ev]}")
         return "ok"
 
@@ -875,8 +862,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         need(max(scores) > 0.9, f"фраза не впізнана: {max(scores):.2f}")
         det.reset()
         need(det.feed(quiet[:2560]) < 0.1, "після reset пам'ятає стару фразу")
-        lg = WakeLogic(16000, None)
-        lg.detector = det
+        lg = WakeLogic(16000, det)
         ev = lg.feed(bytes(16000) + loud)
         need([e[0] for e in ev] == ["wake"], f"фраза → wake: {ev}")
         lg.listen()
@@ -915,13 +901,17 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         return "ok"
 
     def wake_flow():
-        """«Кру, яка погода?» → сервер → задача → відповідь голосом (навіть коли «відповідати голосом: ні») →
-        уточнення без імені; хибне спрацювання — мовчки; подвійний клік вимикає."""
+        """«Чуєш, Кру, яка погода?»: модель фрази — із сервера, фразу шукає ПК, сервер прибирає звертання →
+        задача → відповідь голосом (навіть коли «відповідати голосом: ні») → уточнення без фрази;
+        хибне спрацювання — мовчки; подвійний клік вимикає; удруге модель не забирає."""
+        import base64 as _b64
+        import tempfile
         from pathlib import Path
 
         from PySide6.QtCore import QObject, Signal
 
-        from . import wake as wakemod
+        from . import wakeword as wwmod
+        from .audio import make_wav
 
         class FakeWake(QObject):
             woke = Signal()
@@ -935,7 +925,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
                 super().__init__()
                 self.active, self.level, self.calls = False, 0.3, []
 
-            def start(self, path, sens, phrase_model=None):
+            def start(self, phrase_model, sens):
                 self.active, self.phrase_model = True, phrase_model
                 self.calls.append(("start", sens))
                 return True
@@ -954,11 +944,13 @@ def run_selftest(app: QApplication, report_path: str) -> int:
                 self.calls.append(("pause",))
 
         sent, played = [], []
-        orig = (win.conn.send, win.wake, wakemod.installed_model, win.player.play, win.chime.play)
+        orig = (win.conn.send, win.wake, win.player.play, win.chime.play)
+        ww_orig = (wwmod.folder, wwmod.available)
+        tmp = Path(tempfile.mkdtemp(prefix="kru-ww-"))
+        wwmod.folder, wwmod.available = (lambda: tmp), (lambda: "")
         win.conn.send = lambda msg: sent.append(msg) or True
         fake = FakeWake()
         win._wire_wake(fake)
-        wakemod.installed_model = lambda: Path("/fake/vosk-model")
         win.chime.play = lambda wav, volume=1.0: played.append("chime") or True
 
         def fake_play(wav, volume=1.0):
@@ -975,22 +967,32 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             win.settings.voice_reply = "off"  # у режимі «Кру» відповідь однаково голосом
             win._set_voice_caps({"stt": True, "tts": True})
             win.robot.double_clicked.emit()
-            need(fake.active and win.robot.wake_mode and win.act_wake.isChecked(), "режим не ввімкнувся")
+            need(not fake.active and not win.robot.wake_mode, "увімкнувся без навченої фрази")
+            win._set_voice_caps({"stt": True, "tts": True, "wakeword": {"phrase": "Чуєш, Кру", "version": 5}})
+            sent.clear()
+            win.robot.double_clicked.emit()
+            need(sent and sent[-1] == {"type": "wake_model"} and not fake.active, f"модель фрази: {sent[-1:]}")
+            b64 = lambda data: _b64.b64encode(data).decode()  # noqa: E731
+            win.on_event({"type": "wake_model", "phrase": "Чуєш, Кру", "version": 5, "threshold": 0.6,
+                          "files": {"model": b64(b"npz"), "melspectrogram": b64(b"mel"), "embedding": b64(b"emb")}})
+            need(fake.active and fake.phrase_model == tmp and wwmod.cached_version() == 5,
+                 f"запуск зі своєю фразою: {fake.calls[-1:]}, {wwmod.cached_version()}")
+            need(win.robot.wake_mode and win.act_wake.isChecked(), "режим не ввімкнувся")
             need(win.settings.wake_enabled, "не запам'ятав увімкнення")
             fake.woke.emit()
-            need(win.robot.state == "listening" and "chime" in played, f"почув ім'я: {win.robot.state}")
+            need(win.robot.state == "listening" and "chime" in played, f"почув фразу: {win.robot.state}")
             fake.utterance.emit(b"RIFF-not-really", True)
             vin = sent[-1]
-            need(vin["type"] == "voice_in" and vin["wake"] == "require", f"запит: {vin}")
+            need(vin["type"] == "voice_in" and vin["wake"] == "detected", f"запит: {vin}")
             win.on_event({"type": "voice_text", "id": vin["id"], "text": "", "ignored": True})
             need(fake.calls[-1] == ("listen",) and not any(m["type"] == "task" for m in sent), "хибне спрацювання")
             fake.utterance.emit(b"RIFF", True)
             win.on_event({"type": "voice_text", "id": sent[-1]["id"], "text": "", "wake_only": True})
-            need(win.robot.state == "listening", "«Кру…» з паузою — має слухати питання")
+            need(win.robot.state == "listening", "«Чуєш, Кру…» з паузою — має слухати питання")
             QTest_wait(400)
             need(fake.calls[-1] == ("await", 6), f"чекає питання: {fake.calls[-1]}")
             fake.utterance.emit(b"RIFF", False)
-            need(sent[-1].get("wake") == "followup", "уточнення без вимоги імені")
+            need(sent[-1].get("wake") == "followup", "уточнення без фрази")
             win.on_event({"type": "voice_text", "id": sent[-1]["id"], "text": "Яка сьогодні погода?"})
             task = sent[-1]
             need(task["type"] == "task" and task["text"] == "Яка сьогодні погода?", f"задача: {task}")
@@ -998,10 +1000,6 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             win.on_event({"type": "status", "state": "idle"})
             tts = sent[-1]
             need(tts["type"] == "tts", "відповідь не озвучується")
-            import base64 as _b64
-
-            from .audio import make_wav
-
             win.on_event({"type": "tts_audio", "id": tts["id"], "format": "wav",
                           "data": _b64.b64encode(make_wav(b"\0\0" * 800, 16000)).decode()})
             need(("pause",) in fake.calls, "слухав сам себе під час відповіді")
@@ -1011,40 +1009,15 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             win.robot.double_clicked.emit()
             need(not fake.active and not win.robot.wake_mode and not win.act_wake.isChecked(), "не вимкнувся")
             need(not win.settings.wake_enabled, "вимкнення не запам'яталось")
-            # своя фраза («Чуєш, Кру»): модель — із сервера, фразу шукає ПК, сервер лише прибирає звертання
-            import tempfile
-
-            from . import wakeword as wwmod
-
-            tmp = Path(tempfile.mkdtemp(prefix="kru-ww-"))
-            ww_orig = (wwmod.folder, wwmod.available)
-            wwmod.folder, wwmod.available = (lambda: tmp), (lambda: "")
-            win.settings.wake_engine = "phrase"
-            try:
-                win._set_voice_caps({"stt": True, "tts": True, "wakeword": {"phrase": "Чуєш, Кру", "version": 5}})
-                sent.clear()
-                win.robot.double_clicked.emit()
-                need(sent and sent[-1] == {"type": "wake_model"} and not fake.active, f"модель фрази: {sent[-1:]}")
-                b64 = lambda data: _b64.b64encode(data).decode()  # noqa: E731
-                win.on_event({"type": "wake_model", "phrase": "Чуєш, Кру", "version": 5, "threshold": 0.6,
-                              "files": {"model": b64(b"npz"), "melspectrogram": b64(b"mel"), "embedding": b64(b"emb")}})
-                need(fake.active and fake.phrase_model == tmp and wwmod.cached_version() == 5,
-                     f"запуск зі своєю фразою: {fake.calls[-1:]}, {wwmod.cached_version()}")
-                fake.woke.emit()
-                fake.utterance.emit(b"RIFF", True)
-                need(sent[-1].get("wake") == "detected", f"фразу впізнав ПК: {sent[-1]}")
-                win.robot.double_clicked.emit()
-                sent.clear()
-                win.robot.double_clicked.emit()  # модель уже є (та сама версія) — без запиту до сервера
-                need(fake.active and not any(m.get("type") == "wake_model" for m in sent), "забирав модель удруге")
-                win.robot.double_clicked.emit()
-            finally:
-                wwmod.folder, wwmod.available = ww_orig
-                win.settings.wake_engine = "server"
+            sent.clear()
+            win.robot.double_clicked.emit()  # модель уже є (та сама версія) — без запиту до сервера
+            need(fake.active and not any(m.get("type") == "wake_model" for m in sent), "забирав модель удруге")
+            win.robot.double_clicked.emit()
         finally:
+            wwmod.folder, wwmod.available = ww_orig
             win.conn.send = orig[0]
             win._wire_wake(orig[1])
-            wakemod.installed_model, win.player.play, win.chime.play = orig[2], orig[3], orig[4]
+            win.player.play, win.chime.play = orig[2], orig[3]
             win.settings.voice_reply = voice_reply
             win.settings.wake_enabled = False
             win.robot.wake_mode = False
@@ -1058,23 +1031,17 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
         QTest.qWait(ms)
 
-    def vosk_check():
-        import vosk
-
-        need(hasattr(vosk, "KaldiRecognizer") and hasattr(vosk, "Model"), "vosk неповний")
-        return getattr(vosk, "__version__", "ok")
-
     def listener_start():
-        """Справжній WakeListener (потік + черга подій) зі штучним мікрофоном і розпізнавачем:
-        модель вантажиться у фоні, інтерфейс не завмирає, ім'я → сигнал woke, стоп — без падіння."""
+        """Справжній WakeListener (потік + черга подій) зі штучним мікрофоном і детектором фрази:
+        модель вантажиться у фоні, інтерфейс не завмирає, фраза → сигнал woke, стоп — без падіння."""
         import array
-        import json as _json
         import math as _m
 
         from PySide6.QtCore import QByteArray, QObject, Signal
 
         from . import audio as audiomod
         from . import wake as wakemod
+        from . import wakeword as wwmod
 
         rate = 16000
 
@@ -1100,33 +1067,26 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             def stop(self):
                 pass
 
-        class FakeRec:
-            loud = 0
+        class FakeDet:
+            threshold = 0.5
 
-            def Reset(self):
+            def __init__(self, path, sensitivity):
+                import time as _t
+
+                _t.sleep(0.5)  # як справжня модель: вантажиться помітний час — інтерфейс має жити
                 self.loud = 0
 
-            def AcceptWaveform(self, frame):
+            def reset(self):
+                self.loud = 0
+
+            def feed(self, frame):
                 self.loud += max(abs(x) for x in array.array("h", frame)) > 2000
-                return False
-
-            def PartialResult(self):
-                return _json.dumps({"partial": "кру" if self.loud >= 10 else ""})
-
-            def Result(self):
-                return "{}"
+                return 1.0 if self.loud >= 10 else 0.0
 
         src = FakeSource()
-        state["listener_orig"] = (audiomod.open_input, wakemod.make_recognizer)
+        state["listener_orig"] = (audiomod.open_input, wwmod.Detector)
         audiomod.open_input = lambda parent=None, rate=16000: (src, ("Int16", 1, rate))
-
-        def slow_model(path, r):
-            import time as _t
-
-            _t.sleep(0.5)  # як справжня модель: вантажиться помітний час — інтерфейс має жити
-            return object(), FakeRec(), True
-
-        wakemod.make_recognizer = slow_model
+        wwmod.Detector = FakeDet
         lst = wakemod.WakeListener()
         got = state["listener_got"] = []
         lst.ready.connect(lambda: got.append("ready"))
@@ -1152,7 +1112,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
     def listener_check():
         from . import audio as audiomod
-        from . import wake as wakemod
+        from . import wakeword as wwmod
 
         lst, got = state["listener"], state["listener_got"]
         try:
@@ -1161,13 +1121,12 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             lst.stop()
             need(not lst.active, "не зупинився")
         finally:
-            audiomod.open_input, wakemod.make_recognizer = state.pop("listener_orig")
+            audiomod.open_input, wwmod.Detector = state.pop("listener_orig")
         return got
 
     step(50, lambda: check("wake_listener_start", listener_start))
     step(900, lambda: check("wake_listener_feed", listener_feed))
     step(900, lambda: check("wake_listener", listener_check))
-    step(50, lambda: check("vosk_import", vosk_check))
     step(50, lambda: check("double_click", double_click_check))
     step(50, lambda: check("wake_flow", wake_flow))
     step(50, voice_cleanup)

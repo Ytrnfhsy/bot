@@ -1,8 +1,7 @@
-"""Голос: розпізнавання мовлення (faster-whisper) і озвучення відповідей.
+"""Голос: розпізнавання мовлення (faster-whisper) і озвучення відповідей (HolosTTS).
 
-Озвучення — HolosTTS (окремий Docker-сервіс, deploy/holos.sh start; природний український голос, 27 дикторів)
-або, якщо його немає, Piper. Усе працює на CPU (відеопам'ять зайнята моделлю агента).
-Whisper і Piper — deploy/voice.sh install; моделі завантажуються при першому зверненні.
+Озвучення — HolosTTS (окремий Docker-сервіс, deploy/holos.sh start; природний український голос, 27 дикторів).
+Розпізнавання — Whisper (deploy/voice.sh install); модель завантажується при старті сервера.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ import re
 import threading
 import time
 import wave
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -24,8 +22,6 @@ log = logging.getLogger("kru.voice")
 
 MAX_AUDIO = 10 * 1024 * 1024  # ~5 хв мовлення у WAV 16 кГц
 MAX_SPEECH = 1500  # стільки символів відповіді озвучуємо (довше — до кінця речення)
-DEFAULT_VOICE = "uk_UA-ukrainian_tts-medium.onnx"
-PIPER_SPEAKERS = ["Лада", "Микита", "Тетяна"]  # дикторки/диктори голосу ukrainian_tts
 VOICES_TTL = 300.0  # як часто перепитувати HolosTTS про список голосів
 
 
@@ -43,8 +39,6 @@ class Voice:
     def __init__(self, config) -> None:
         self.config = config
         self._stt: Any = None
-        self._stt_fast: Any = None  # легка модель для перевірки імені (whisper_wake_model)
-        self._tts: Any = None
         self._stt_lock = asyncio.Lock()
         self._load_lock = threading.Lock()  # фонове завантаження при старті й перше голосове — не вдвох
         self._tts_lock = asyncio.Lock()
@@ -57,35 +51,20 @@ class Voice:
         return str(self.config.voice).lower() not in {"off", "false", "0", "no"}
 
     @property
-    def voice_path(self) -> Path:
-        return Path(self.config.piper_voice).expanduser() if self.config.piper_voice else \
-            self.config.data_dir / "voice" / DEFAULT_VOICE
-
-    @property
     def stt_ok(self) -> bool:
         return self.enabled and _importable("faster_whisper")
 
     @property
-    def piper_ok(self) -> bool:
-        return _importable("piper") and self.voice_path.is_file()
-
-    @property
     def engine(self) -> str:
-        """Чим озвучувати: holos (сервіс HolosTTS), piper або "" — нічим."""
-        if not self.enabled:
-            return ""
-        if self.config.tts_url:
-            return "holos"
-        return "piper" if self.piper_ok else ""
+        """Чим озвучувати: holos (сервіс HolosTTS) або "" — нічим."""
+        return "holos" if self.enabled and self.config.tts_url else ""
 
     @property
     def tts_ok(self) -> bool:
         return bool(self.engine)
 
     def voices(self) -> list[str]:
-        if self.engine == "holos":
-            return list(self._holos_voices)
-        return PIPER_SPEAKERS[:] if self.engine == "piper" and DEFAULT_VOICE in self.voice_path.name else []
+        return list(self._holos_voices) if self.engine else []
 
     async def refresh_voices(self, force: bool = False) -> None:
         """Список голосів HolosTTS (кешується на кілька хвилин; сервіс міг ще не запуститися — тоді пізніше)."""
@@ -111,56 +90,40 @@ class Voice:
         ww = wakeword.info(self.config)
         return {"stt": self.stt_ok, "tts": self.tts_ok, "engine": self.engine,
                 "wakeword": {"phrase": ww.get("phrase"), "version": ww.get("version")} if ww else None,
-                "effects": {k: e.title for k, e in EFFECTS.items()}, "voices": self.voices(),
-                "speakers": self.voices() if self.engine == "piper" else []}  # speakers — для старих клієнтів
+                "effects": {k: e.title for k, e in EFFECTS.items()}, "voices": self.voices()}
 
     # ---------------- розпізнавання ----------------
-    @property
-    def two_pass(self) -> bool:
-        """Ім'я перевіряє окрема легка модель, а задачу — основна."""
-        wake = self.config.whisper_wake_model.strip()
-        return bool(wake) and wake != self.config.whisper_model
+    def _load_stt(self):
+        with self._load_lock:  # фонове завантаження при старті й перше голосове — не вдвох
+            if self._stt is None:
+                from faster_whisper import WhisperModel
 
-    def _load_stt(self, fast: bool = False):
-        fast = fast and self.two_pass
-        with self._load_lock:
-            return self._load_stt_locked(fast)
-
-    def _load_stt_locked(self, fast: bool):
-        if (self._stt_fast if fast else self._stt) is None:
-            from faster_whisper import WhisperModel
-
-            name = self.config.whisper_wake_model.strip() if fast else self.config.whisper_model
-            threads = self.config.whisper_threads or max(4, (os.cpu_count() or 8) // 2)
-            log.info("Завантажую модель розпізнавання мовлення %s (%s, потоків %d)…", name,
-                     self.config.whisper_device, threads)
-            started = time.monotonic()
-            model = WhisperModel(name, device=self.config.whisper_device, compute_type="int8", cpu_threads=threads)
-            log.info("Модель %s готова за %.1f с", name, time.monotonic() - started)
-            if fast:
-                self._stt_fast = model
-            else:
-                self._stt = model
-        return self._stt_fast if fast else self._stt
+                name = self.config.whisper_model
+                threads = self.config.whisper_threads or max(4, (os.cpu_count() or 8) // 2)
+                log.info("Завантажую модель розпізнавання мовлення %s (%s, потоків %d)…", name,
+                         self.config.whisper_device, threads)
+                started = time.monotonic()
+                self._stt = WhisperModel(name, device=self.config.whisper_device, compute_type="int8",
+                                         cpu_threads=threads)
+                log.info("Модель %s готова за %.1f с", name, time.monotonic() - started)
+            return self._stt
 
     def preload(self) -> None:
-        """Завантажити моделі розпізнавання заздалегідь (при старті сервера), щоб перше голосове не чекало."""
+        """Завантажити модель розпізнавання заздалегідь (при старті сервера), щоб перше голосове не чекало."""
         if not self.stt_ok:
             return
         try:
             self._load_stt()
-            if self.two_pass:
-                self._load_stt(fast=True)
         except Exception:  # noqa: BLE001 — не вийшло зараз: спробуємо при першому голосовому
             log.exception("Не вдалося заздалегідь завантажити модель розпізнавання")
 
-    def _transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False, strict: bool = False) -> str:
-        model = self._load_stt(fast)
+    def _transcribe(self, data: bytes, prompt: str | None = None, strict: bool = False) -> str:
+        model = self._load_stt()
         audio = decode_audio(data)
         started = time.monotonic()
         segments, _info = model.transcribe(
             audio, language=self.config.whisper_language or None, vad_filter=True,
-            beam_size=1 if fast else max(1, self.config.whisper_beam), initial_prompt=prompt,
+            beam_size=max(1, self.config.whisper_beam), initial_prompt=prompt,
             # короткі команди: без часових міток і без «підказки» з попереднього шматка — швидше
             without_timestamps=True, condition_on_previous_text=False,
         )
@@ -170,20 +133,18 @@ class Voice:
                         and getattr(s, "avg_logprob", 0.0) > -1.0]
         text = " ".join(seg.text.strip() for seg in segments).strip()
         log.info("Розпізнано за %.2f с (звук %.1f с, модель %s)", time.monotonic() - started,
-                 len(audio) / 16000, self.config.whisper_wake_model if fast and self.two_pass
-                 else self.config.whisper_model)
+                 len(audio) / 16000, self.config.whisper_model)
         return text
 
-    async def transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False,
-                         strict: bool = False) -> str:
-        """Аудіо (WAV, OGG/Opus з Telegram, MP3…) → текст. fast — легкою моделлю (перевірка імені)."""
+    async def transcribe(self, data: bytes, prompt: str | None = None, strict: bool = False) -> str:
+        """Аудіо (WAV, OGG/Opus з Telegram, MP3…) → текст. strict — відкинути те, що схоже на шум."""
         if not self.stt_ok:
             raise VoiceError("Розпізнавання мовлення не встановлено на сервері: deploy/voice.sh install")
         if len(data) > MAX_AUDIO:
             raise VoiceError("Запис задовгий")
         async with self._stt_lock:
             try:
-                return await asyncio.to_thread(self._transcribe, data, prompt, fast, strict)
+                return await asyncio.to_thread(self._transcribe, data, prompt, strict)
             except VoiceError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -191,25 +152,11 @@ class Voice:
                 raise VoiceError(f"Не вдалося розпізнати: {e}") from e
 
     # ---------------- озвучення ----------------
-    def _load_tts(self):
-        if self._tts is None:
-            from piper import PiperVoice
-
-            log.info("Завантажую голос %s…", self.voice_path.name)
-            self._tts = PiperVoice.load(str(self.voice_path))
-        return self._tts
-
-    def options(self, voice=None, effect=None, speed=None, speaker=None) -> tuple[str, str, float]:
+    def options(self, voice=None, effect=None, speed=None) -> tuple[str, str, float]:
         """Голос (назва), обробка й темп: з запиту клієнта, інакше — з налаштувань сервера."""
         from .voice_fx import EFFECTS
 
-        name = voice.strip() if isinstance(voice, str) else ""
-        if not name and isinstance(speaker, int) and not isinstance(speaker, bool) and 0 <= speaker < len(PIPER_SPEAKERS):
-            name = PIPER_SPEAKERS[speaker]  # старі клієнти надсилали номер диктора Piper
-        if not name:
-            name = self.config.tts_voice if self.engine == "holos" else (
-                PIPER_SPEAKERS[self.config.piper_speaker] if 0 <= self.config.piper_speaker < len(PIPER_SPEAKERS)
-                else "")
+        name = (voice.strip() if isinstance(voice, str) else "") or self.config.tts_voice
         fx = effect if effect in EFFECTS else (self.config.voice_effect if self.config.voice_effect in EFFECTS
                                                else "natural")
         try:
@@ -225,7 +172,7 @@ class Voice:
 
         try:
             return apply(audio, EFFECTS[effect])
-        except ImportError:  # без numpy (Piper зазвичай тягне його сам) — звичайний голос, а не помилка
+        except ImportError:  # без numpy — звичайний голос, а не помилка
             log.warning("numpy не встановлено — обробка «%s» недоступна, голос без неї", effect)
             return audio
 
@@ -254,54 +201,31 @@ class Voice:
             raise VoiceError(f"HolosTTS: {str(detail)[:200]}")
         return await asyncio.to_thread(self._effect, r.content, effect)
 
-    def _speak_piper(self, text: str, voice: str, effect: str, speed: float) -> bytes:
-        from .voice_fx import EFFECTS
-
-        fx = EFFECTS[effect]
-        speaker = PIPER_SPEAKERS.index(voice) if voice in PIPER_SPEAKERS else self.config.piper_speaker
-        model = self._load_tts()
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wav:
-            try:
-                from piper import SynthesisConfig
-
-                speakers = int(getattr(model.config, "num_speakers", 1) or 1)
-                # вища висота = синтезуємо повільніше на той самий коефіцієнт, а voice_fx «прискорює» назад
-                model.synthesize_wav(text, wav, syn_config=SynthesisConfig(
-                    speaker_id=speaker if 0 <= speaker < speakers else None, length_scale=fx.pitch / speed))
-            except ImportError:  # старіший piper-tts (1.2)
-                model.synthesize(text, wav, speaker_id=speaker or None, length_scale=fx.pitch / speed)
-        return self._effect(buf.getvalue(), effect)
-
-    async def speak(self, text: str, voice=None, effect=None, speed=None, speaker=None) -> bytes:
+    async def speak(self, text: str, voice=None, effect=None, speed=None) -> bytes:
         """Текст відповіді → WAV (голос voice — назва, обробка effect — див. voice_fx.EFFECTS, темп speed)."""
-        engine = self.engine
-        if not engine:
-            raise VoiceError("Озвучення не налаштовано на сервері: deploy/holos.sh start (або deploy/voice.sh install)")
+        if not self.engine:
+            raise VoiceError("Озвучення не налаштовано на сервері: deploy/holos.sh start")
         speech = speech_text(text)
         if not speech:
             raise VoiceError("Нема чого озвучувати")
-        return await self._synth(speech, self.options(voice, effect, speed, speaker))
+        return await self._synth(speech, self.options(voice, effect, speed))
 
-    async def speak_parts(self, text: str, voice=None, effect=None, speed=None, speaker=None):
+    async def speak_parts(self, text: str, voice=None, effect=None, speed=None):
         """Те саме, що speak, але частинами: (WAV, остання?). Перше речення звучить, поки синтезується решта, —
         довга відповідь не змушує чекати, доки озвучиться вся."""
         if not self.engine:
-            raise VoiceError("Озвучення не налаштовано на сервері: deploy/holos.sh start (або deploy/voice.sh install)")
+            raise VoiceError("Озвучення не налаштовано на сервері: deploy/holos.sh start")
         chunks = speech_chunks(speech_text(text))
         if not chunks:
             raise VoiceError("Нема чого озвучувати")
-        opts = self.options(voice, effect, speed, speaker)
+        opts = self.options(voice, effect, speed)
         for i, chunk in enumerate(chunks):
             yield await self._synth(chunk, opts), i == len(chunks) - 1
 
     async def _synth(self, speech: str, opts: tuple[str, str, float]) -> bytes:
-        engine = self.engine
         async with self._tts_lock:
             try:
-                if engine == "holos":
-                    return await self._speak_holos(speech, *opts)
-                return await asyncio.to_thread(self._speak_piper, speech, *opts)
+                return await self._speak_holos(speech, *opts)
             except VoiceError:
                 raise
             except Exception as e:  # noqa: BLE001

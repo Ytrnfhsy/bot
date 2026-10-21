@@ -2,7 +2,7 @@
 # Голос Kru через HolosTTS (deploy/holos/docker-compose.yml, 127.0.0.1:8890): природна українська мова,
 # 27 голосів, числа й наголоси — сам. Розпізнавання мовлення лишається за Whisper (deploy/voice.sh install).
 #   deploy/holos.sh start   — завантажити й запустити (перший раз — ~3,4 ГБ моделей), підключити до агента
-#   deploy/holos.sh stop    — зупинити (агент повернеться до Piper, якщо його встановлено)
+#   deploy/holos.sh stop    — зупинити (агент відповідатиме лише текстом)
 #   deploy/holos.sh status  — чи працює, які голоси
 #   deploy/holos.sh test [голос] "текст"  — озвучити фразу у файл holos-test.wav
 set -euo pipefail
@@ -75,7 +75,7 @@ case "${1:-}" in
     else
       echo "HolosTTS не відповідає на ${URL}"
     fi
-    grep -s '^KRU_TTS_' "${ENV_FILE}" || echo "KRU_TTS_URL не задано — агент озвучує через Piper (або ніяк)"
+    grep -s '^KRU_TTS_' "${ENV_FILE}" || echo "KRU_TTS_URL не задано — агент не озвучує відповіді"
     ;;
   test)
     shift
