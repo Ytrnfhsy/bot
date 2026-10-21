@@ -41,6 +41,7 @@ class Voice:
     def __init__(self, config) -> None:
         self.config = config
         self._stt: Any = None
+        self._stt_fast: Any = None  # легка модель для перевірки імені (whisper_wake_model)
         self._tts: Any = None
         self._stt_lock = asyncio.Lock()
         self._tts_lock = asyncio.Lock()
@@ -107,32 +108,43 @@ class Voice:
                 "speakers": self.voices() if self.engine == "piper" else []}  # speakers — для старих клієнтів
 
     # ---------------- розпізнавання ----------------
-    def _load_stt(self):
-        if self._stt is None:
+    @property
+    def two_pass(self) -> bool:
+        """Ім'я перевіряє окрема легка модель, а задачу — основна."""
+        wake = self.config.whisper_wake_model.strip()
+        return bool(wake) and wake != self.config.whisper_model
+
+    def _load_stt(self, fast: bool = False):
+        fast = fast and self.two_pass
+        if (self._stt_fast if fast else self._stt) is None:
             from faster_whisper import WhisperModel
 
-            log.info("Завантажую модель розпізнавання мовлення %s…", self.config.whisper_model)
-            self._stt = WhisperModel(self.config.whisper_model, device=self.config.whisper_device,
-                                     compute_type="int8")
-        return self._stt
+            name = self.config.whisper_wake_model.strip() if fast else self.config.whisper_model
+            log.info("Завантажую модель розпізнавання мовлення %s…", name)
+            model = WhisperModel(name, device=self.config.whisper_device, compute_type="int8")
+            if fast:
+                self._stt_fast = model
+            else:
+                self._stt = model
+        return self._stt_fast if fast else self._stt
 
-    def _transcribe(self, data: bytes, prompt: str | None = None) -> str:
-        model = self._load_stt()
+    def _transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False) -> str:
+        model = self._load_stt(fast)
         segments, _info = model.transcribe(
-            decode_audio(data), language=self.config.whisper_language or None, vad_filter=True, beam_size=5,
-            initial_prompt=prompt,
+            decode_audio(data), language=self.config.whisper_language or None, vad_filter=True,
+            beam_size=1 if fast else 5, initial_prompt=prompt,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()
 
-    async def transcribe(self, data: bytes, prompt: str | None = None) -> str:
-        """Аудіо (WAV, OGG/Opus з Telegram, MP3…) → текст."""
+    async def transcribe(self, data: bytes, prompt: str | None = None, fast: bool = False) -> str:
+        """Аудіо (WAV, OGG/Opus з Telegram, MP3…) → текст. fast — легкою моделлю (перевірка імені)."""
         if not self.stt_ok:
             raise VoiceError("Розпізнавання мовлення не встановлено на сервері: deploy/voice.sh install")
         if len(data) > MAX_AUDIO:
             raise VoiceError("Запис задовгий")
         async with self._stt_lock:
             try:
-                return await asyncio.to_thread(self._transcribe, data, prompt)
+                return await asyncio.to_thread(self._transcribe, data, prompt, fast)
             except VoiceError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -284,7 +296,9 @@ def decode_audio(data: bytes, rate: int = 16000):
 # Як Whisper записує ім'я «Кру» (і як люди звертаються перед ним)
 WAKE_PROMPT = "Розмова з голосовим помічником Кру."
 _WAKE = re.compile(r"^(кру|крю|кроу|кру-кру|kru|krew|crew|krу)$")
-_BEFORE_WAKE = {"ну", "агов", "гей", "ей", "ой", "о", "слухай", "привіт", "алло", "а"}
+# звертання перед ім'ям; Whisper на коротких фразах часом пише їх по-російськи («Привет, Кру!»)
+_BEFORE_WAKE = {"ну", "агов", "гей", "ей", "ой", "о", "слухай", "послухай", "привіт", "привітик", "вітаю", "алло", "а",
+                "хей", "хай", "здоров", "привет", "эй", "хэй", "слушай", "послушай", "алё"}
 
 
 def strip_wake(text: str) -> tuple[bool, str]:

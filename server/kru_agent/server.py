@@ -349,7 +349,12 @@ class Connection:
                 raise VoiceError("Запис задовгий")
             data = base64.b64decode(raw, validate=True)
             # у режимі «завжди слухаю» підказуємо Whisper, як пишеться ім'я (не нав'язуючи його на початок фрази)
-            text = await voice.transcribe(data, WAKE_PROMPT if msg.get("wake") == "require" else None)
+            wake = msg.get("wake") == "require"
+            text = await voice.transcribe(data, WAKE_PROMPT if wake else None, fast=wake)
+            if wake and voice.two_pass and (found := strip_wake(text))[0] and found[1]:
+                # ім'я почуто легкою моделлю — саму задачу розпізнає точна (якщо й вона чує ім'я)
+                full = await voice.transcribe(data, WAKE_PROMPT)
+                text = full if strip_wake(full)[0] else text
         except (binascii.Error, ValueError):
             await self.send({"type": "voice_error", "id": vid, "message": "пошкоджений запис"})
             return

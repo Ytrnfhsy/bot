@@ -110,6 +110,9 @@ class Config:
     # deploy/voice.sh install. auto — увімкнено, якщо бібліотеки й голос Piper є на сервері.
     voice: str = "auto"
     whisper_model: str = "turbo"  # tiny | base | small | medium | turbo (large-v3-turbo) — точніше = повільніше
+    # швидка перевірка імені в режимі «Кру» (кожна фраза в кімнаті); саму задачу розпізнає whisper_model.
+    # Порожньо — усе розпізнає whisper_model (точніше, але на CPU кілька секунд на кожну фразу)
+    whisper_wake_model: str = "small"
     whisper_language: str = "uk"  # порожньо — визначати мову самому
     whisper_device: str = "cpu"  # відеопам'ять зайнята моделлю агента
     piper_voice: str = ""  # шлях до .onnx; порожньо — <data_dir>/voice/uk_UA-ukrainian_tts-medium.onnx
@@ -186,6 +189,7 @@ class Config:
             sandbox_confirm=_env_bool("SANDBOX_CONFIRM", d.sandbox_confirm),
             voice=_env("VOICE", d.voice).lower(),
             whisper_model=_env("WHISPER_MODEL", d.whisper_model),
+            whisper_wake_model=_env("WHISPER_WAKE_MODEL", d.whisper_wake_model),
             whisper_language=_env("WHISPER_LANGUAGE", d.whisper_language),
             whisper_device=_env("WHISPER_DEVICE", d.whisper_device),
             piper_voice=_env("PIPER_VOICE", d.piper_voice),

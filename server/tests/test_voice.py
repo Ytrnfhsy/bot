@@ -62,7 +62,7 @@ def voice_ready(monkeypatch):
     whisper, tts = FakeWhisper(), FakePiper()
 
     def attach(agent: Agent):
-        agent.voice._stt, agent.voice._tts = whisper, tts
+        agent.voice._stt, agent.voice._stt_fast, agent.voice._tts = whisper, whisper, tts
         return whisper, tts
 
     return attach
@@ -312,6 +312,7 @@ def test_strip_wake():
     assert strip_wake("Агов, Кру! увімкни світло.") == (True, "Увімкни світло.")
     assert strip_wake("Ну, крю, допоможи") == (True, "Допоможи")
     assert strip_wake("Кру.") == (True, "")
+    assert strip_wake("Привет, Кру!") == (True, "")  # Whisper на коротких фразах пише й по-російськи
     for miss in ("Це круто, правда?", "Кружка на столі", "Скажи, кру, котра година", ""):
         assert strip_wake(miss)[0] is False, miss
 
@@ -338,3 +339,28 @@ def test_ws_wake_mode(cfg, voice_ready):
         ws.send_json({"type": "voice_in", "id": "plain", "data": data})
         assert _until(ws, "voice_text")[0]["text"] == "Кру, без режиму"
         assert whisper.calls[-1]["initial_prompt"] is None
+
+
+def test_ws_wake_two_models(cfg, voice_ready):
+    """Ім'я перевіряє легка модель (швидко, на кожну фразу), а задачу після імені — точна."""
+    cfg.token = "secret"
+    agent = Agent(cfg, llm=FakeLLM([]))
+    full, _ = voice_ready(agent)
+    fast = FakeWhisper()
+    agent.voice._stt_fast = fast
+    assert agent.voice.two_pass  # типово small для імені, turbo для задачі
+    client = TestClient(create_app(cfg, agent=agent))
+    data = base64.b64encode(b"RIFF").decode()
+    with client, client.websocket_connect("/ws?token=secret") as ws:
+        ws.receive_json()
+        fast.words, full.words = "Ми говорили про кіно", "не має викликатись"
+        ws.send_json({"type": "voice_in", "id": "a", "data": data, "wake": "require"})
+        assert _until(ws, "voice_text")[0].get("ignored") is True
+        assert full.calls == [] and fast.calls[-1]["beam_size"] == 1  # без імені точна модель не працює
+        fast.words, full.words = "Кру, яка погода в кеві", "Кру, яка погода в Києві?"
+        ws.send_json({"type": "voice_in", "id": "b", "data": data, "wake": "require"})
+        assert _until(ws, "voice_text")[0]["text"] == "Яка погода в Києві?"
+        fast.words, full.words = "Привет, Кру!", "Привіт."
+        ws.send_json({"type": "voice_in", "id": "c", "data": data, "wake": "require"})
+        assert _until(ws, "voice_text")[0].get("wake_only") is True
+        assert len(full.calls) == 1  # лише ім'я — друге розпізнавання не потрібне
