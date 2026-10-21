@@ -229,6 +229,8 @@ async def _local_chat(cfg: Config, args: argparse.Namespace, once: str | None) -
     from .agent import Agent
 
     agent = Agent(cfg)
+    for err in await agent.start_mcp():
+        print(f"{YELLOW}MCP {err}{RESET}")
     printer = Printer(args.thinking, args.session or new_session_id())
     printer.workspace = cfg.workspace
 
@@ -518,6 +520,37 @@ def _telegram_command(cfg: Config, args: argparse.Namespace, parser: argparse.Ar
         raise SystemExit(str(e)) from e
 
 
+def _mcp_command(cfg: Config, args, parser) -> None:
+    """kru mcp list — запустити MCP-сервери з налаштувань і показати їхні інструменти."""
+    from .mcp import MCPManager
+    from .tools import ToolRegistry
+
+    if args.mcp_cmd != "list":
+        parser.print_help()
+        return
+    manager = MCPManager(cfg)
+    if not manager.servers:
+        print(f"MCP-серверів не налаштовано. Опиши їх у {cfg.mcp_config} (приклад — server/mcp.example.json).")
+        return
+
+    async def run() -> None:
+        reg = ToolRegistry()
+        try:
+            errors = await manager.start(reg)
+        finally:
+            await manager.stop()
+        for name, server in manager.servers.items():
+            mark = f"{GREEN}✓{RESET}" if server.tools else f"{RED}✗{RESET}"
+            confirm = "з дозволом" if server.spec.get("confirm", True) is not False else "без дозволу"
+            print(f"{mark} {BOLD}{name}{RESET} ({len(server.tools)} інструментів, {confirm})")
+            for t in server.tools:
+                print(f"    {t['name']}: {str(t.get('description') or '').splitlines()[0][:90] if t.get('description') else ''}")
+        for err in errors:
+            print(f"{RED}{err}{RESET}")
+
+    asyncio.run(run())
+
+
 def _wakeword_command(cfg: Config, args, parser) -> None:
     """kru wakeword train|status — своя фраза-активатор для режиму «завжди слухаю» (робот, wakeword.py)."""
     from . import wakeword
@@ -679,6 +712,10 @@ def main(argv: list[str] | None = None) -> None:
         ssh_sub.add_parser(name, help=help_).add_argument("name")
     ssh_sub.add_parser("key", help="показати публічний ключ агента")
 
+    p_mcp = sub.add_parser("mcp", help="MCP-сервери (PhotoCraft тощо) як інструменти агента")
+    mcp_sub = p_mcp.add_subparsers(dest="mcp_cmd")
+    mcp_sub.add_parser("list", help="запустити сервери з ~/.config/kru/mcp.json і показати їхні інструменти")
+
     p_wake = sub.add_parser("wakeword", help="своя фраза-активатор («Чуєш, Кру») для режиму «завжди слухаю»")
     wake_sub = p_wake.add_subparsers(dest="wake_cmd")
     p = wake_sub.add_parser("train", help="навчити модель фрази (озвучує її голосами HolosTTS/Piper)")
@@ -689,7 +726,7 @@ def main(argv: list[str] | None = None) -> None:
     wake_sub.add_parser("status", help="що навчено")
 
     args = parser.parse_args(argv)
-    if args.cmd in {"user", "telegram", "ssh", "wakeword"}:
+    if args.cmd in {"user", "telegram", "ssh", "wakeword", "mcp"}:
         # ті самі налаштування, що й у сервісу (DATA_DIR, KRU_TOKEN)
         from .config import _load_dotenv
         from pathlib import Path
@@ -719,6 +756,8 @@ def main(argv: list[str] | None = None) -> None:
         _telegram_command(cfg, args, p_tg)
     elif args.cmd == "ssh":
         _ssh_command(cfg, args, p_ssh)
+    elif args.cmd == "mcp":
+        _mcp_command(cfg, args, p_mcp)
     elif args.cmd == "wakeword":
         _wakeword_command(cfg, args, p_wake)
     elif args.cmd == "health":

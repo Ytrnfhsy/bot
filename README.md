@@ -543,6 +543,50 @@ kru ssh add test-vm kru@100.92.10.5 --no-confirm --note "Ubuntu 24.04, тест�
 Попроси, наприклад: «на test-vm встанови nginx і зроби сторінку з привітанням», «подивись, чому на test-vm
 падає сервіс X», «розгорни цей скрипт на ВМ і запускай щогодини».
 
+### 1.9 MCP-сервери (PhotoCraft та інші)
+
+Будь-який MCP-сервер (Model Context Protocol, транспорт stdio) стає набором інструментів агента. Сервери
+описуються в `~/.config/kru/mcp.json` у тому ж форматі, що й для Claude Desktop / Claude Code. Kru запускає їх сам
+разом із сервісом, а інструменти отримують назви `<сервер>_<інструмент>`.
+
+**PhotoCraft** ([storytold/photocraft](https://github.com/storytold/photocraft)) — офлайн-редактор растрових
+зображень: відкрити, застосувати фільтри й команди, експортувати.
+
+1. Встанови `photocraft-cli` **на сервері Kru**. Підійде `.deb` чи `.rpm` з релізів: вони ставлять
+   `/usr/bin/photocraft-cli`. Або зібери з коду (Rust 1.95+):
+   `cargo install --path apps/photocraft-cli --locked`. Перевір: `photocraft-cli mcp --help`.
+2. Опиши сервер (приклад — `server/mcp.example.json`):
+   ```bash
+   mkdir -p ~/.config/kru && cp ~/bot/server/mcp.example.json ~/.config/kru/mcp.json
+   ```
+   ```json
+   {"mcpServers": {"photocraft": {
+       "command": "photocraft-cli",
+       "args": ["mcp", "--automation-read-root", "{workspace}", "--automation-write-root", "{workspace}"],
+       "confirm": false}}}
+   ```
+   `{workspace}` — робоча тека агента (`~/kru-workspace`). Тож PhotoCraft бачить файли, які ти надсилаєш
+   (`uploads/…`), і пише результат туди ж, звідки агент віддає його кнопкою чи в Telegram. Якщо
+   `photocraft-cli` не в `PATH` сервісу, вкажи повний шлях у `command`.
+3. Перевір і перезапусти:
+   ```bash
+   kru mcp list                     # запускає сервери й показує їхні інструменти
+   systemctl --user restart kru
+   ```
+4. Попроси агента, наприклад: «Відкрий фото, яке я надіслав, розмий фон і збережи як result.png».
+   Прев'ю, які повертає PhotoCraft, агент бачить сам (якщо модель уміє дивитися на зображення). Вони зберігаються
+   в `workspace/mcp/`.
+
+Налаштування сервера в `mcp.json`:
+- `command`, `args`, `env`, `cwd` — як запускати (у значеннях працюють `{workspace}` і `{data_dir}`);
+- `confirm` — питати дозволу перед кожним викликом (типово `true`). Для PhotoCraft, обмеженого робочою текою,
+  зручно `false`;
+- `admin_only` — лише для адміністраторів (типово `true`);
+- `enabled: false` — тимчасово вимкнути.
+
+Сервер, що впав, Kru перезапускає при наступному виклику (відкриті в ньому документи при цьому губляться).
+Інший файл налаштувань — `KRU_MCP_CONFIG`.
+
 ## 2. Клієнт на Fedora
 
 ```bash
