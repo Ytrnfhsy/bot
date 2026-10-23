@@ -23,7 +23,7 @@ class FakeBot:
         self.files: dict[str, tuple[bytes, str]] = {}
         self._id = 100
 
-    async def send(self, chat_id, text, buttons=None):
+    async def send(self, chat_id, text, buttons=None, markdown=False):
         self._id += 1
         self.sent.append((str(chat_id), text, buttons))
         return self._id

@@ -86,7 +86,7 @@ class TelegramSink:
                     await bot.send_file(self.chat_id, path)
             elif kind == "final":
                 await self._clear_status()
-                await bot.send(self.chat_id, ev.get("text") or "(порожня відповідь)")
+                await bot.send(self.chat_id, ev.get("text") or "(порожня відповідь)", markdown=True)
             elif kind == "error":
                 await self._clear_status()
                 await bot.send(self.chat_id, f"⚠️ {ev.get('message', 'помилка')}")

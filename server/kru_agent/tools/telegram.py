@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from . import Tool, ToolContext, ToolError
-from ..telegram import TelegramBot, TelegramError, split_message
+from ..telegram import MD_LIMIT, TelegramBot, TelegramError, split_message
+from ..telegram_format import to_plain
 
 
 def chat_for(ctx: ToolContext) -> str | None:
@@ -32,11 +33,11 @@ async def send_telegram(ctx: ToolContext, text: str = "", path: str = "") -> str
         if file is not None:
             short = len(text) <= 1000
             if text.strip() and not short:
-                await bot.send(chat, text)
-            await bot.send_file(chat, file, text if short else "")
+                await bot.send(chat, text, markdown=True)
+            await bot.send_file(chat, file, to_plain(text) if short else "")
             return f"Надіслано в Telegram (з файлом {file.name})"
-        await bot.send(chat, text)
-        parts = len(split_message(text))
+        await bot.send(chat, text, markdown=True)
+        parts = len(split_message(text, MD_LIMIT))
     except TelegramError as e:
         raise ToolError(str(e)) from e
     return "Надіслано в Telegram" + (f" ({parts} повідомлення)" if parts > 1 else "")
@@ -47,7 +48,8 @@ TOOLS = [
         name="send_telegram",
         description=(
             "Надсилає повідомлення користувачу в його Telegram (наприклад, результат пошуку чи нагадування). "
-            "Пиши готовий текст для людини: коротко, по суті, з посиланнями; без Markdown-розмітки."
+            "Пиши готовий текст для людини: коротко, по суті, з посиланнями. Можна легкий Markdown (**жирний**, списки, `код`, "
+            "[посилання](url)) — у Telegram він відобразиться форматуванням."
         ),
         parameters={
             "type": "object",
