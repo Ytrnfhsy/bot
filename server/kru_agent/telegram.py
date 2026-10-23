@@ -9,8 +9,11 @@ from typing import Any
 
 import httpx
 
+from .telegram_format import balance_fences, to_html
+
 API = "https://api.telegram.org"
 LIMIT = 4000  # Telegram приймає до 4096 символів в одному повідомленні
+MD_LIMIT = 3500  # з розміткою: теги й екранування додають символів
 PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 PHOTO_MAX = 10 * 1024 * 1024  # більші фото Telegram не приймає — тоді документом
 
@@ -60,19 +63,30 @@ class TelegramBot:
             raise TelegramError(f"Telegram: {data.get('description') or r.status_code}")
         return data.get("result")
 
-    async def send(self, chat_id: str, text: str, buttons: list[list[tuple[str, str]]] | None = None) -> int:
+    async def send(self, chat_id: str, text: str, buttons: list[list[tuple[str, str]]] | None = None,
+                   markdown: bool = False) -> int:
         """Текст (довгий — кількома повідомленнями). buttons — рядки кнопок [(напис, callback_data)] під останнім.
+        markdown — текст моделі: розмітка перетворюється на HTML Telegram (якщо він його не прийме — простим текстом).
         Повертає message_id останнього повідомлення."""
-        parts = split_message(text)
+        parts = split_message(text, MD_LIMIT if markdown else LIMIT)
         if not parts:
             raise TelegramError("Порожнє повідомлення")
+        if markdown:
+            parts = balance_fences(parts)
         msg_id = 0
         for i, part in enumerate(parts):
-            # без parse_mode: довільний текст моделі не зламає розмітку Telegram
             params: dict[str, Any] = {"chat_id": chat_id, "text": part, "disable_web_page_preview": True}
             if buttons and i == len(parts) - 1:
                 params["reply_markup"] = keyboard(buttons)
-            res = await self._call("sendMessage", **params)
+            res = None
+            if markdown and len(formatted := to_html(part)) <= 4096:
+                try:
+                    res = await self._call("sendMessage", **{**params, "text": formatted, "parse_mode": "HTML"})
+                except TelegramError as e:
+                    if "entit" not in str(e).lower() and "parse" not in str(e).lower():
+                        raise  # мережа, заблокований бот тощо — простий текст не допоможе
+            if res is None:  # без parse_mode: довільний текст не зламає розмітку Telegram
+                res = await self._call("sendMessage", **params)
             msg_id = int((res or {}).get("message_id") or 0)
         return msg_id
 

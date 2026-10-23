@@ -168,7 +168,8 @@ async def test_send_telegram(cfg, monkeypatch):
         await agent.registry.call(ctx, "send_telegram", {"text": "привіт"})
     agent.storage.set_telegram_chat("owner", "555")
     assert await agent.registry.call(ctx, "send_telegram", {"text": "Курс 41.5"}) == "Надіслано в Telegram"
-    assert sent == [("sendMessage", {"chat_id": "555", "text": "Курс 41.5", "disable_web_page_preview": True})]
+    assert sent == [("sendMessage", {"chat_id": "555", "text": "Курс 41.5", "disable_web_page_preview": True,
+                                     "parse_mode": "HTML"})]
     # у кожного користувача свій чат
     olena = agent.make_context(__import__("kru_agent.users", fromlist=["User"]).User("olena", "user"))
     assert tg_tool.chat_for(olena) is None
