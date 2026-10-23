@@ -79,6 +79,7 @@ from pydantic import BaseModel
 from . import __version__
 from .agent import Agent
 from .config import Config
+from .llm import LLMUnavailable
 from .scheduler import Scheduler
 from .tools import ToolError
 from .tools.files import shared_file
@@ -107,6 +108,7 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
             app.state.agent.storage,
             lambda item, chat_id: run_scheduled(app.state.agent, app.state.hub, users, item, chat_id),
             lambda owner: app.state.hub.get(owner) is not None,
+            ready=lambda: _llm_ready(app.state.agent),
         )
         app.state.scheduler.start()
         # модель розпізнавання — у фоні одразу, щоб перше голосове не чекало її завантаження
@@ -518,6 +520,10 @@ SCHEDULED_PREFIX = (
 )
 
 
+async def _llm_ready(agent: Agent) -> bool:
+    return bool((await agent.llm.health()).get("ok"))
+
+
 async def run_scheduled(agent: Agent, hub: TaskHub, users: UserStore, item: dict[str, Any], chat_id: str) -> str:
     """Виконати заплановане завдання від імені його власника в окремому чаті й повідомити про результат."""
     user = users.get(item["owner"])
@@ -534,6 +540,9 @@ async def run_scheduled(agent: Agent, hub: TaskHub, users: UserStore, item: dict
         agent.storage.rename_chat(chat_id, title, user.name)
         await hub.notify(user.name, {"type": "notify", "title": title, "text": answer[:800], "chat_id": chat_id})
         return answer
+    except LLMUnavailable:
+        agent.storage.clear_session(chat_id, user.name)  # планувальник повторить — порожній чат не лишаємо
+        raise
     except Exception as e:
         await hub.notify(user.name, {"type": "notify", "title": title, "text": f"Не вдалося: {e}", "chat_id": chat_id,
                                      "error": True})

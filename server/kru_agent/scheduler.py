@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
+from .llm import LLMUnavailable
 from .timezones import get_tz
 
 log = logging.getLogger("kru.scheduler")
@@ -25,6 +26,7 @@ REPEATS = {
     "weekly": "щотижня",
 }
 MISSED_GRACE = 6 * 3600  # пропущене (сервер був вимкнений) виконуємо, якщо запізнення не більше 6 год
+RETRY_DELAY = 60  # модель недоступна посеред запуску — повторити не раніше ніж за хвилину
 _REL = re.compile(r"^\+?\s*(\d+)\s*(m|min|хв|h|год|d|д)\w*$", re.IGNORECASE)
 
 
@@ -88,13 +90,17 @@ RunFunc = Callable[[dict[str, Any], str], Awaitable[str]]  # (завдання, 
 class Scheduler:
     """Раз на кілька секунд перевіряє розклад і запускає завдання, коли їх власник вільний."""
 
-    def __init__(self, storage, run: RunFunc, is_busy: Callable[[str], bool], interval: float = 15) -> None:
+    def __init__(self, storage, run: RunFunc, is_busy: Callable[[str], bool], interval: float = 15,
+                 ready: Callable[[], Awaitable[bool]] | None = None) -> None:
         self.storage = storage
         self.run = run
         self.is_busy = is_busy
         self.interval = interval
+        self.ready = ready  # чи відповідає модель: після перезавантаження ПК llama-server стартує довше за агента
         self._task: asyncio.Task | None = None
         self._running: set[int] = set()
+        self._retry_at: dict[int, float] = {}
+        self._waiting = False  # уже записали в журнал, що чекаємо на модель
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._loop())
@@ -121,8 +127,16 @@ class Scheduler:
         """Запускає всі завдання, час яких настав. Повертає створені asyncio-задачі (для тестів)."""
         now = time.time() if now is None else now
         started = []
-        for item in await asyncio.to_thread(self.storage.due_schedules, now):
-            if item["id"] in self._running or self.is_busy(item["owner"]):
+        due = [i for i in await asyncio.to_thread(self.storage.due_schedules, now)
+               if i["id"] not in self._running and self._retry_at.get(i["id"], 0) <= now]
+        if due and self.ready is not None and not await self.ready():
+            if not self._waiting:
+                log.warning("Час запланованих завдань настав, але модель недоступна — чекаю, поки запуститься")
+                self._waiting = True
+            return started  # завдання лишаються «на черзі» (до MISSED_GRACE) і стартують, щойно модель відповість
+        self._waiting = False
+        for item in due:
+            if self.is_busy(item["owner"]):
                 continue  # власник зараз зайнятий іншою задачею — запустимо на наступному колі
             late = now - item["next_run"]
             if late > MISSED_GRACE:
@@ -148,6 +162,12 @@ class Scheduler:
         except asyncio.CancelledError:
             status = "скасовано"
             raise
+        except LLMUnavailable as e:
+            # не рахуємо як запуск: повертаємо той самий час — повториться, щойно модель запрацює
+            log.warning("Заплановане завдання #%s: модель недоступна (%s) — повторю", item["id"], e)
+            self._retry_at[item["id"]] = time.time() + RETRY_DELAY
+            self.storage.update_schedule(item["id"], next_run=item["next_run"], enabled=1)
+            status = "модель недоступна — повторю, щойно запуститься"
         except Exception as e:  # noqa: BLE001
             log.exception("Заплановане завдання #%s впало", item["id"])
             status = f"помилка: {e}"[:200]
