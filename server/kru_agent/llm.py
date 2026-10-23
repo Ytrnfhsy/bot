@@ -15,6 +15,10 @@ class OllamaError(RuntimeError):
     pass
 
 
+class LLMUnavailable(OllamaError):
+    """Сервер моделі не відповідає: не запущений, перезапускається чи ще вантажить модель (HTTP 503)."""
+
+
 class ToolsNotSupported(OllamaError):
     """Модель/шаблон не підтримує нативні tool calls."""
 
@@ -145,7 +149,8 @@ class OllamaClient:
                         body = json.loads(body).get("error", body)
                     except ValueError:
                         pass
-                    raise OllamaError(f"Ollama HTTP {resp.status_code}: {body}")
+                    raise (LLMUnavailable if resp.status_code == 503 else OllamaError)(
+                        f"Ollama HTTP {resp.status_code}: {body}")
                 async for line in resp.aiter_lines():
                     if not line.strip():
                         continue
@@ -170,7 +175,7 @@ class OllamaClient:
                             if k in chunk
                         }
         except httpx.ConnectError as e:
-            raise OllamaError(f"Не вдалося підключитися до Ollama ({self.base_url}): {e}") from e
+            raise LLMUnavailable(f"Не вдалося підключитися до Ollama ({self.base_url}): {e}") from e
         return result
 
 
@@ -287,7 +292,8 @@ class OpenAICompatClient:
                         raise VisionNotSupported(body)
                     if tools and "tool" in body.lower():
                         raise ToolsNotSupported(body)
-                    raise OllamaError(f"LLM HTTP {resp.status_code}: {body[:500]}")
+                    raise (LLMUnavailable if resp.status_code == 503 else OllamaError)(
+                        f"LLM HTTP {resp.status_code}: {body[:500]}")
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -318,7 +324,7 @@ class OpenAICompatClient:
                     if chunk.get("timings"):  # llama-server: швидкість читання й генерації
                         result.stats["timings"] = chunk["timings"]
         except httpx.ConnectError as e:
-            raise OllamaError(f"Не вдалося підключитися до LLM ({self.base_url}): {e}") from e
+            raise LLMUnavailable(f"Не вдалося підключитися до LLM ({self.base_url}): {e}") from e
         for _, slot in sorted(partial.items()):
             try:
                 args = json.loads(slot["arguments"]) if slot["arguments"].strip() else {}

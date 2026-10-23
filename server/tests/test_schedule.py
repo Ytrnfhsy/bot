@@ -189,3 +189,41 @@ async def test_agent_sends_found_info_to_telegram(cfg, monkeypatch):
     rec = Recorder()
     assert await agent.run("s", "знайди курс і відправ мені в телеграм", rec.emit, rec.confirm) == "Надіслав у Telegram ✅"
     assert sent == ["Знайшов: курс 41.5"] and rec.confirms == []  # своєму власнику — без підтвердження
+
+
+async def test_scheduler_waits_for_model_after_reboot(cfg):
+    """Після перезавантаження ПК агент стартує раніше за llama-server: завдання не «згорає», а чекає на модель."""
+    from kru_agent.llm import LLMUnavailable
+
+    agent = Agent(cfg, llm=FakeLLM([]))
+    due = time.time() - 600  # «щодня о 7:00», а сервер увімкнули о 7:10
+    sid = agent.storage.add_schedule("owner", "цитата дня", due, "daily")
+    state = {"ready": False, "fail": False}
+    ran = []
+
+    async def ready():
+        return state["ready"]
+
+    async def run(item, chat_id):
+        if state["fail"]:
+            raise LLMUnavailable("Не вдалося підключитися до LLM")
+        ran.append(item["id"])
+        return "ok"
+
+    sched = Scheduler(agent.storage, run, lambda o: False, ready=ready)
+    assert await sched.tick() == []  # модель ще вантажиться — нічого не запускаємо й не зсуваємо
+    item = agent.storage.list_schedules("owner")[0]
+    assert item["next_run"] == due and item["enabled"] == 1
+
+    state.update(ready=True, fail=True)  # health уже ok, а модель ще віддає помилку
+    for t in await sched.tick():
+        await t
+    item = agent.storage.list_schedules("owner")[0]
+    assert item["next_run"] == due and item["enabled"] == 1 and "повторю" in item["last_status"]
+    assert await sched.tick() == []  # повтор — не частіше ніж раз на хвилину
+
+    state["fail"] = False
+    for t in await sched.tick(now=time.time() + 61):
+        await t
+    item = agent.storage.list_schedules("owner")[0]
+    assert ran == [sid] and item["last_status"] == "виконано" and item["next_run"] > time.time()
