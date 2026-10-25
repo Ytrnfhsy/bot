@@ -1041,6 +1041,8 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
         win.player.play = fake_play
         voice_reply = win.settings.voice_reply
+        win.stop_speech(quiet=True)  # озвучення з попередніх перевірок не має змішуватися з цією
+        QTest_wait(400)
         try:
             win.new_chat()
             win.busy = False

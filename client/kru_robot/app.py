@@ -303,6 +303,7 @@ class RobotWindow(QWidget):
         self._wake_pending: str | None = None  # id запису з режиму «Кру», що розпізнається на сервері
         self._wake_loading = False
         self._wake_capturing = False  # почув фразу й записує питання — не повертати слухання до чекання фрази
+        self._barged = False  # відповідь перебили фразою: її кінець не повертає слухання до чекання
         self._wire_wake(WakeListener(self))
         self.player = Player(self)
         self.player.stopped.connect(self._on_speech_done)
@@ -633,6 +634,7 @@ class RobotWindow(QWidget):
         if self._tts_id and not self._tts_done:
             self.conn.send({"type": "tts_stop", "id": self._tts_id})  # попереднє озвучення вже не потрібне
         self._tts_queue = []
+        self._barged = False  # нова відповідь — давнє перебивання вже не стосується її кінця
         self._voice_seq += 1
         self._speech_volume = s.voice_volume if volume is None else volume
         self._tts_id, self._tts_done = f"t{self._voice_seq}", False
@@ -700,7 +702,9 @@ class RobotWindow(QWidget):
         if self.robot.state == "talking":
             self.robot.set_state("happy", 1.5)
             QTimer.singleShot(3300, self._back_to_idle)
-        if self._wake_turn:
+        if self._barged:  # перебили фразою: слухання вже записує питання, хай і закінчить сам
+            self._barged = False
+        elif self._wake_turn:
             self._after_wake_reply()
         elif self.wake.active and not self._wake_pending:
             QTimer.singleShot(300, self._wake_listen)  # відлуння власного голосу встигне затихнути
@@ -827,6 +831,7 @@ class RobotWindow(QWidget):
         self._wake_capturing = True
         if self.player.playing or self._tts_id:
             self._wake_turn = False  # відповідь перебили — уточнень після неї не чекаємо
+            self._barged = True
             self.stop_speech()
         self.chime.play(self._chimes[True], self.settings.voice_volume / 200)
         self.robot.set_state("listening")
