@@ -6,7 +6,7 @@ import asyncio
 
 from kru_agent.agent import Agent
 from kru_agent.server import TaskHub
-from kru_agent.telegram_bot import TelegramGateway
+from kru_agent.telegram_bot import new_code, TelegramGateway
 from kru_agent.users import UserStore
 
 from .conftest import FakeLLM, call, text
@@ -76,6 +76,17 @@ async def test_link_by_one_time_code(cfg):
     assert agent.storage.telegram_owner("777") == "owner" and "підключено" in bot.texts()[-1]
     await gw.handle(msg("/link 123456", chat="888"))  # код одноразовий
     assert agent.storage.telegram_owner("888") is None
+    # перебір кодів: після 5 невірних чат блокується, навіть правильний код не спрацює
+    code = new_code()
+    assert len(code) == 10 and code.isalnum()
+    agent.storage.add_telegram_code("owner", code)
+    for _ in range(5):
+        await gw.handle(msg("/link AAAA2222BB", chat="999"))
+    assert "Забагато спроб" in bot.texts()[-1]
+    await gw.handle(msg(f"/link {code.lower()}", chat="999"))
+    assert agent.storage.telegram_owner("999") is None
+    await gw.handle(msg(f"/link {code[:5]}-{code[5:].lower()}", chat="555"))  # як надрукував — регістр і дефіс неважливі
+    assert agent.storage.telegram_owner("555") == "owner"
 
 
 async def test_message_runs_agent_and_replies(cfg):

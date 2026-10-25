@@ -174,8 +174,10 @@ class OllamaClient:
                             for k in ("total_duration", "prompt_eval_count", "eval_count")
                             if k in chunk
                         }
-        except httpx.ConnectError as e:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             raise LLMUnavailable(f"Не вдалося підключитися до Ollama ({self.base_url}): {e}") from e
+        except (httpx.RemoteProtocolError, httpx.ReadError) as e:  # сервер моделі перезапустився посеред відповіді
+            raise LLMUnavailable(f"Ollama обірвав відповідь ({self.base_url}): {e!r}") from e
         return result
 
 
@@ -323,8 +325,10 @@ class OpenAICompatClient:
                         result.stats = {**result.stats, **chunk["usage"]}
                     if chunk.get("timings"):  # llama-server: швидкість читання й генерації
                         result.stats["timings"] = chunk["timings"]
-        except httpx.ConnectError as e:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             raise LLMUnavailable(f"Не вдалося підключитися до LLM ({self.base_url}): {e}") from e
+        except (httpx.RemoteProtocolError, httpx.ReadError) as e:  # сервер моделі перезапустився посеред відповіді
+            raise LLMUnavailable(f"LLM обірвав відповідь ({self.base_url}): {e!r}") from e
         for _, slot in sorted(partial.items()):
             try:
                 args = json.loads(slot["arguments"]) if slot["arguments"].strip() else {}

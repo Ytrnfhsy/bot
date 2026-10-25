@@ -354,6 +354,15 @@ class Storage:
                 (*sets.values(), sched_id),
             )
 
+    def finish_schedule(self, sched_id: int, status: str, retry_at: float | None = None) -> None:
+        """Підсумок запуску. Завдання, скасоване поки виконувалось, лишається скасованим; retry_at — повторити
+        (модель була недоступна): той самий час і знову увімкнене."""
+        extra = ", next_run = ?, enabled = 1" if retry_at is not None else ""
+        args = (status, retry_at, sched_id) if retry_at is not None else (status, sched_id)
+        with self._lock, self._db:
+            self._db.execute(f"UPDATE schedules SET last_status = ?{extra} WHERE id = ? AND last_status != 'скасовано'",
+                             args)
+
     def cancel_schedule(self, sched_id: int, owner: str) -> bool:
         with self._lock, self._db:
             return self._db.execute(

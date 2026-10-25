@@ -27,7 +27,7 @@ async def schedule_task(ctx: ToolContext, task: str, when: str, repeat: str = ""
     # час — у поясі користувача (не сервера): «о 14:00» означає 14:00 за його годинником
     now = datetime.now(ctx.tz).replace(tzinfo=None)
     try:
-        at = parse_when(when, now)
+        at = parse_when(when, now, ctx.tz)
     except ValueError as e:
         raise ToolError(str(e)) from e
     ts = at.replace(tzinfo=ctx.tz).timestamp() if ctx.tz else at.timestamp()

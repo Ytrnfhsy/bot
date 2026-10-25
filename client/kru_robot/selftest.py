@@ -778,16 +778,17 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         def quiet(sec):
             return b"\0\0" * int(rate * sec)
 
-        class FakeDet:  # «чує» фразу після ~0,3 с гучного звуку
+        class FakeDet:  # «чує» фразу після ~0,3 с гучного звуку (on=False — у звуці фрази немає)
             threshold = 0.5
             loud = 0
+            on = True
 
             def reset(self):
                 self.loud = 0
 
             def feed(self, frame):
                 self.loud += max(abs(x) for x in array.array("h", frame)) > 2000
-                return 1.0 if self.loud >= 10 else 0.0
+                return 1.0 if self.on and self.loud >= 10 else 0.0
 
         lg = WakeLogic(rate, FakeDet())
         need(lg.feed(quiet(1.0)) == [], "тиша щось викликала")
@@ -797,6 +798,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         need(len(ev) == 1 and ev[0][0] == "utterance" and ev[0][2] is True, f"фраза: {[e[0] for e in ev]}")
         need(3.0 < (len(ev[0][1]) - 44) / 2 / rate < 3.6, "довжина запису (з початком фрази)")
         need(lg.feed(tone(1.0)) == [], "після фрази чекає на застосунок")
+        lg.detector.on = False  # уточнення нижче — без «Чуєш, Кру»
         lg.await_command(0.5)
         need(lg.feed(quiet(0.8)) == [("timeout",)], "тайм-аут уточнення")
         lg.await_command(3)
@@ -820,6 +822,20 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         ev = lg.feed(tone(0.5) + soft + tone(0.3) + quiet(1.5))
         need([e[0] for e in ev] == ["wake", "utterance"] and (len(ev[-1][1]) - 44) / 2 / rate > 2.2,
              f"фраза обірвалась на тихому: {[(e[0], (len(e[1]) - 44) / 2 / rate if len(e) > 1 else 0) for e in ev]}")
+        # команди інтерфейсу, що запізнилися, не скасовують запис питання, який уже йде
+        lg = WakeLogic(rate, FakeDet())
+        need([e[0] for e in lg.feed(quiet(1.0) + tone(0.4))] == ["wake"], "фраза")
+        lg.listen()
+        lg.barge()
+        lg.await_command(6)
+        ev = lg.feed(tone(1.0) + quiet(1.5))
+        need(lg.state == "busy" and [(e[0], e[2]) for e in ev] == [("utterance", True)],
+             f"команда скасувала запис: {[e[0] for e in ev]}, {lg.state}")
+        # уточнення, що почалося з «Чуєш, Кру», — з фразою (сервер прибере звертання)
+        lg.await_command(3)
+        ev = lg.feed(tone(1.0) + quiet(1.5))
+        need([(e[0], e[2] if len(e) > 2 else None) for e in ev] == [("speech", None), ("utterance", True)],
+             f"уточнення з фразою: {ev}")
         # «Чуєш, Кру» … пауза … питання: саму фразу не відправляє, чекає на питання
         lg = WakeLogic(rate, FakeDet())
         ev = lg.feed(quiet(1.0) + tone(0.4))
@@ -871,13 +887,14 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         class FakeDet:
             threshold = 0.5
             loud = 0
+            on = True
 
             def reset(self):
                 self.loud = 0
 
             def feed(self, frame):
                 self.loud += max(abs(x) for x in array.array("h", frame)) > 2000
-                return 1.0 if self.loud >= 10 else 0.0
+                return 1.0 if self.on and self.loud >= 10 else 0.0
 
         def tone(sec, amp=8000):
             return array.array("h", [int(amp * _m.sin(2 * _m.pi * 220 * i / rate)) for i in range(int(rate * sec))]).tobytes()
@@ -890,8 +907,11 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         need([e[0] for e in ev] == ["utterance"], f"гул затягнув запис: {[e[0] for e in ev]}")
         # перебивання: поки робот говорить — лише фраза, у запис іде те, що після неї
         lg = WakeLogic(rate, FakeDet(), FakeVad())
-        lg.feed(tone(2.0))  # «говорить сам робот»
         lg.barge()
+        lg.detector.on = False
+        need(lg.feed(tone(2.0)) == [], "записав голос самого робота")  # «говорить сам робот»
+        lg.detector.on = True
+        lg.detector.reset()
         ev = lg.feed(tone(0.4))
         need([e[0] for e in ev] == ["wake"] and lg.state == "capture", f"перебивання: {ev}, {lg.state}")
         ev = lg.feed(tone(1.0) + b"\0\0" * int(rate * 1.5))
@@ -1107,6 +1127,20 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             n_sent = len(sent)
             win.on_event({"type": "voice_text", "id": sent[-1]["id"], "text": "Стоп."})
             need(len(sent) == n_sent and fake.calls[-1] == ("listen",), f"«стоп» став задачею: {sent[n_sent:]}")
+            # запис пішов на сервер, а зв'язок упав — не глухне
+            fake.woke.emit()
+            fake.utterance.emit(b"RIFF", True)
+            need(win._wake_pending, "запис не пішов на сервер")
+            fake.calls.clear()
+            win.on_disconnected("тест")
+            need(not win._wake_pending and fake.calls == [("listen",)], f"після обриву: {fake.calls}")
+            # слухач упав сам (мікрофон відключили) — режим вимикається повністю, і після перезапуску теж
+            fake.active = False
+            fake.failed.emit("мікрофон зник")
+            need(not win.robot.wake_mode and not win.settings.wake_enabled and not win.act_wake.isChecked(),
+                 "збій слухача лишив режим увімкненим")
+            win.robot.double_clicked.emit()  # знову ввімкнути для перевірок нижче
+            need(fake.active and win.robot.wake_mode, "не ввімкнувся знову після збою")
             win.robot.double_clicked.emit()
             need(not fake.active and not win.robot.wake_mode and not win.act_wake.isChecked(), "не вимкнувся")
             need(not win.settings.wake_enabled, "вимкнення не запам'яталось")

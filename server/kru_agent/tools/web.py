@@ -152,14 +152,54 @@ def _pdf_to_text(data: bytes) -> str:
     return "\n\n".join(f"[стор. {i + 1}]\n{page.extract_text() or ''}" for i, page in enumerate(reader.pages))
 
 
-async def fetch_page(url: str, timeout: float = 30) -> tuple[str, str, str]:
+def _is_public(ip: str) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(ip.split("%", 1)[0]).is_global
+    except ValueError:
+        return False
+
+
+async def _resolve(host: str, port: int) -> list[str]:
+    """IP-адреси хоста (IP — як є, без DNS)."""
+    import ipaddress
+    import socket
+
+    try:
+        return [str(ipaddress.ip_address(host.strip("[]")))]
+    except ValueError:
+        pass
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return [info[4][0] for info in infos]
+
+
+async def _public_only(request: httpx.Request) -> None:
+    """Перед кожним запитом (і кожним редіректом): адреса має бути в інтернеті, а не в локальній мережі —
+    інакше сторінка з «підказкою» для моделі чи редірект на 127.0.0.1 відкрили б llama-server, HolosTTS,
+    SearXNG чи машини NetBird. Дозволити: KRU_ALLOW_PRIVATE_URLS=true."""
+    host = request.url.host
+    try:
+        ips = await _resolve(host, request.url.port or 443)
+    except OSError as e:
+        raise ToolError(f"Не вдалося знайти адресу {host}: {e}") from e
+    if not ips or not all(_is_public(ip) for ip in ips):
+        raise ToolError(f"{host} — адреса локальної мережі; туди інструменти з інтернетом не ходять "
+                        "(дозволити: KRU_ALLOW_PRIVATE_URLS=true на сервері)")
+
+
+def _web_client(timeout: float, headers: dict[str, str], allow_private: bool) -> httpx.AsyncClient:
+    hooks = {} if allow_private else {"request": [_public_only]}
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers, event_hooks=hooks)
+
+
+async def fetch_page(url: str, timeout: float = 30, allow_private: bool = False) -> tuple[str, str, str]:
     """Завантажує сторінку чи PDF: (кінцевий URL, заголовок, текст)."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout, follow_redirects=True, headers={"User-Agent": USER_AGENT, "Accept-Language": "uk,en;q=0.8"}
-        ) as client:
+        async with _web_client(timeout, {"User-Agent": USER_AGENT, "Accept-Language": "uk,en;q=0.8"},
+                               allow_private) as client:
             r = await client.get(url)
     except httpx.HTTPError as e:
         raise ToolError(f"Не вдалося завантажити {url}: {e}") from e
@@ -206,7 +246,7 @@ async def download_url(ctx: ToolContext, url: str, path: str = "") -> str:
         url = "https://" + url
     headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
     try:
-        async with httpx.AsyncClient(timeout=120, follow_redirects=True, headers=headers) as client:
+        async with _web_client(120, headers, ctx.config.allow_private_urls) as client:
             async with client.stream("GET", url) as r:
                 if r.status_code >= 400:
                     raise ToolError(f"HTTP {r.status_code} для {url}")
@@ -240,7 +280,7 @@ async def download_url(ctx: ToolContext, url: str, path: str = "") -> str:
 
 async def fetch_url(ctx: ToolContext, url: str, offset: int = 0, max_chars: int = 0) -> str:
     limit = int(max_chars) or ctx.config.max_tool_output_chars
-    final_url, title, text = await fetch_page(url)
+    final_url, title, text = await fetch_page(url, allow_private=ctx.config.allow_private_urls)
 
     offset = max(0, int(offset))
     chunk = text[offset : offset + limit]

@@ -106,7 +106,7 @@ async def _read_pages(
     for r in batch:
         seen.add(_canonical(r["url"]))
     await ctx.report(f"відкриваю {len(batch)} сторінок…")
-    pages = await asyncio.gather(*(fetch_page(r["url"], timeout=20) for r in batch), return_exceptions=True)
+    pages = await asyncio.gather(*(fetch_page(r["url"], timeout=20, allow_private=ctx.config.allow_private_urls) for r in batch), return_exceptions=True)
     failed, used = 0, 0
     for r, page in zip(batch, pages):
         if used >= want:

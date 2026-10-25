@@ -41,8 +41,13 @@ HELP = (
 )
 
 
+CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # без 0/O і 1/I — не сплутати, переписуючи
+LINK_TRIES, LINK_LOCKOUT = 5, 15 * 60  # стільки невірних кодів з одного чату — і він чекає 15 хв
+
+
 def new_code() -> str:
-    return f"{secrets.randbelow(900000) + 100000}"
+    """Код прив'язки чату: 10 знаків (~10¹⁵ варіантів) — перебрати за час дії коду неможливо."""
+    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(10))
 
 
 class TelegramSink:
@@ -123,6 +128,7 @@ class TelegramGateway:
         self.users = users
         self.config = agent.config
         self.bot = bot or TelegramBot(self.config.telegram_bot_token)
+        self._link_fails: dict[str, tuple[int, float]] = {}  # чат → (невірних кодів поспіль, заблоковано до)
         self._task: asyncio.Task | None = None
         self._jobs: set[asyncio.Task] = set()
 
@@ -146,7 +152,13 @@ class TelegramGateway:
                 log.warning("Telegram: %s — повторю за 10 с", e)
                 await asyncio.sleep(10)
                 continue
-            for upd in updates:
+            except Exception:  # noqa: BLE001 — дивна відповідь API тощо: бот не має замовкнути назавжди
+                log.exception("Telegram: несподівана помилка — повторю за 10 с")
+                await asyncio.sleep(10)
+                continue
+            for upd in updates if isinstance(updates, list) else []:
+                if not isinstance(upd, dict) or not isinstance(upd.get("update_id"), int):
+                    continue
                 offset = upd["update_id"] + 1
                 job = asyncio.create_task(self.handle(upd))
                 self._jobs.add(job)
@@ -169,8 +181,8 @@ class TelegramGateway:
         text = (msg.get("text") or msg.get("caption") or "").strip()
         if not chat_id:
             return
-        if m := re.fullmatch(r"/link(?:@\w+)?\s+(\d{6})", text):
-            return await self._link(chat_id, m.group(1))
+        if m := re.fullmatch(r"/link(?:@\w+)?\s+([A-Za-z0-9-]{4,32})", text):
+            return await self._link(chat_id, m.group(1).replace("-", "").upper())
         owner = self.agent.storage.telegram_owner(chat_id)
         if owner is None:
             await self.bot.send(chat_id, "🔒 Це приватний бот. Власник може підключити тебе на сервері: "
@@ -309,10 +321,18 @@ class TelegramGateway:
         return saved
 
     async def _link(self, chat_id: str, code: str) -> None:
+        tries, until = self._link_fails.get(chat_id, (0, 0.0))
+        if time.time() < until:
+            return  # забагато спроб — мовчимо, поки не мине блокування
         owner = self.agent.storage.use_telegram_code(code)
         if owner is None:
-            await self.bot.send(chat_id, "❌ Код невірний або прострочений. Отримай новий: kru telegram link")
+            tries += 1
+            self._link_fails[chat_id] = (0, time.time() + LINK_LOCKOUT) if tries >= LINK_TRIES else (tries, 0.0)
+            log.warning("Telegram: невірний код прив'язки з чату %s (%d)", chat_id, tries)
+            await self.bot.send(chat_id, "❌ Код невірний або прострочений. Отримай новий: kru telegram link"
+                                + ("\nЗабагато спроб — наступна через 15 хв." if tries >= LINK_TRIES else ""))
             return
+        self._link_fails.pop(chat_id, None)
         self.agent.storage.set_telegram_chat(owner, chat_id)
         await self.bot.send(chat_id, f"✅ {self.config.agent_name} підключено для «{owner}»! Пиши задачу — я відповім тут.\n\n"
                                      + HELP.format(name=self.config.agent_name))

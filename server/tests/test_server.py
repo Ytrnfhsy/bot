@@ -131,3 +131,21 @@ def test_task_finishes_while_client_offline(cfg):
                 if not opened["running"] and len(opened["transcript"]) == 2:
                     break
             assert [m["text"] for m in opened["transcript"]] == ["питання", "відповідь без клієнта"]
+
+
+def test_ws_survives_bad_frames_and_health_hides_details(cfg):
+    from fastapi.testclient import TestClient
+
+    from kru_agent.server import create_app
+
+    cfg.token = "secret"
+    client = TestClient(create_app(cfg, agent=Agent(cfg, llm=FakeLLM([]))))
+    with client:
+        assert client.get("/health").json() == {"ok": True}  # без токена — ні версії, ні моделі
+        assert "llm" in client.get("/health", headers={"Authorization": "Bearer secret"}).json()
+        with client.websocket_connect("/ws?token=secret") as ws:
+            ws.receive_json()
+            for bad in ("[1]", '"hello"', "null", "{not json"):
+                ws.send_text(bad)
+            ws.send_json({"type": "ping"})
+            assert ws.receive_json()["type"] == "pong"

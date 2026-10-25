@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import logging
 import os
 import re
 
 from . import Tool, ToolContext, ToolError, preview, truncate
+
+log = logging.getLogger("kru.files")
 
 _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic"}
 
@@ -82,6 +85,11 @@ def backup(ctx: ToolContext, p) -> str:
         return ""
     ws = Path(ctx.workspace).resolve()
     root = ws / BACKUP_DIR
+    if root.is_symlink() or (root.exists() and not root.resolve().is_relative_to(ws)):
+        # .kru-backup підмінили посиланням назовні (shell у пісочниці бачить робочу теку): копії й прибирання
+        # старих тек пішли б туди — краще без копії
+        log.warning("%s — символьне посилання, резервні копії вимкнено", root)
+        return ""
     try:
         rel = p.resolve().relative_to(ws)
     except ValueError:  # файл поза робочою текою (лише для адміна з дозволом)
@@ -97,7 +105,7 @@ def backup(ctx: ToolContext, p) -> str:
     shutil.copy2(p, target)
     cutoff = time.time() - BACKUP_DAYS * 86400
     for old in root.iterdir():
-        if old.is_dir() and old.stat().st_mtime < cutoff:
+        if not old.is_symlink() and old.is_dir() and old.stat().st_mtime < cutoff:
             shutil.rmtree(old, ignore_errors=True)
     return target.relative_to(ws).as_posix()
 
@@ -131,9 +139,22 @@ async def list_dir(ctx: ToolContext, path: str = ".", recursive: bool = False, p
     root = ctx.resolve_path(path)
     if not root.is_dir():
         raise ToolError(f"Директорію не знайдено: {path}")
+    # обхід великої теки — у потоці: інакше на весь час обходу завмирав би весь сервер (робот, Telegram, інші)
+    return await asyncio.to_thread(_list_dir, ctx, root, recursive, pattern)
+
+
+LIST_MAX_DIRS = 20000  # рекурсивний обхід зупиняється тут, навіть якщо збігів мало (тека «/» чи ~)
+
+
+def _list_dir(ctx: ToolContext, root, recursive: bool, pattern: str) -> str:
     entries: list[str] = []
     if recursive:
+        dirs = 0
         for dirpath, dirnames, filenames in os.walk(root):
+            dirs += 1
+            if dirs > LIST_MAX_DIRS:
+                entries.append(f"… (переглянуто {LIST_MAX_DIRS} тек — звузь path чи pattern)")
+                break
             dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
             rel = os.path.relpath(dirpath, root)
             for name in sorted(filenames):

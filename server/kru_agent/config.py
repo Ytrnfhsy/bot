@@ -94,6 +94,9 @@ class Config:
     # Інструменти
     workspace: Path = field(default_factory=lambda: Path.home() / "kru-workspace")
     allow_outside_workspace: bool = False  # лише для адміністраторів
+    # fetch_url / download_url / deep_research до адрес локальної мережі (127.x, 192.168.x, NetBird 100.x…):
+    # типово ні — інакше текст зі сторінки («підказка» для моделі) чи редірект відкрив би їй внутрішні сервіси
+    allow_private_urls: bool = False
     # робочі теки інших користувачів: <USERS_WORKSPACE>/<ім'я>/
     users_workspace: Path = field(default_factory=lambda: Path.home() / "kru-users")
     auto_approve: bool = False
@@ -178,6 +181,7 @@ class Config:
             persona=_env("PERSONA", d.persona),
             workspace=Path(_env("WORKSPACE", str(d.workspace))).expanduser(),
             allow_outside_workspace=_env_bool("ALLOW_OUTSIDE_WORKSPACE", d.allow_outside_workspace),
+            allow_private_urls=_env_bool("ALLOW_PRIVATE_URLS", d.allow_private_urls),
             users_workspace=Path(_env("USERS_WORKSPACE", str(d.users_workspace))).expanduser(),
             auto_approve=_env_bool("AUTO_APPROVE", d.auto_approve),
             sandbox=_env("SANDBOX", d.sandbox).lower(),
