@@ -1650,7 +1650,12 @@ def main() -> None:
             QTimer.singleShot(400, lambda: win.handle_command(cmd))
         elif getattr(settings, "first_run", False):
             QTimer.singleShot(700, win.open_settings)  # перший запуск: одразу вказати сервер і токен
-    sys.exit(app.exec())
+    code = app.exec()
+    # Налаштування збережено, вікна закрито. Далі Python «прибирав» би модулі вже без Qt і міг упасти
+    # з SIGSEGV на якомусь забутому Qt-об'єкті (painter у старому traceback тощо) — виходимо одразу.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
 
 
 DEMO_STATES = [

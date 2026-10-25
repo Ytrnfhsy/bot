@@ -218,8 +218,16 @@ class RobotWidget(QWidget):
         self.update()
 
     # ---------------- малювання ----------------
-    def paintEvent(self, _event) -> None:  # noqa: C901
+    def paintEvent(self, _event) -> None:
+        # painter закриваємо й тоді, коли малювання впало з помилкою: інакше він лишається у traceback
+        # і вже після закриття Qt (на виході) руйнується — робот падає з SIGSEGV
         p = QPainter(self)
+        try:
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _paint(self, p: QPainter) -> None:  # noqa: C901
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.scale(self.scale_factor, self.scale_factor)
 
@@ -274,7 +282,6 @@ class RobotWidget(QWidget):
         else:
             self._draw_overlay(p, c, t, self.state if not self.purring else "idle", bob)
         self._draw_purr(p, t, bob)
-        p.end()
 
     def _draw_drop_hint(self, p: QPainter, c: QColor, t: float, bob: float) -> None:
         rect = QRectF(140, 0 + bob, 56, 36)
