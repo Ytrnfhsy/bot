@@ -58,3 +58,19 @@ def cfg(tmp_path) -> Config:
 
 
 __all__ = ["FakeLLM", "call", "text", "ToolsNotSupported"]
+
+
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch):
+    """Тести без мережі: доменні імена «резолвляться» в публічну адресу, IP — як є (захист від SSRF перевіряє їх)."""
+    from kru_agent.tools import web
+
+    import ipaddress
+
+    async def resolve(host, port):
+        try:
+            return [str(ipaddress.ip_address(host.strip("[]")))]
+        except ValueError:
+            return ["93.184.216.34"]
+
+    monkeypatch.setattr(web, "_resolve", resolve)

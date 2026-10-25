@@ -39,7 +39,7 @@ class SileroVad:
     def feed(self, pcm16: bytes) -> float:
         """Новий звук (16 кГц, моно, 16 біт) → ймовірність мови в останньому повному шматку."""
         np = self._np
-        x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+        x = np.frombuffer(pcm16[: len(pcm16) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
         self._buf = np.concatenate([self._buf, x]) if self._buf.size else x
         while self._buf.size >= CHUNK:
             chunk, self._buf = self._buf[:CHUNK], self._buf[CHUNK:]

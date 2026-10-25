@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from .telegram_format import balance_fences, to_html
+
+log = logging.getLogger("kru.telegram")
 
 API = "https://api.telegram.org"
 LIMIT = 4000  # Telegram приймає до 4096 символів в одному повідомленні
@@ -27,11 +30,10 @@ def split_message(text: str, limit: int = LIMIT) -> list[str]:
     text = text.strip()
     parts: list[str] = []
     while len(text) > limit:
-        cut = max(text.rfind("\n\n", 0, limit), text.rfind("\n", 0, limit), text.rfind(" ", 0, limit))
-        if cut < limit // 2:
-            cut = limit
+        # спершу межа абзацу, потім рядка, потім слова — перша, що не надто близько до початку
+        cut = next((c for sep in ("\n\n", "\n", " ") if (c := text.rfind(sep, 0, limit)) >= limit // 2), limit)
         parts.append(text[:cut].rstrip())
-        text = text[cut:].lstrip()
+        text = text[cut:].lstrip("\n ") if text[cut:cut + 1] == " " else text[cut:].lstrip("\n")  # відступ коду лишаємо
     if text:
         parts.append(text)
     return parts
@@ -79,7 +81,13 @@ class TelegramBot:
             if buttons and i == len(parts) - 1:
                 params["reply_markup"] = keyboard(buttons)
             res = None
-            if markdown and len(formatted := to_html(part)) <= 4096:
+            try:
+                formatted = to_html(part) if markdown else ""
+            except Exception:  # noqa: BLE001 — помилка перетворення не має з'їсти відповідь
+                log.exception("Не вдалося перетворити розмітку для Telegram")
+                formatted = ""
+            # Telegram рахує довжину в UTF-16 (емодзі — по 2)
+            if formatted and len(formatted.encode("utf-16-le")) // 2 <= 4096:
                 try:
                     res = await self._call("sendMessage", **{**params, "text": formatted, "parse_mode": "HTML"})
                 except TelegramError as e:

@@ -30,7 +30,7 @@ RETRY_DELAY = 60  # модель недоступна посеред запус�
 _REL = re.compile(r"^\+?\s*(\d+)\s*(m|min|хв|h|год|d|д)\w*$", re.IGNORECASE)
 
 
-def parse_when(when: str, now: datetime | None = None) -> datetime:
+def parse_when(when: str, now: datetime | None = None, tz=None) -> datetime:
     """Локальний час: «2026-10-14 18:00», «2026-10-14T18:00», «18:00» (сьогодні/завтра), «+30m», «+2h», «+1d»."""
     now = now or datetime.now()
     text = str(when).strip()
@@ -46,8 +46,8 @@ def parse_when(when: str, now: datetime | None = None) -> datetime:
         dt = datetime.fromisoformat(text.replace(" ", "T", 1) if "T" not in text else text)
     except ValueError as e:
         raise ValueError(f"Не розумію час {when!r}. Формат: 2026-10-14 18:00, 18:00 або +30m / +2h / +1d") from e
-    if dt.tzinfo is not None:  # у локальний час сервера
-        dt = dt.astimezone().replace(tzinfo=None)
+    if dt.tzinfo is not None:  # «18:00+02:00» — у місцевий час користувача (tz; без нього — сервера)
+        dt = dt.astimezone(tz).replace(tzinfo=None)
     return dt
 
 
@@ -59,11 +59,11 @@ def next_after(ts: float, repeat: str, now: float | None = None, tz=None) -> flo
     if not repeat:
         return None
     now = time.time() if now is None else now
+    if repeat == "hourly":  # реальні години, а не місцеві: інакше при переході на зимовий час губиться година
+        return ts + max(1, int((now - ts) // 3600) + 1) * 3600
     dt = datetime.fromtimestamp(ts, tz)
     while True:
-        if repeat == "hourly":
-            dt += timedelta(hours=1)
-        elif repeat == "weekly":
+        if repeat == "weekly":
             dt += timedelta(days=7)
         else:
             dt += timedelta(days=1)
@@ -155,6 +155,7 @@ class Scheduler:
         # наступний запуск фіксуємо одразу — навіть якщо виконання впаде, завдання не зациклиться
         self.storage.update_schedule(item["id"], next_run=nxt or item["next_run"], enabled=1 if nxt else 0,
                                      last_run=now, last_status="виконується", last_chat=chat_id)
+        retry = None
         try:
             log.info("Запускаю заплановане завдання #%s: %s", item["id"], item["task"][:80])
             await self.run(item, chat_id)
@@ -166,11 +167,13 @@ class Scheduler:
             # не рахуємо як запуск: повертаємо той самий час — повториться, щойно модель запрацює
             log.warning("Заплановане завдання #%s: модель недоступна (%s) — повторю", item["id"], e)
             self._retry_at[item["id"]] = time.time() + RETRY_DELAY
-            self.storage.update_schedule(item["id"], next_run=item["next_run"], enabled=1)
+            retry = item["next_run"]
             status = "модель недоступна — повторю, щойно запуститься"
         except Exception as e:  # noqa: BLE001
             log.exception("Заплановане завдання #%s впало", item["id"])
             status = f"помилка: {e}"[:200]
         finally:
-            self.storage.update_schedule(item["id"], last_status=status)
+            self.storage.finish_schedule(item["id"], status, retry)
             self._running.discard(item["id"])
+            if retry is None:
+                self._retry_at.pop(item["id"], None)

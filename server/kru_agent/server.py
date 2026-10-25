@@ -66,6 +66,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import json
 import re
 import logging
 import uuid
@@ -140,6 +141,10 @@ def create_app(config: Config | None = None, agent: Agent | None = None) -> Fast
 
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
+        """Без токена — лише «живий»; подробиці (версія, модель) — тим, хто має доступ."""
+        auth = request.headers.get("authorization", "")
+        if users.authenticate(auth.removeprefix("Bearer ").strip() or request.query_params.get("token") or None) is None:
+            return {"ok": True}
         ag: Agent = request.app.state.agent
         return {"ok": True, "version": __version__, "backend": ag.config.backend, "llm": await ag.llm.health()}
 
@@ -192,6 +197,7 @@ class RunningTask:
         self.subscribers: set[Connection] = set()
         self.pending: dict[str, tuple[asyncio.Future[bool | str], dict[str, Any]]] = {}
         self.last_status: dict[str, Any] | None = None
+        self.tools_used = 0  # скільки інструментів уже викликано (заплановане завдання повторювати безпечно лише до них)
 
     @property
     def running(self) -> bool:
@@ -200,6 +206,8 @@ class RunningTask:
     async def emit(self, ev: dict[str, Any]) -> None:
         if ev.get("type") == "status":
             self.last_status = ev
+        elif ev.get("type") == "tool_call":
+            self.tools_used += 1
         if self.scheduled:
             if ev.get("type") != "confirm_request":
                 return
@@ -453,7 +461,12 @@ class Connection:
             await rt.attach(self)  # заплановане завдання може чекати на дозвіл
         try:
             while True:
-                msg = await self.ws.receive_json()
+                try:
+                    msg = json.loads(await self.ws.receive_text())
+                except ValueError:
+                    msg = None
+                if not isinstance(msg, dict):
+                    continue  # зіпсоване повідомлення — пропускаємо, а не обриваємо з'єднання
                 kind = msg.get("type")
                 if kind == "task":
                     text = str(msg.get("text", "")).strip()
@@ -540,9 +553,15 @@ async def run_scheduled(agent: Agent, hub: TaskHub, users: UserStore, item: dict
         agent.storage.rename_chat(chat_id, title, user.name)
         await hub.notify(user.name, {"type": "notify", "title": title, "text": answer[:800], "chat_id": chat_id})
         return answer
-    except LLMUnavailable:
-        agent.storage.clear_session(chat_id, user.name)  # планувальник повторить — порожній чат не лишаємо
-        raise
+    except LLMUnavailable as e:
+        if not rt.tools_used:
+            agent.storage.clear_session(chat_id, user.name)  # планувальник повторить — порожній чат не лишаємо
+            raise
+        # модель зникла посеред задачі, а частину вже зроблено (надіслано, записано…): повтор зробив би це вдруге
+        err = RuntimeError(f"модель стала недоступна посеред задачі — початок уже виконано, тож не повторюю ({e})")
+        await hub.notify(user.name, {"type": "notify", "title": title, "text": f"Не вдалося: {err}",
+                                     "chat_id": chat_id, "error": True})
+        raise err from e
     except Exception as e:
         await hub.notify(user.name, {"type": "notify", "title": title, "text": f"Не вдалося: {e}", "chat_id": chat_id,
                                      "error": True})

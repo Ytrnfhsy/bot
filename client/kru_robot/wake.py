@@ -77,14 +77,21 @@ class WakeLogic:
         self.debug = None  # функція для діагностики (KRU_WAKE_DEBUG=1)
 
     # ---------------- керування ----------------
+    # Команди йдуть від інтерфейсу з запізненням (черга, опитування 40 мс): поки вони в дорозі, логіка вже
+    # могла почути фразу й почати запис. listen / barge / await такий запис не скасовують — інакше питання
+    # губиться мовчки (інтерфейс уже показав «Слухаю…»), а робот глухне. Перервати запис — лише pause().
     def listen(self) -> None:
         """Чекати на фразу."""
+        if self.state == "capture":
+            return
         self.state = "idle"
         self._pending = b""
         self._reset_rec()
 
     def await_command(self, seconds: float) -> None:
         """Слухати без фрази (уточнення після відповіді або «Чуєш, Кру…» з паузою)."""
+        if self.state == "capture":
+            return
         self.state = "await"
         self.deadline = self.n + int(seconds * 1000 / FRAME_MS)
         self.speaking, self.silence = False, 0  # чекаємо нового мовлення, а не хвіст попереднього
@@ -96,6 +103,8 @@ class WakeLogic:
 
     def barge(self) -> None:
         """Робот говорить: не записувати, але чекати на фразу — «Чуєш, Кру» перебиває відповідь."""
+        if self.state in {"capture", "barge"}:
+            return  # наступне речення відповіді — детектор не скидаємо: фраза могла почастися на стику
         self.state = "barge"
         self._reset_rec()
 
@@ -178,6 +187,8 @@ class WakeLogic:
         elif self.state == "paused" or self.state == "busy":
             return events
 
+        if self.state == "capture" and not self.need_wake and self.detector is not None and self._recognize(frame):
+            self.need_wake = True  # уточнення почалося з «Чуєш, Кру» — сервер прибере звертання
         if self.state == "capture":
             elapsed = (self.n - self.capture_started) * FRAME_MS / 1000
             long_enough = elapsed >= MAX_COMMAND
@@ -262,6 +273,8 @@ class WakeListener(QObject):
         self._source = None
         self._io = None
         self._fmt = ("Int16", 1, 16000)
+        # для кожного запуску — свої черги й прапорець зупинки: старий робочий потік (ще вантажить модель)
+        # не з'їсть звук нового й не «перекаже» його подій
         self._queue: queue.Queue = queue.Queue(maxsize=400)  # звук і команди → робочий потік
         self._events: queue.SimpleQueue = queue.SimpleQueue()  # події → потік інтерфейсу
         self._thread: threading.Thread | None = None
@@ -299,9 +312,9 @@ class WakeListener(QObject):
         self._resample = Resampler(fmt[2], RATE)  # модель фрази і Whisper — 16 кГц
         debug(f"мікрофон: {fmt[0]}, каналів {fmt[1]}, {fmt[2]} Гц → {RATE} Гц")
         io.readyRead.connect(self._read)
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._work, args=(phrase_model, sensitivity), name="kru-wake",
-                                        daemon=True)
+        self._stop, self._queue, self._events = threading.Event(), queue.Queue(maxsize=400), queue.SimpleQueue()
+        self._thread = threading.Thread(target=self._work, name="kru-wake", daemon=True,
+                                        args=(phrase_model, sensitivity, self._stop, self._queue, self._events))
         self._thread.start()
         self._poll.start()
         return True
@@ -314,14 +327,10 @@ class WakeListener(QObject):
             self._source.deleteLater()
         self._source = self._io = None
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=0.3)  # не чекаємо, якщо ще вантажить модель: побачить свій прапорець і вийде
         self._thread = None
         self.logic = None
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                break
+        self._queue, self._events = queue.Queue(maxsize=400), queue.SimpleQueue()  # недоставлене — у смітник
 
     # керування — з потоку інтерфейсу; логіку змінює лише робочий потік, тож передаємо командою
     def listen(self) -> None:
@@ -377,13 +386,14 @@ class WakeListener(QObject):
             elif kind == "timeout":
                 self.timeout.emit()
 
-    def _work(self, phrase_model: Path, sensitivity: str) -> None:
+    def _work(self, phrase_model: Path, sensitivity: str, stop: threading.Event, inbox: queue.Queue,
+              outbox: queue.SimpleQueue) -> None:
         try:
             from .wakeword import Detector
 
             detector = Detector(phrase_model, sensitivity)
         except Exception as e:  # noqa: BLE001 — немає onnxruntime, пошкоджена модель тощо
-            self._events.put(("failed", f"не вдалося запустити розпізнавання фрази: {e}"))
+            outbox.put(("failed", f"не вдалося запустити розпізнавання фрази: {e}"))
             return
         debug(f"фразу шукає ПК (своя модель), поріг {detector.threshold:.2f}")
         from . import vad as vadmod
@@ -392,12 +402,14 @@ class WakeListener(QObject):
         debug("кінець фрази — за детектором голосу (Silero VAD)" if vad else "кінець фрази — за гучністю")
         logic = WakeLogic(RATE, detector, vad)
         logic.debug = debug if DEBUG else None
+        if stop.is_set():
+            return  # поки вантажилась модель, слухання вимкнули
         self.logic = logic
-        self._events.put(("ready",))
+        outbox.put(("ready",))
         last_report = time.monotonic()
-        while not self._stop.is_set():
+        while not stop.is_set():
             try:
-                item = self._queue.get(timeout=0.2)
+                item = inbox.get(timeout=0.2)
             except queue.Empty:
                 item = b""
             if isinstance(item, tuple):
@@ -416,11 +428,11 @@ class WakeListener(QObject):
                     item = self._resample(to_mono16(item, self._fmt[0], self._fmt[1]))
                 events = logic.feed(item)
             except Exception as e:  # noqa: BLE001
-                self._events.put(("failed", f"розпізнавання імені: {e}"))
+                outbox.put(("failed", f"розпізнавання імені: {e}"))
                 return
             for ev in events:
                 debug(f"подія {ev[0]}" + (f" ({len(ev[1])} байт, з фразою: {ev[2]})" if ev[0] == "utterance" else ""))
-                self._events.put(ev)
+                outbox.put(ev)
             if DEBUG and time.monotonic() - last_report > 2:
                 last_report = time.monotonic()
                 debug(f"стан {logic.state}, рівень {logic.level:.2f}, шум {logic.floor:.0f}, мовлення {logic.speaking}"

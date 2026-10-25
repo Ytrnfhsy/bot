@@ -32,7 +32,7 @@ def fake_web(monkeypatch):
         searches.append(query)
         return results.get(query, [])
 
-    async def fake_fetch(url, timeout=30):
+    async def fake_fetch(url, timeout=30, **_):
         for key, (title, body) in PAGES.items():
             if research._canonical(key) == research._canonical(url):
                 return key, title, body

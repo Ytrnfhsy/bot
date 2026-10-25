@@ -212,3 +212,52 @@ async def test_download_url(cfg, monkeypatch):
     # і далі — одразу в Telegram / на ПК
     assert (await agent.registry.call(ctx, "send_file", {"path": "downloads/Volodymyr_Zelenskyy_in_2024.png"})
             ).startswith("Файл")
+
+
+async def test_web_tools_do_not_reach_local_network(cfg, monkeypatch):
+    """Сторінка з «підказкою» чи редірект не відкриють моделі llama-server, HolosTTS, машини NetBird."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "evil.example":
+            return httpx.Response(302, headers={"location": "http://127.0.0.1:8085/v1/models"})
+        return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"SECRET")
+
+    _mock_http(monkeypatch, handler)
+    agent = Agent(cfg, llm=FakeLLM([]))
+    ctx = agent.make_context()
+    for url in ("http://127.0.0.1:8085/v1/models", "http://192.168.1.10/", "http://100.80.1.2:8890/",
+                "http://[::1]:8086/", "http://169.254.169.254/latest", "https://evil.example/r"):
+        for tool in ("fetch_url", "download_url"):
+            with pytest.raises(ToolError, match="локальної мережі"):
+                await agent.registry.call(ctx, tool, {"url": url})
+    assert "SECRET" in await agent.registry.call(ctx, "fetch_url", {"url": "https://example.org/"})
+    cfg.allow_private_urls = True  # власник дозволив свідомо
+    assert "SECRET" in await agent.registry.call(ctx, "fetch_url", {"url": "http://192.168.1.10/"})
+
+
+async def test_backup_not_written_through_symlink(cfg, tmp_path):
+    """.kru-backup, підмінений посиланням назовні (shell у пісочниці), не стає дорогою за межі робочої теки."""
+    agent = Agent(cfg, llm=FakeLLM([]))
+    ctx = agent.make_context()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "old").mkdir()
+    import os
+    os.utime(outside / "old", (0, 0))  # «старша за 7 днів» — прибирання видалило б її
+    (cfg.workspace / "a.txt").write_text("1")
+    (cfg.workspace / ".kru-backup").symlink_to(outside, target_is_directory=True)
+    await agent.registry.call(ctx, "write_file", {"path": "a.txt", "content": "2"})
+    assert (cfg.workspace / "a.txt").read_text() == "2"
+    assert sorted(p.name for p in outside.iterdir()) == ["old"]
+
+
+async def test_list_dir_recursive_is_bounded(cfg, monkeypatch):
+    from kru_agent.tools import files
+
+    for i in range(30):
+        (cfg.workspace / f"d{i}").mkdir()
+    monkeypatch.setattr(files, "LIST_MAX_DIRS", 10)
+    agent = Agent(cfg, llm=FakeLLM([]))
+    out = await agent.registry.call(agent.make_context(), "list_dir", {"path": ".", "recursive": True, "pattern": "*.nope"})
+    assert "переглянуто 10 тек" in out

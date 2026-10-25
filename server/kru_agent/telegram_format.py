@@ -10,7 +10,7 @@ from __future__ import annotations
 import html
 import re
 
-_FENCE = re.compile(r"^\s*(```|~~~)\s*([\w+#.-]*)\s*$")
+_FENCE = re.compile(r"^\s*(```|~~~)\s*([\w+#.-]*)[^`~]*$")  # ```мова (і ще щось після неї — ігноруємо)
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _NUMBERED = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
@@ -20,34 +20,67 @@ _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _CHECK = re.compile(r"^\[( |x|X)\]\s+")
 
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
-_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+# адреса може мати дужки (Вікіпедія: …/Foo_(bar)); \x00 — заглушка коду (`код` в адресі — не посилання)
+_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://(?:[^\s()\x00]|\([^\s()\x00]*\))+)\)")
+_BOLD_ITALIC = re.compile(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*")
 _BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__")
 _ITALIC = re.compile(r"(?<![\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])|(?<![\w_])_(?=[^\s_])(.+?)(?<=[^\s_])_(?![\w_])")
 _STRIKE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
 
 
-def _inline(text: str) -> str:
+_TAG = re.compile(r"<(/?)(b|i|s|code|a)\b[^>]*>")
+
+
+def _nested_ok(fragment: str) -> bool:
+    """Теги вкладені правильно (<b><i>…</i></b>, а не <b><i>…</b></i>) — інакше Telegram відхилить усе повідомлення."""
+    stack: list[str] = []
+    for m in _TAG.finditer(fragment):
+        if not m.group(1):
+            stack.append(m.group(2))
+        elif not stack or stack.pop() != m.group(2):
+            return False
+    return not stack
+
+
+def _inline(text: str, keep: list[str] | None = None) -> str:
     """Рядок без блокової розмітки: екранування + **жирний**, *курсив*, ~~закреслений~~, `код`, [посилання](url)."""
-    keep: list[str] = []
+    top = keep is None
+    keep = [] if keep is None else keep  # один список заглушок і для тексту посилання (там теж буває `код`)
 
     def stash(fragment: str) -> str:
         keep.append(fragment)
         return f"\x00{len(keep) - 1}\x00"
 
+    raw = text
     text = _CODE_SPAN.sub(lambda m: stash(f"<code>{html.escape(m.group(1), quote=False)}</code>"), text)
-    text = _LINK.sub(lambda m: stash(f'<a href="{html.escape(m.group(2))}">{_inline(m.group(1))}</a>'), text)
+    text = _LINK.sub(lambda m: stash(f'<a href="{html.escape(m.group(2))}">{_inline(m.group(1), keep)}</a>'), text)
     text = html.escape(text, quote=False)
-    text = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", text)
-    text = _STRIKE.sub(lambda m: f"<s>{m.group(1)}</s>", text)
-    text = _ITALIC.sub(lambda m: f"<i>{m.group(1) or m.group(2)}</i>", text)
-    return re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], text)
+    styled = _BOLD_ITALIC.sub(lambda m: f"<b><i>{m.group(1)}</i></b>", text)
+    styled = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", styled)
+    styled = _STRIKE.sub(lambda m: f"<s>{m.group(1)}</s>", styled)
+    styled = _ITALIC.sub(lambda m: f"<i>{m.group(1) or m.group(2)}</i>", styled)
+    text = styled if _nested_ok(styled) else text  # **a *b** c* — розмітка переплутана: краще без неї
+    if not top:
+        return text
+    while "\x00" in text:  # заглушки всередині заглушок (код у тексті посилання) — до кінця
+        restored = re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], text)
+        if restored == text:
+            return html.escape(raw, quote=False)
+        text = restored
+    return text
 
 
 def _plain(text: str) -> str:
-    """Комірка таблиці: без розмітки (у <pre> вона не діє)."""
-    text = _LINK.sub(lambda m: m.group(1), text)
-    text = re.sub(r"\*\*|__|~~|`", "", text)
-    return re.sub(r"(?<!\w)[*_](?=\S)|(?<=\S)[*_](?!\w)", "", text).strip()
+    """Комірка таблиці чи підпис файлу: без розмітки. `Код` — як є (__init__.py лишається __init__.py)."""
+    parts = re.split(r"(`[^`\n]+`)", _LINK.sub(lambda m: m.group(1), text))
+    out = []
+    for i, part in enumerate(parts):
+        if i % 2:
+            out.append(part[1:-1])
+        else:
+            part = re.sub(r"\*\*|~~|(?<!\w)__|__(?!\w)", "", part)
+            out.append(re.sub(r"(?<![\w*])\*(?=\S)|(?<=\S)\*(?![\w*])|(?<!\w)_(?=\S)|(?<=\S)_(?!\w)", "", part))
+    return "".join(out).strip()
 
 
 def _cells(line: str) -> list[str]:
@@ -75,9 +108,9 @@ def to_html(text: str) -> str:
     i = 0
 
     def flush_quote() -> None:
-        if quote:
+        if any(q.strip() for q in quote):
             out.append("<blockquote>" + "\n".join(quote) + "</blockquote>")
-            quote.clear()
+        quote.clear()
 
     while i < len(lines):
         line = lines[i]
@@ -94,7 +127,7 @@ def to_html(text: str) -> str:
             attr = f' class="language-{html.escape(lang)}"' if lang else ""
             out.append(f"<pre><code{attr}>{body}</code></pre>")
             continue
-        if "|" in line and i + 1 < len(lines) and _TABLE_SEP.match(lines[i + 1]):
+        if "|" in line and i + 1 < len(lines) and "|" in lines[i + 1] and _TABLE_SEP.match(lines[i + 1]):
             flush_quote()
             rows = [_cells(line)]
             i += 2
@@ -137,12 +170,16 @@ def balance_fences(parts: list[str]) -> list[str]:
         carry = ""
         opened = ""
         for line in part.split("\n"):
-            if m := _FENCE.match(line):
-                opened = "" if opened else f"{m.group(1)}{m.group(2)}"
+            if opened:  # блок закриває лише той самий знак (``` чи ~~~), як і в to_html
+                if line.strip().startswith(opened[:3]):
+                    opened = ""
+            elif m := _FENCE.match(line):
+                opened = f"{m.group(1)}{m.group(2)}"
         if opened:
             part += "\n" + opened[:3]
             carry = opened
-        out.append(part)
+        if any(line.strip() and not _FENCE.match(line) for line in part.split("\n")):
+            out.append(part)  # частина з самих ``` (розріз якраз перед закривною) — порожнє повідомлення, пропускаємо
     return out
 
 

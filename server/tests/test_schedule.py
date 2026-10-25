@@ -228,3 +228,51 @@ async def test_scheduler_waits_for_model_after_reboot(cfg):
         await t
     item = agent.storage.list_schedules("owner")[0]
     assert ran == [sid] and item["last_status"] == "виконано" and item["next_run"] > time.time()
+
+
+def test_scheduled_task_not_repeated_after_model_dies_midway(cfg):
+    """Модель упала після першої дії (тут — нове нагадування): повтор зробив би її вдруге — ні, це помилка."""
+    from kru_agent.llm import LLMUnavailable
+
+    client, app, agent = _app(cfg, [call("schedule_task", task="нагадай води", when="+5h"),
+                                    LLMUnavailable("connect refused")])
+    with client, client.websocket_connect("/ws?token=secret") as ws:
+        ws.receive_json()
+        sid = agent.storage.add_schedule("owner", "зроби щось", time.time() - 1)
+        for t in client.portal.call(app.state.scheduler.tick):
+            client.portal.call(lambda t=t: t)
+        note, _ = _until(ws, "notify")
+        assert note.get("error") and "не повторюю" in note["text"]
+    item = next(i for i in agent.storage.list_schedules("owner", include_done=True) if i["id"] == sid)
+    assert item["enabled"] == 0 and item["last_status"].startswith("помилка")
+    assert [i["task"] for i in agent.storage.list_schedules("owner") if i["id"] != sid] == ["нагадай води"]
+
+
+async def test_cancel_while_running_stays_cancelled(cfg):
+    from kru_agent.llm import LLMUnavailable
+
+    agent = Agent(cfg, llm=FakeLLM([]))
+    sid = agent.storage.add_schedule("owner", "щодня", time.time() - 1, "daily")
+
+    async def run(item, chat_id):
+        assert agent.storage.cancel_schedule(sid, "owner")  # користувач скасував, поки виконувалось
+        raise LLMUnavailable("впало")
+
+    for t in await Scheduler(agent.storage, run, lambda o: False).tick():
+        await t
+    item = agent.storage.list_schedules("owner", include_done=True)[0]
+    assert item["enabled"] == 0 and item["last_status"] == "скасовано"
+
+
+async def test_explicit_offset_and_hourly_over_dst(cfg):
+    from zoneinfo import ZoneInfo
+
+    kyiv = ZoneInfo("Europe/Kyiv")
+    at = parse_when("2026-12-01T18:00+02:00", datetime(2026, 11, 30, 12, 0), tz=kyiv)
+    assert at == datetime(2026, 12, 1, 18, 0)  # у поясі користувача, а не сервера
+    # 25.10.2026 о 04:00 у Києві годинник іде на 03:00: щогодини — кожні 3600 с, без пропущеної години
+    ts = datetime(2026, 10, 25, 2, 30, tzinfo=kyiv).timestamp()
+    runs = [ts]
+    for _ in range(3):
+        runs.append(next_after(runs[-1], "hourly", runs[-1], kyiv))
+    assert [b - a for a, b in zip(runs, runs[1:])] == [3600, 3600, 3600]
