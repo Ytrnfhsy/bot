@@ -840,6 +840,67 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
     check("wake_logic", wake_logic_check)
 
+    def vad_check():
+        """Детектор голосу: модель із пакета вантажиться; гул, шум і клацання — не мова; запис закінчується,
+        щойно стих голос, хоч фон і гучний."""
+        import array
+        import math as _m
+
+        from . import vad as vadmod
+        from .wake import WakeLogic
+
+        rate = 16000
+        detail = "немає numpy/onnxruntime — лише логіка"
+        if not __import__("kru_robot.wakeword", fromlist=["available"]).available():
+            need(vadmod.MODEL.is_file(), f"немає моделі {vadmod.MODEL}")
+            v = vadmod.SileroVad()
+            hum = array.array("h", [int(3000 * _m.sin(2 * _m.pi * 120 * i / rate)) for i in range(rate * 3)])
+            noise = array.array("h", [(i * 7919 % 4001) - 2000 for i in range(rate * 3)])  # «білий» шум
+            clicks = array.array("h", [20000 if i % 4000 == 0 else 0 for i in range(rate * 3)])
+            for name, a in (("гул", hum), ("шум", noise), ("клацання", clicks)):
+                v.reset()
+                pcm = a.tobytes()
+                top = max(v.feed(pcm[i:i + 960]) for i in range(0, len(pcm), 960))
+                need(top < 0.5, f"{name} — схоже на мову: {top:.2f}")
+            detail = "ok"
+
+        class FakeVad:  # «голос» — гучний тон, решта — ні
+            def feed(self, frame):
+                return 0.9 if max(abs(x) for x in array.array("h", frame)) > 2000 else 0.05
+
+        class FakeDet:
+            threshold = 0.5
+            loud = 0
+
+            def reset(self):
+                self.loud = 0
+
+            def feed(self, frame):
+                self.loud += max(abs(x) for x in array.array("h", frame)) > 2000
+                return 1.0 if self.loud >= 10 else 0.0
+
+        def tone(sec, amp=8000):
+            return array.array("h", [int(amp * _m.sin(2 * _m.pi * 220 * i / rate)) for i in range(int(rate * sec))]).tobytes()
+
+        lg = WakeLogic(rate, FakeDet(), FakeVad())
+        ev = lg.feed(b"\0\0" * rate + tone(1.5))
+        need([e[0] for e in ev] == ["wake"], f"фраза з детектором голосу: {ev}")
+        hum = tone(3.0, amp=1500)  # гучний гул (гучніший за поріг тиші), але не голос
+        ev = lg.feed(hum[: int(rate * 1.4) * 2])
+        need([e[0] for e in ev] == ["utterance"], f"гул затягнув запис: {[e[0] for e in ev]}")
+        # перебивання: поки робот говорить — лише фраза, у запис іде те, що після неї
+        lg = WakeLogic(rate, FakeDet(), FakeVad())
+        lg.feed(tone(2.0))  # «говорить сам робот»
+        lg.barge()
+        ev = lg.feed(tone(0.4))
+        need([e[0] for e in ev] == ["wake"] and lg.state == "capture", f"перебивання: {ev}, {lg.state}")
+        ev = lg.feed(tone(1.0) + b"\0\0" * int(rate * 1.5))
+        need([e[0] for e in ev] == ["utterance"] and (len(ev[0][1]) - 44) / 2 / rate < 3.3,
+             f"у запис потрапив голос робота: {[(e[0], (len(e[1]) - 44) / 2 / rate if len(e) > 1 else 0) for e in ev]}")
+        return detail
+
+    check("vad", vad_check)
+
     def wakeword_check():
         """Своя фраза: потоковий детектор (заглушки мереж відбитків) і його місце в логіці слухання."""
         from . import wakeword as wwmod
@@ -959,6 +1020,9 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             def pause(self):
                 self.calls.append(("pause",))
 
+            def barge(self):
+                self.calls.append(("barge",))
+
         sent, played = [], []
         orig = (win.conn.send, win.wake, win.player.play, win.chime.play)
         ww_orig = (wwmod.folder, wwmod.available)
@@ -1018,10 +1082,29 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             need(tts["type"] == "tts", "відповідь не озвучується")
             win.on_event({"type": "tts_audio", "id": tts["id"], "format": "wav",
                           "data": _b64.b64encode(make_wav(b"\0\0" * 800, 16000)).decode()})
-            need(("pause",) in fake.calls, "слухав сам себе під час відповіді")
+            need(fake.calls[-1] == ("barge",), f"поки говорить — лише чекає фразу: {fake.calls[-1:]}")
+            need(win.panel.btn_mute.isVisibleTo(win.panel), "немає кнопки «Замовкни»")
             win.player.stop()
             QTest_wait(400)
             need(fake.calls[-1] == ("await", 6), f"уточнення після відповіді: {fake.calls[-1]}")
+            need(not win.panel.btn_mute.isVisibleTo(win.panel), "кнопка «Замовкни» лишилась")
+            # «Чуєш, Кру» посеред відповіді — замовкає й слухає; «стоп» — без задачі
+            fake.utterance.emit(b"RIFF", False)
+            win.on_event({"type": "voice_text", "id": sent[-1]["id"], "text": "А завтра?"})
+            win.on_event({"type": "final", "text": "Завтра дощ."})
+            win.on_event({"type": "status", "state": "idle"})
+            win.on_event({"type": "tts_audio", "id": sent[-1]["id"], "format": "wav", "last": False,
+                          "data": _b64.b64encode(make_wav(b"\0\0" * 800, 16000)).decode()})
+            need(win.player.playing, "друга відповідь не звучить")
+            fake.woke.emit()
+            QTest_wait(400)
+            need(not win.player.playing and sent[-1]["type"] == "tts_stop", f"не замовк: {sent[-1]}")
+            need(fake.calls[-1] == ("barge",), f"перебили — а він повернувся до чекання: {fake.calls[-1:]}")
+            fake.utterance.emit(b"RIFF", True)
+            need(sent[-1].get("wake") == "detected", f"після перебивання: {sent[-1]}")
+            n_sent = len(sent)
+            win.on_event({"type": "voice_text", "id": sent[-1]["id"], "text": "Стоп."})
+            need(len(sent) == n_sent and fake.calls[-1] == ("listen",), f"«стоп» став задачею: {sent[n_sent:]}")
             win.robot.double_clicked.emit()
             need(not fake.active and not win.robot.wake_mode and not win.act_wake.isChecked(), "не вимкнувся")
             need(not win.settings.wake_enabled, "вимкнення не запам'яталось")
@@ -1057,6 +1140,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
         from . import audio as audiomod
         from . import wake as wakemod
+        from . import vad as vadmod
         from . import wakeword as wwmod
 
         rate = 16000
@@ -1100,9 +1184,10 @@ def run_selftest(app: QApplication, report_path: str) -> int:
                 return 1.0 if self.loud >= 10 else 0.0
 
         src = FakeSource()
-        state["listener_orig"] = (audiomod.open_input, wwmod.Detector)
+        state["listener_orig"] = (audiomod.open_input, wwmod.Detector, vadmod.load)
         audiomod.open_input = lambda parent=None, rate=16000: (src, ("Int16", 1, rate))
         wwmod.Detector = FakeDet
+        vadmod.load = lambda: None  # тут мовлення — синтетичний тон, детектор голосу його справедливо не впізнає
         lst = wakemod.WakeListener()
         got = state["listener_got"] = []
         lst.ready.connect(lambda: got.append("ready"))
@@ -1128,6 +1213,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
     def listener_check():
         from . import audio as audiomod
+        from . import vad as vadmod
         from . import wakeword as wwmod
 
         lst, got = state["listener"], state["listener_got"]
@@ -1137,7 +1223,7 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             lst.stop()
             need(not lst.active, "не зупинився")
         finally:
-            audiomod.open_input, wwmod.Detector = state.pop("listener_orig")
+            audiomod.open_input, wwmod.Detector, vadmod.load = state.pop("listener_orig")
         return got
 
     step(50, lambda: check("wake_listener_start", listener_start))
