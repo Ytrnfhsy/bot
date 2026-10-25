@@ -820,6 +820,22 @@ def run_selftest(app: QApplication, report_path: str) -> int:
         ev = lg.feed(tone(0.5) + soft + tone(0.3) + quiet(1.5))
         need([e[0] for e in ev] == ["wake", "utterance"] and (len(ev[-1][1]) - 44) / 2 / rate > 2.2,
              f"фраза обірвалась на тихому: {[(e[0], (len(e[1]) - 44) / 2 / rate if len(e) > 1 else 0) for e in ev]}")
+        # «Чуєш, Кру» … пауза … питання: саму фразу не відправляє, чекає на питання
+        lg = WakeLogic(rate, FakeDet())
+        ev = lg.feed(quiet(1.0) + tone(0.4))
+        need([e[0] for e in ev] == ["wake"], f"фраза: {ev}")
+        need(lg.feed(quiet(2.5)) == [], "відправив саму фразу, не дочекавшись питання")
+        ev = lg.feed(tone(1.0) + quiet(1.5))
+        need([e[0] for e in ev] == ["utterance"] and ev[0][2] is True and (len(ev[0][1]) - 44) / 2 / rate > 3.5,
+             f"питання після паузи: {[(e[0], (len(e[1]) - 44) / 2 / rate if len(e) > 1 else 0) for e in ev]}")
+        lg.listen()
+        lg.feed(tone(0.4))
+        need(lg.feed(quiet(5.5)) == [("timeout",)], "фраза без питання — мовчки назад до чекання")
+        # після питання загудів фон (вентилятор, телевізор): запис не тягнеться до 15 с
+        lg = WakeLogic(rate, FakeDet())
+        hum = array.array("h", [int(850 * _m.sin(2 * _m.pi * 120 * i / rate)) for i in range(int(rate * 4))]).tobytes()
+        ev = lg.feed(quiet(1.0) + tone(1.5) + hum)
+        need([e[0] for e in ev] == ["wake", "utterance"], f"фон затягнув запис: {[e[0] for e in ev]}, фон {lg.floor:.0f}")
         return "ok"
 
     check("wake_logic", wake_logic_check)

@@ -34,6 +34,12 @@ BUFFER_SEC = 20  # стільки останніх секунд тримаємо
 END_SILENCE = 1.2  # пауза, після якої фраза вважається завершеною (паузи між словами коротші)
 MAX_COMMAND = 15.0  # найдовша фраза після імені
 MIN_FOLLOWUP = 0.5  # с — уточнення без імені коротше за це вважаємо шумом і слухаємо далі
+WAKE_WAIT = 5.0  # с після «Чуєш, Кру» чекаємо, поки почнеться саме питання (людина часто робить паузу)
+MIN_COMMAND = 0.5  # с мовлення після фрази — це вже питання, а не хвіст «…Кру»
+FLOOR_WINDOW = 1.2  # с: найтихіше за цей час — рівень фону (вентилятор, телевізор), навіть посеред фрази
+
+
+MIN_COMMAND_FRAMES = int(MIN_COMMAND * 1000 / FRAME_MS)
 
 
 class WakeLogic:
@@ -41,7 +47,7 @@ class WakeLogic:
     ("wake",)                 — почуто фразу, почався запис фрази;
     ("speech",)               — у режимі очікування уточнення почалося мовлення;
     ("utterance", wav, need)  — фраза записана (need — у ній є звертання, сервер його прибере);
-    ("timeout",)              — уточнення так і не прозвучало.
+    ("timeout",)              — уточнення (чи питання після фрази) так і не прозвучало.
     Після "utterance" логіка чекає, поки застосунок викличе listen() чи await_command()."""
 
     def __init__(self, rate: int, detector=None) -> None:
@@ -59,6 +65,8 @@ class WakeLogic:
         self.silence = 0  # кадрів тиші поспіль
         self.capture_from = 0
         self.capture_started = 0
+        self.voiced = 0  # кадрів мовлення після фрази-активатора
+        self._quiet: deque[float] = deque(maxlen=int(FLOOR_WINDOW * 1000 / FRAME_MS))
         self.deadline = 0  # кадр, до якого чекаємо на уточнення
         self.level = 0.0
         self.debug = None  # функція для діагностики (KRU_WAKE_DEBUG=1)
@@ -109,10 +117,17 @@ class WakeLogic:
         loud = rms > (keep if self.speaking else start)
         if not loud:
             self.floor = 0.97 * self.floor + 0.03 * max(rms, 50.0)
+        # фон, що з'явився чи посилився посеред фрази (вентилятор, телевізор), інакше «тягне» запис до 15 с:
+        # найтихіший кадр за останню секунду — і є фон (у мовленні між складами завжди є тихіші місця)
+        self._quiet.append(rms)
+        if len(self._quiet) == self._quiet.maxlen and (low := min(self._quiet)) > self.floor * 1.3:
+            self.floor = 0.95 * self.floor + 0.05 * low
         events: list[tuple] = []
         was_speaking = self.speaking
         if loud:
             self.silence = 0
+            if self.state == "capture":
+                self.voiced += 1
             if not self.speaking:
                 self.speaking = True
                 self.speech_start = self.n
@@ -121,6 +136,7 @@ class WakeLogic:
                     self.need_wake = False
                     self.capture_from = self._preroll(self.n)
                     self.capture_started = self.n
+                    self.voiced = MIN_COMMAND_FRAMES  # уточнення — уже саме питання
                     events.append(("speech",))
         else:
             self.silence += 1
@@ -140,12 +156,23 @@ class WakeLogic:
                 start = self.speech_start if recent else self.n
                 self.capture_from = self._preroll(max(start, self.n - int(10 * 1000 / FRAME_MS)))
                 self.capture_started = self.n
+                self.voiced = 0
                 events.append(("wake",))
         elif self.state == "paused" or self.state == "busy":
             return events
 
         if self.state == "capture":
-            long_enough = (self.n - self.capture_started) * FRAME_MS / 1000 >= MAX_COMMAND
+            elapsed = (self.n - self.capture_started) * FRAME_MS / 1000
+            long_enough = elapsed >= MAX_COMMAND
+            if self.need_wake and self.voiced < MIN_COMMAND_FRAMES and not long_enough:
+                # «Чуєш, Кру» і пауза: питання ще попереду — не відправляємо саму фразу, а чекаємо на нього
+                if elapsed < WAKE_WAIT:
+                    return events
+                if self.debug:
+                    self.debug(f"після фрази {WAKE_WAIT:.0f} с тиші — питання так і не прозвучало")
+                self.state = "busy"
+                events.append(("timeout",))
+                return events
             if not self.speaking or long_enough:
                 spoken = (self.n - self.capture_started - self.silence) * FRAME_MS / 1000
                 if not self.need_wake and spoken < MIN_FOLLOWUP and not long_enough:
@@ -157,6 +184,10 @@ class WakeLogic:
                         self.state = "busy"
                         events.append(("timeout",))
                     return events
+                if self.debug:
+                    why = "задовга фраза" if long_enough else f"пауза {END_SILENCE} с"
+                    self.debug(f"фраза записана: {elapsed:.1f} с ({why}); фон {self.floor:.0f}, "
+                               f"тиша — нижче {max(self.floor * 1.6, 250.0):.0f}")
                 events.append(("utterance", self._audio(self.capture_from), self.need_wake))
                 self.state = "busy"
         return events
