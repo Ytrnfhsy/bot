@@ -584,7 +584,15 @@ class ChatPanel(QWidget):
         return self.isVisible() and not self._hiding
 
     def paintEvent(self, _event) -> None:
+        # painter закриваємо й тоді, коли малювання впало з помилкою: інакше він лишається у traceback
+        # і вже після закриття Qt (на виході) руйнується — робот падає з SIGSEGV
         p = QPainter(self)
+        try:
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _paint(self, p: QPainter) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         # м'яка тінь під карткою: кілька напівпрозорих шарів, що розширюються
         r = QRectF(self.card.geometry())
@@ -593,7 +601,6 @@ class ChatPanel(QWidget):
             p.setBrush(QColor(30, 45, 70, max(2, 16 - i * 2)))
             p.drawRoundedRect(r.adjusted(-i, -i + 3, i, i + 3), 18 + i, 18 + i)
         if not self._tail_side:
-            p.end()
             return
         # «хвостик» бульбашки: малюємо під карткою, тож видно лише кінчик, що виступає до робота
         y = max(36, min(self._tail_y, self.height() - 36))
@@ -604,7 +611,6 @@ class ChatPanel(QWidget):
         p.setPen(QPen(CARD_BORDER, 1))
         p.setBrush(CARD_FILL)
         p.drawPolygon(poly)
-        p.end()
 
     def set_status(self, text: str, ok: bool, details: str = "") -> None:
         color = "#2F9E44" if ok else "#C92A2A"
