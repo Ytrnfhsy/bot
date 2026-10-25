@@ -17,3 +17,6 @@ kru-robot = "kru_robot.app:main"
 
 [tool.setuptools.packages.find]
 include = ["kru_robot*"]
+
+[tool.setuptools.package-data]
+kru_robot = ["models/*.onnx"]  # детектор голосу Silero VAD (MIT, vad.py)

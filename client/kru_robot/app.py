@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import math
 import os
+import re
 import sys
 import time
 
@@ -235,6 +236,15 @@ THINK_MODES = {"auto": "авто — лише складні задачі (шв�
                "off": "ніколи (найшвидше)"}
 WAKE_SENSITIVITY = {"low": "низька — рідше помиляється", "medium": "середня", "high": "висока — чує здалеку"}
 FOLLOWUP_SEC = 6  # стільки слухаємо уточнення без імені після відповіді
+STOP_WORDS = {"стоп", "стій", "досить", "годі", "замовкни", "замовчи", "тихо", "тихіше", "хватить", "вистачить",
+              "припини", "перестань", "помовч", "мовчи", "все", "усе", "скасуй", "відміна", "stop"}
+_STOP_FILLER = {"будь", "ласка", "кру", "вже", "ну", "а", "та", "і", "й"}
+
+
+def is_stop_phrase(text: str) -> bool:
+    """«Стоп», «досить», «ну все, замовкни»… — просять замовкнути, а не ставлять задачу."""
+    words = [w for w in re.sub(r"[^\w\s'’]", " ", text.lower()).split() if w not in _STOP_FILLER]
+    return 0 < len(words) <= 2 and all(w in STOP_WORDS for w in words)
 BUSY_PHRASE = "Зачекай хвилинку, я ще працюю над попередньою задачею."
 
 
@@ -292,13 +302,17 @@ class RobotWindow(QWidget):
         self._wake_turn = False  # поточна задача — з режиму «Кру»: відповідь голосом, потім уточнення
         self._wake_pending: str | None = None  # id запису з режиму «Кру», що розпізнається на сервері
         self._wake_loading = False
+        self._wake_capturing = False  # почув фразу й записує питання — не повертати слухання до чекання фрази
+        self._barged = False  # відповідь перебили фразою: її кінець не повертає слухання до чекання
         self._wire_wake(WakeListener(self))
         self.player = Player(self)
         self.player.stopped.connect(self._on_speech_done)
         self._tts_id: str | None = None  # озвучення, що приходить частинами (по реченнях)
         self._tts_queue: list[bytes] = []  # частини, що чекають своєї черги
         self._tts_done = True  # остання частина вже прийшла
-        self.player.started.connect(lambda: self.wake.active and self.wake.pause())  # не слухати самого себе
+        # поки говорить — не записує сам себе, але чекає на «Чуєш, Кру»: нею відповідь можна перебити
+        self.player.started.connect(lambda: self.wake.active and not self._wake_capturing and self.wake.barge())
+        self.player.started.connect(lambda: self.panel.set_speaking(True))
         self._voice_task = False  # поточну задачу поставлено голосом — відповідь озвучити
         self._voice_seq = 0
         self._level_timer = QTimer(self, interval=33)
@@ -326,6 +340,7 @@ class RobotWindow(QWidget):
         self.panel.resized.connect(self._on_panel_resized)
         self.panel.font_changed.connect(self._on_font_changed)
         self.panel.mic_toggled.connect(self.toggle_mic)
+        self.panel.mute_requested.connect(self.stop_speech)
         self.conn.event.connect(self.on_event)
         self.conn.connected.connect(self.on_connected)
         self.conn.disconnected.connect(self.on_disconnected)
@@ -619,6 +634,7 @@ class RobotWindow(QWidget):
         if self._tts_id and not self._tts_done:
             self.conn.send({"type": "tts_stop", "id": self._tts_id})  # попереднє озвучення вже не потрібне
         self._tts_queue = []
+        self._barged = False  # нова відповідь — давнє перебивання вже не стосується її кінця
         self._voice_seq += 1
         self._speech_volume = s.voice_volume if volume is None else volume
         self._tts_id, self._tts_done = f"t{self._voice_seq}", False
@@ -679,13 +695,16 @@ class RobotWindow(QWidget):
             if not self._tts_done:
                 return  # сервер ще озвучує наступне речення — «говорить» далі
             self._tts_id = None
+        self.panel.set_speaking(False)
         if not self.wake.active:
             self._level_timer.stop()
         self.robot.voice_level = 0.0
         if self.robot.state == "talking":
             self.robot.set_state("happy", 1.5)
             QTimer.singleShot(3300, self._back_to_idle)
-        if self._wake_turn:
+        if self._barged:  # перебили фразою: слухання вже записує питання, хай і закінчить сам
+            self._barged = False
+        elif self._wake_turn:
             self._after_wake_reply()
         elif self.wake.active and not self._wake_pending:
             QTimer.singleShot(300, self._wake_listen)  # відлуння власного голосу встигне затихнути
@@ -798,7 +817,7 @@ class RobotWindow(QWidget):
         self.panel.set_activity("👂 Вмикаю режим «Кру»…")  # модель вантажиться у фоні — далі сигнал ready
 
     def _wake_listen(self) -> None:
-        if self.wake.active and not self.player.playing and not self.recorder.active:
+        if self.wake.active and not self.player.playing and not self.recorder.active and not self._wake_capturing:
             self.wake.listen()
 
     def _on_wake_failed(self, reason: str) -> None:
@@ -807,8 +826,13 @@ class RobotWindow(QWidget):
         self.show_panel()
 
     def _on_wake(self) -> None:
-        """Почув фразу — слухає питання."""
+        """Почув фразу — слухає питання. Якщо саме говорив — замовкає (перебили)."""
         self.touch()
+        self._wake_capturing = True
+        if self.player.playing or self._tts_id:
+            self._wake_turn = False  # відповідь перебили — уточнень після неї не чекаємо
+            self._barged = True
+            self.stop_speech()
         self.chime.play(self._chimes[True], self.settings.voice_volume / 200)
         self.robot.set_state("listening")
         self.panel.set_activity("🎤 Слухаю…")
@@ -819,6 +843,7 @@ class RobotWindow(QWidget):
         self.panel.set_activity("🎤 Слухаю…")
 
     def _on_wake_timeout(self) -> None:
+        self._wake_capturing = False
         if self.robot.state == "listening":
             self.robot.set_state("idle")
         self.panel.set_activity("")
@@ -826,6 +851,7 @@ class RobotWindow(QWidget):
 
     def _on_wake_utterance(self, wav: bytes, need_name: bool) -> None:
         """Фраза записана — на сервер (Whisper розпізнає, звертання прибере)."""
+        self._wake_capturing = False
         if self.busy:  # агент ще працює — нову задачу не беремо (як і з чату)
             self.robot.set_state("waiting", 2.0, then="thinking")
             self.panel.set_activity("⏳ " + BUSY_PHRASE)
@@ -860,6 +886,12 @@ class RobotWindow(QWidget):
             if self.robot.state in {"thinking", "listening"}:
                 self.robot.set_state("idle")
             self.panel.set_activity("")
+            self.wake.listen()
+            return
+        if is_stop_phrase(text):  # «Кру, стоп» — лише замовкнути (вже замовк, почувши фразу), без задачі
+            self.robot.set_state("idle")
+            self.panel.set_activity("🤐 Замовк")
+            QTimer.singleShot(1500, lambda: self.panel.activity_text == "🤐 Замовк" and self.panel.set_activity(""))
             self.wake.listen()
             return
         self.chime.play(self._chimes[False], self.settings.voice_volume / 200)

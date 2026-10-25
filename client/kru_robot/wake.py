@@ -37,6 +37,9 @@ MIN_FOLLOWUP = 0.5  # с — уточнення без імені коротше
 WAKE_WAIT = 5.0  # с після «Чуєш, Кру» чекаємо, поки почнеться саме питання (людина часто робить паузу)
 MIN_COMMAND = 0.5  # с мовлення після фрази — це вже питання, а не хвіст «…Кру»
 FLOOR_WINDOW = 1.2  # с: найтихіше за цей час — рівень фону (вентилятор, телевізор), навіть посеред фрази
+WAKE_LOOKBACK = 3.0  # с звуку до кінця фрази, що потрапляють у запис (сама фраза — ~1 с); давніше — ні
+# детектор голосу (vad.py): ймовірність мови, з якої мовлення починається / ще триває; уточнення — суворіше
+VAD_START, VAD_START_STRICT, VAD_KEEP = 0.5, 0.6, 0.35
 
 
 MIN_COMMAND_FRAMES = int(MIN_COMMAND * 1000 / FRAME_MS)
@@ -50,14 +53,16 @@ class WakeLogic:
     ("timeout",)              — уточнення (чи питання після фрази) так і не прозвучало.
     Після "utterance" логіка чекає, поки застосунок викличе listen() чи await_command()."""
 
-    def __init__(self, rate: int, detector=None) -> None:
+    def __init__(self, rate: int, detector=None, vad=None) -> None:
         self.rate = rate
         self.detector = detector  # своя фраза («Чуєш, Кру», wakeword.Detector)
+        self.vad = vad  # детектор голосу (vad.SileroVad); None — мовлення визначаємо за гучністю
+        self.voice = 0.0  # остання ймовірність мови від детектора голосу
         self.frame_bytes = int(rate * FRAME_MS / 1000) * 2
         self.frames: deque[bytes] = deque(maxlen=int(BUFFER_SEC * 1000 / FRAME_MS))
         self.n = 0  # номер останнього кадру
         self._pending = b""
-        self.state = "idle"  # idle | capture | await | busy | paused
+        self.state = "idle"  # idle | capture | await | busy | paused | barge (говорить сам — чекає лише фразу)
         self.need_wake = True
         self.floor = 300.0  # рівень фонового шуму (адаптивний)
         self.speaking = False
@@ -89,6 +94,11 @@ class WakeLogic:
     def pause(self) -> None:
         self.state = "paused"
 
+    def barge(self) -> None:
+        """Робот говорить: не записувати, але чекати на фразу — «Чуєш, Кру» перебиває відповідь."""
+        self.state = "barge"
+        self._reset_rec()
+
     def _reset_rec(self) -> None:
         if self.detector is not None:
             self.detector.reset()  # інакше щойно почута фраза спрацює ще раз
@@ -114,7 +124,12 @@ class WakeLogic:
         start = max(self.floor * (3.5 if strict else 2.5), 600.0 if strict else 350.0)
         # почалось мовлення — далі досить і тихішого звуку: тихі склади й кінці слів не рвуть фразу
         keep = max(self.floor * 1.6, 250.0)
-        loud = rms > (keep if self.speaking else start)
+        if self.vad is not None:  # голос, а не просто гучно: гул, музика, стук і клавіатура мовленням не є
+            self.voice = self.vad.feed(frame)
+            need = VAD_KEEP if self.speaking else VAD_START_STRICT if strict else VAD_START
+            loud = self.voice >= need and rms > 60.0
+        else:
+            loud = rms > (keep if self.speaking else start)
         if not loud:
             self.floor = 0.97 * self.floor + 0.03 * max(rms, 50.0)
         # фон, що з'явився чи посилився посеред фрази (вентилятор, телевізор), інакше «тягне» запис до 15 с:
@@ -146,15 +161,17 @@ class WakeLogic:
         if self.state == "await" and not self.speaking and self.n > self.deadline:
             self.state = "busy"
             return [("timeout",)]
-        if self.state == "idle":
+        if self.state in {"idle", "barge"}:
             hit = self._recognize(frame)
             if hit:
-                self.state = "capture"
+                barged, self.state = self.state == "barge", "capture"
                 self.need_wake = True
-                # фраза — від початку поточного (чи щойно завершеного) мовлення, але не давніше 10 с
-                recent = self.speaking or was_speaking or self.n - self.speech_start < 10 * 1000 / FRAME_MS
-                start = self.speech_start if recent else self.n
-                self.capture_from = self._preroll(max(start, self.n - int(10 * 1000 / FRAME_MS)))
+                # фраза — від початку поточного мовлення, але не давніше WAKE_LOOKBACK: розмова до фрази
+                # у запис не йде. Перебив відповідь — лише те, що після фрази (до неї звучав сам робот)
+                lookback = self.n - int(WAKE_LOOKBACK * 1000 / FRAME_MS)
+                recent = self.speaking or was_speaking or self.speech_start > lookback
+                start = self.n if barged else self.speech_start if recent else self.n
+                self.capture_from = self._preroll(max(start, lookback))
                 self.capture_started = self.n
                 self.voiced = 0
                 events.append(("wake",))
@@ -186,8 +203,9 @@ class WakeLogic:
                     return events
                 if self.debug:
                     why = "задовга фраза" if long_enough else f"пауза {END_SILENCE} с"
-                    self.debug(f"фраза записана: {elapsed:.1f} с ({why}); фон {self.floor:.0f}, "
-                               f"тиша — нижче {max(self.floor * 1.6, 250.0):.0f}")
+                    self.debug(f"фраза записана: {elapsed:.1f} с ({why}); " + (
+                        "кінець — за детектором голосу" if self.vad is not None else
+                        f"фон {self.floor:.0f}, тиша — нижче {max(self.floor * 1.6, 250.0):.0f}"))
                 events.append(("utterance", self._audio(self.capture_from), self.need_wake))
                 self.state = "busy"
         return events
@@ -315,6 +333,10 @@ class WakeListener(QObject):
     def pause(self) -> None:
         self._command(("pause",))
 
+    def barge(self) -> None:
+        """Робот заговорив: чекати лише на фразу, щоб нею можна було його перебити."""
+        self._command(("barge",))
+
     def _command(self, cmd: tuple) -> None:
         if self._source is not None:
             try:
@@ -364,7 +386,11 @@ class WakeListener(QObject):
             self._events.put(("failed", f"не вдалося запустити розпізнавання фрази: {e}"))
             return
         debug(f"фразу шукає ПК (своя модель), поріг {detector.threshold:.2f}")
-        logic = WakeLogic(RATE, detector)
+        from . import vad as vadmod
+
+        vad = vadmod.load()
+        debug("кінець фрази — за детектором голосу (Silero VAD)" if vad else "кінець фрази — за гучністю")
+        logic = WakeLogic(RATE, detector, vad)
         logic.debug = debug if DEBUG else None
         self.logic = logic
         self._events.put(("ready",))
@@ -379,6 +405,8 @@ class WakeListener(QObject):
                     logic.listen()
                 elif item[0] == "pause":
                     logic.pause()
+                elif item[0] == "barge":
+                    logic.barge()
                 elif item[0] == "await":
                     logic.await_command(item[1])
                 debug(f"команда {item[0]} → стан {logic.state}")
@@ -395,4 +423,5 @@ class WakeListener(QObject):
                 self._events.put(ev)
             if DEBUG and time.monotonic() - last_report > 2:
                 last_report = time.monotonic()
-                debug(f"стан {logic.state}, рівень {logic.level:.2f}, шум {logic.floor:.0f}, мовлення {logic.speaking}")
+                debug(f"стан {logic.state}, рівень {logic.level:.2f}, шум {logic.floor:.0f}, мовлення {logic.speaking}"
+                      + (f", голос {logic.voice:.2f}" if logic.vad is not None else ""))

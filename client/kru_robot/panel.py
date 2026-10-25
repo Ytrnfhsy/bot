@@ -75,6 +75,8 @@ QPushButton#send { background: #4FD1FF; color: #0E1426; }
 QPushButton#send:hover { background: #7BDDFF; }
 QPushButton#stop { background: #FFE1E1; color: #C92A2A; }
 QPushButton#mic { background: #FDE7F0; border-radius: 12px; padding: 4px; }
+QPushButton#mute { background: #FFF1D6; color: #A35F00; border-radius: 12px; padding: 4px; }
+QPushButton#mute:hover { background: #FFE4B0; }
 QPushButton#mic:hover { background: #FBD3E3; }
 QPushButton#mic[recording="true"] { background: #E2558E; }
 QPushButton#flat { background: transparent; color: #5B6B82; padding: 0; border-radius: 8px; }
@@ -261,6 +263,7 @@ class ChatPanel(QWidget):
     resized = Signal(int, int)  # (ширина, висота стрічки; 0 — під вміст) — користувач потягнув за край
     font_changed = Signal(int)  # розмір шрифту чату (Ctrl+колесо, Ctrl+=/−/0)
     mic_toggled = Signal()  # кнопка мікрофона: почати / закінчити запис голосом
+    mute_requested = Signal()  # «🔇» поки робот говорить — замовкнути
     closed = Signal()
 
     WIDTH = 408
@@ -475,9 +478,15 @@ class ChatPanel(QWidget):
         self.btn_mic.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_mic.clicked.connect(self.mic_toggled)
         self.btn_mic.hide()  # з'являється, коли сервер уміє розпізнавати мовлення
+        self.btn_mute = QPushButton("🔇", objectName="mute", toolTip="Замовкни (або клік по роботу, "
+                                                                    "або «Чуєш, Кру, стоп»)")
+        self.btn_mute.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mute.clicked.connect(self.mute_requested)
+        self.btn_mute.hide()  # лише поки робот говорить
         btns.addWidget(self.btn_send)
         btns.addWidget(self.btn_stop)
         btns.addWidget(self.btn_mic)
+        btns.addWidget(self.btn_mute)
         row.addLayout(btns)
         lay.addWidget(self.input_row)
 
@@ -831,6 +840,9 @@ class ChatPanel(QWidget):
         self.btn_mic.setToolTip("Закінчити й надіслати" if on else "Сказати голосом")
         self.btn_mic.style().unpolish(self.btn_mic)
         self.btn_mic.style().polish(self.btn_mic)
+
+    def set_speaking(self, on: bool) -> None:
+        self.btn_mute.setVisible(on)
 
     def set_busy(self, busy: bool) -> None:
         self.btn_stop.setVisible(busy)
