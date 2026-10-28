@@ -96,3 +96,44 @@ async def _noop(_):
 
 async def _allow(*_):
     return True
+
+
+def test_all_builtin_skills_load():
+    found = sk.all_skills(None)
+    for name in ("nist-csp-exam", "flashcards", "explain-like-mentor", "kru-dev", "job-search"):
+        assert name in found and found[name].builtin and found[name].description, name
+
+
+async def test_flashcards_spaced_repetition(cfg, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from kru_agent.tools import flashcards as fc
+
+    agent = Agent(cfg, llm=FakeLLM([]))
+    ctx = agent.make_context()
+    call_ = agent.registry.call
+    out = await call_(ctx, "flashcards_add", {"deck": "nist-csp", "cards": [
+        {"front": "6 функцій CSF 2.0?", "back": "Govern, Identify, Protect, Detect, Respond, Recover"},
+        {"front": "Tier 2?", "back": "Risk Informed"},
+        {"front": "tier 2?", "back": "дубль"},  # той самий текст — не додається
+        {"front": "", "back": "порожнє"}]})
+    assert "Додано 2" in out
+    due = await call_(ctx, "flashcards_due", {})
+    assert "До повторення: 2" in due and "Risk Informed" in due
+    await call_(ctx, "flashcards_grade", {"deck": "nist-csp", "card_id": 1, "correct": True})
+    out = await call_(ctx, "flashcards_grade", {"deck": "nist-csp", "card_id": 2, "correct": False})
+    assert "коробка 0" in out
+    due = await call_(ctx, "flashcards_due", {"deck": "nist-csp"})
+    assert "До повторення: 1" in due and "#2" in due  # помилкова — ще сьогодні, правильна — завтра
+
+    class Later(datetime):  # через 2 дні: обидві знову на повторенні
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(days=2)
+
+    monkeypatch.setattr(fc, "datetime", Later)
+    assert "До повторення: 2" in await call_(ctx, "flashcards_due", {})
+    stats = await call_(ctx, "flashcards_stats", {})
+    assert "«nist-csp»: 2 карток" in stats and "найважчі: Tier 2?" in stats
+    with pytest.raises(ToolError, match="Назва колоди"):
+        await call_(ctx, "flashcards_add", {"deck": "../x", "cards": [{"front": "a", "back": "b"}]})
