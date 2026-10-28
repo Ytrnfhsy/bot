@@ -31,3 +31,6 @@ include = ["kru_agent*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+kru_agent = ["builtin_skills/*/*"]  # вбудовані навички (skills.py)

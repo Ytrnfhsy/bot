@@ -39,6 +39,46 @@ def _office_to_text(p) -> str:
     return "\n".join(paragraphs)
 
 
+def _slides_to_text(p) -> str:
+    """Текст презентації .pptx / .odp по слайдах, з нотатками доповідача (у курсах там часто головне)."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    def paragraphs(xml: bytes, para: set[str], run: str | None) -> list[str]:
+        out = []
+        for el in ET.fromstring(xml).iter():
+            if local(el.tag) in para:
+                text = "".join(t.text or "" for t in el.iter() if local(t.tag) == run) if run else "".join(el.itertext())
+                if text.strip():
+                    out.append(text.strip())
+        return out
+
+    try:
+        with zipfile.ZipFile(p) as z:
+            names = z.namelist()
+            if p.suffix.lower() == ".odp":
+                pages = [el for el in ET.fromstring(z.read("content.xml")).iter() if local(el.tag) == "page"]
+                return "\n\n".join(f"=== Слайд {i} ===\n" + "\n".join(
+                    t for t in ("".join(e.itertext()).strip() for e in page.iter() if local(e.tag) in {"p", "h"}) if t)
+                    for i, page in enumerate(pages, 1))
+            num = lambda n: int(re.search(r"(\d+)\.xml$", n).group(1))  # noqa: E731 — slide10 після slide9
+            slides = sorted((n for n in names if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)), key=num)
+            out = []
+            for n in slides:
+                text = paragraphs(z.read(n), {"p"}, "t")
+                note_file = f"ppt/notesSlides/notesSlide{num(n)}.xml"
+                notes = paragraphs(z.read(note_file), {"p"}, "t") if note_file in names else []
+                notes = [t for t in notes if not t.isdigit()]  # номер слайда в нотатках
+                out.append(f"=== Слайд {num(n)} ===\n" + "\n".join(text)
+                           + (("\nНотатки доповідача: " + " ".join(notes)) if notes else ""))
+            return "\n\n".join(out)
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+        raise ToolError(f"Не вдалося розібрати презентацію: {e}") from e
+
+
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".kru_tmp", ".kru-backup"}
 
 
@@ -55,6 +95,8 @@ async def read_file(ctx: ToolContext, path: str, start_line: int = 1, max_lines:
         text = await asyncio.to_thread(_pdf_to_text, p.read_bytes())
     elif suffix in {".docx", ".odt"}:
         text = await asyncio.to_thread(_office_to_text, p)
+    elif suffix in {".pptx", ".odp"}:
+        text = await asyncio.to_thread(_slides_to_text, p)
     else:
         data = p.read_bytes()
         if b"\x00" in data[:4096]:
@@ -244,7 +286,8 @@ TOOLS = [
     Tool(
         name="read_file",
         description=(
-            "Читає файл як текст (з номерами рядків): звичайні текстові файли, а також PDF, DOCX, ODT. "
+            "Читає файл як текст (з номерами рядків): звичайні текстові файли, а також PDF, DOCX, ODT і презентації "
+            "PPTX/ODP (по слайдах, з нотатками доповідача). "
             "Для великих файлів використовуй start_line. Файли, які користувач передав, лежать в uploads/."
         ),
         parameters={

@@ -518,6 +518,54 @@ def _telegram_command(cfg: Config, args: argparse.Namespace, parser: argparse.Ar
         raise SystemExit(str(e)) from e
 
 
+def _skill_command(cfg: Config, args, parser) -> None:
+    """kru skill list | show | add | remove — навички (skills.py) власника чи --user."""
+    import shutil
+    from pathlib import Path
+
+    from . import skills as sk
+    from .users import OWNER, User, workspace_for
+
+    ws = workspace_for(cfg, User(args.user or OWNER, "user"))
+    found = sk.all_skills(ws)
+    if args.skill_cmd == "list":
+        if not found:
+            print("Навичок ще немає. Додати: kru skill add <тека або SKILL.md>")
+        for s in found.values():
+            print(f"{BOLD}{s.name}{RESET}{' (вбудована)' if s.builtin else ''} — {s.description}")
+    elif args.skill_cmd == "show":
+        s = found.get(args.name)
+        if s is None:
+            raise SystemExit(f"Навички {args.name!r} немає")
+        print(f"{s.path}\n\n{s.description}\n\n{s.body}")
+        if s.files():
+            print(f"\nФайли: {', '.join(s.files())}")
+    elif args.skill_cmd == "add":
+        src = Path(args.path).expanduser()
+        folder = src if src.is_dir() else src.parent
+        text = (folder / sk.SKILL_FILE if src.is_dir() else src).read_text("utf-8")
+        meta, body = sk.parse(text)
+        name = (args.name or meta.get("name") or folder.name).lower()
+        if not sk.NAME_RE.match(name) or not body:
+            raise SystemExit("Потрібні назва латиницею (name: … у SKILL.md чи --name) і текст інструкції")
+        target = sk.user_dir(ws) / name
+        if target.exists():
+            shutil.rmtree(target)
+        if src.is_dir():
+            shutil.copytree(src, target, ignore=shutil.ignore_patterns(".*", "__pycache__"))
+        target.mkdir(parents=True, exist_ok=True)
+        (target / sk.SKILL_FILE).write_text(sk.render(name, meta.get("description", ""), body), "utf-8")
+        print(f"✅ Навичка «{name}» додана: {target}")
+    elif args.skill_cmd == "remove":
+        s = found.get(args.name)
+        if s is None or s.builtin:
+            raise SystemExit(f"Своєї навички {args.name!r} немає" + (" (вбудовану не видалити)" if s else ""))
+        shutil.rmtree(s.path)
+        print(f"Навичку «{args.name}» видалено")
+    else:
+        parser.print_help()
+
+
 def _wakeword_command(cfg: Config, args, parser) -> None:
     """kru wakeword train|status — своя фраза-активатор для режиму «завжди слухаю» (робот, wakeword.py)."""
     from . import wakeword
@@ -688,8 +736,20 @@ def main(argv: list[str] | None = None) -> None:
                    help="не завантажувати ~180 МБ додаткових негативних прикладів openWakeWord")
     wake_sub.add_parser("status", help="що навчено")
 
+    p_skill = sub.add_parser("skill", help="навички: збережені інструкції «як робити X», які агент бере, коли треба")
+    skill_sub = p_skill.add_subparsers(dest="skill_cmd")
+    for name, help_ in (("list", "список навичок"), ("show", "показати навичку"), ("add", "додати з теки чи SKILL.md"),
+                        ("remove", "видалити свою навичку")):
+        p = skill_sub.add_parser(name, help=help_)
+        if name in {"show", "remove"}:
+            p.add_argument("name")
+        if name == "add":
+            p.add_argument("path", help="тека навички (з SKILL.md) або сам SKILL.md")
+            p.add_argument("--name", help="назва (типово — з SKILL.md чи назви теки)")
+        p.add_argument("--user", help="чия навичка (типово — власника)")
+
     args = parser.parse_args(argv)
-    if args.cmd in {"user", "telegram", "ssh", "wakeword"}:
+    if args.cmd in {"user", "telegram", "ssh", "wakeword", "skill"}:
         # ті самі налаштування, що й у сервісу (DATA_DIR, KRU_TOKEN)
         from .config import _load_dotenv
         from pathlib import Path
@@ -721,6 +781,8 @@ def main(argv: list[str] | None = None) -> None:
         _ssh_command(cfg, args, p_ssh)
     elif args.cmd == "wakeword":
         _wakeword_command(cfg, args, p_wake)
+    elif args.cmd == "skill":
+        _skill_command(cfg, args, p_skill)
     elif args.cmd == "health":
         from .llm import create_llm
 
