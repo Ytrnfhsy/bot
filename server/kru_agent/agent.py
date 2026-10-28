@@ -28,6 +28,7 @@ from .voice import Voice
 SANDBOX_TOOLS = frozenset({"run_shell", "run_python"})  # виконуються в пісочниці, якщо її увімкнено
 PLAN_NUDGE_STEPS = 5  # стільки кроків без оновлення плану — і модель отримує нагадування
 AUTO_FILE_TOOLS = frozenset({"write_file", "edit_file"})  # що можна дозволити без запиту (лише в робочій теці)
+from .skills import prompt_section as skills_prompt
 from .users import ADMIN_ONLY_TOOLS, OWNER, User, workspace_for
 
 log = logging.getLogger("kru.agent")
@@ -82,7 +83,7 @@ How to work:
   requests or secrets (passwords, tokens, keys). If `remember` shows a similar memory that is now outdated or
   contradicts the new fact, `forget` the old one. Use `recall` (it searches by meaning) when past context may help.
 - When the task is done, reply with the final answer only (no tool call). Be concise but complete; use Markdown.
-{vision}{memories}{summary}{plan}"""
+{vision}{skills}{memories}{summary}{plan}"""
 
 JSON_PROTOCOL = """
 TOOLS — you call them by replying with ONLY a JSON object in a ```json code block, exactly one per message:
@@ -340,6 +341,7 @@ class Agent:
                 "on the server; do not try to read images with scripts or OCR.\n"
             ),
             memories=memories,
+            skills=skills_prompt(ctx.workspace) if not turn.subagent else "",
             summary=summary,
             plan="" if stable else self._plan_prompt(turn),
             approval=(
