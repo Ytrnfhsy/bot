@@ -100,7 +100,7 @@ async def _allow(*_):
 
 def test_all_builtin_skills_load():
     found = sk.all_skills(None)
-    for name in ("nist-csp-exam", "flashcards", "explain-like-mentor", "kru-dev", "job-search"):
+    for name in ("nist-csp-exam", "flashcards", "explain-like-mentor", "kru-dev", "job-search", "dork-search"):
         assert name in found and found[name].builtin and found[name].description, name
 
 
