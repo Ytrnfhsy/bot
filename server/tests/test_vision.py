@@ -166,7 +166,7 @@ async def test_vision_unavailable_is_reported_and_recovers(cfg):
     assert "CANNOT see images" in llm.calls[0]["messages"][0]["content"]
     # модель перезапустили з mmproj — агент сам це помічає, без перезапуску
     llm.vision_flag = True
-    agent._vision_checked = 0
+    agent._vision_checked = float("-inf")  # «давно не перевіряли»
     await agent.run("s", "а тепер опиши s.png", rec.emit, rec.confirm)
     assert agent.vision
     last = llm.calls[1]["messages"][-1]

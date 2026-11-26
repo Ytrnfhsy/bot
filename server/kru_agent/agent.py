@@ -280,7 +280,8 @@ class Agent:
         self.native_tools = config.tool_mode != "json"
         self.vision = config.vision != "off"
         self.vision_reason = ""  # чому зору немає (для користувача)
-        self._vision_checked = 0.0
+        # ще не перевіряли (не 0: time.monotonic() — час від увімкнення машини, одразу після старту він < 30 с)
+        self._vision_checked = float("-inf")
         self._session_locks: dict[str, asyncio.Lock] = {}
         self.voice = Voice(config)
 
