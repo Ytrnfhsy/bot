@@ -241,7 +241,10 @@ TOOL_ACTIVITY = {
 THINK_VALUE = {"on": True, "off": False}  # auto → "auto" (сервер вирішує сам)
 THINK_MODES = {"auto": "авто — лише складні задачі (швидко)", "on": "завжди (розумніше, повільніше)",
                "off": "ніколи (найшвидше)"}
-THEMES = {"light": "світла", "hacker": "хакерська — темна, код наживо, Кру-матриця"}
+THEMES = {"auto": "авто — темніє, коли Кру програмує", "light": "світла",
+          "hacker": "хакерська — завжди темна, код наживо, Кру-матриця"}
+CODING_LINGER_MS = 8000  # стільки ще тримати хакерський вигляд після кінця задачі (дочитати вивід у терміналі)
+CODE_TOOLS = {"write_file", "edit_file", "run_python", "run_shell", "ssh_run"}
 WAKE_SENSITIVITY = {"low": "низька — рідше помиляється", "medium": "середня", "high": "висока — чує здалеку"}
 FOLLOWUP_SEC = 6  # стільки слухаємо уточнення без імені після відповіді
 CAPTURE_LIMIT_MS = 25_000  # > WAKE_WAIT + MAX_COMMAND (wake.py) з запасом
@@ -284,6 +287,9 @@ class RobotWindow(QWidget):
         self.setWindowTitle("Kru")
 
         self.robot = RobotWidget(settings.scale, self)
+        self._coding_look = False  # тема «авто»: агент саме програмує — хакерський вигляд
+        self._coding_off = QTimer(self, singleShot=True, interval=CODING_LINGER_MS)
+        self._coding_off.timeout.connect(self._end_coding_look)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.robot)
@@ -533,9 +539,30 @@ class RobotWindow(QWidget):
 
     # ---------------- дії користувача ----------------
     def apply_theme(self) -> None:
-        self.panel.set_theme(self.settings.theme)
-        self.robot.hacker = self.settings.theme == "hacker"
+        """light / hacker — як вибрано; auto — хакерський вигляд лише поки агент програмує (і трохи після)."""
+        theme = self.settings.theme
+        dark = theme == "hacker" or (theme == "auto" and self._coding_look)
+        if self.panel.theme != ("hacker" if dark else "light"):
+            self.panel.set_theme("hacker" if dark else "light")
+        self.robot.hacker = dark
         self.robot.update()
+
+    def _coding_started(self) -> None:
+        """Агент почав писати чи запускати код: у режимі «авто» — Кру перетворюється, чат темніє."""
+        self.robot.coding = True
+        self._coding_off.stop()
+        if not self._coding_look:
+            self._coding_look = True
+            self.apply_theme()
+
+    def _coding_finished(self) -> None:
+        self.robot.coding = False
+        if self._coding_look:
+            self._coding_off.start()  # не одразу: дати дочитати код і вивід
+
+    def _end_coding_look(self) -> None:
+        self._coding_look = False
+        self.apply_theme()
 
     def touch(self) -> None:
         self.last_activity = time.monotonic()
@@ -1477,7 +1504,7 @@ class RobotWindow(QWidget):
                 self.panel.set_activity("⏳ Чекаю на твій дозвіл")
                 self.show_panel()
             elif state == "idle":
-                self.robot.coding = False
+                self._coding_finished()
                 self.busy = False
                 self.panel.set_busy(False)
                 if self._last_stats:
@@ -1495,10 +1522,13 @@ class RobotWindow(QWidget):
             self.robot.set_state("talking")
             self.panel.append_draft(ev.get("text", ""))
         elif t == "tool_stream":  # код, який модель саме пише
-            self.robot.coding = True
+            if ev.get("name") in CODE_TOOLS:
+                self._coding_started()
             self.panel.terminal.stream(int(ev.get("index") or 0), str(ev.get("name", "")), str(ev.get("delta", "")))
         elif t == "tool_call":
             self.panel.clear_draft()
+            if ev.get("name") in CODE_TOOLS:
+                self._coding_started()
             calls = self._step_calls = getattr(self, "_step_calls", 0) + 1  # n-й виклик кроку ≈ його index
             self.panel.terminal.whole(calls - 1, str(ev.get("name", "")), ev.get("args"))
             if ev.get("name") in {"update_plan", "mark_step"}:

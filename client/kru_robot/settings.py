@@ -40,7 +40,8 @@ class Settings:
     auto_files: bool = False  # запис файлів у робочій теці агента без запиту (копії — в .kru-backup)
     last_task: str = ""
     font_size: int = 13  # шрифт стрічки чату й поля вводу (Ctrl+колесо, Ctrl+=/−/0)
-    theme: str = "light"  # light | hacker (темна, код наживо в «терміналі», Кру з «дощем» символів)
+    # light | hacker (темна, код наживо в «терміналі», Кру з «дощем» символів) | auto (хакерська, лише поки Кру програмує)
+    theme: str = "auto"
     panel_width: int = 408  # ширина вікна чату (тягнути за край; подвійний клік по краю — як було)
     panel_feed_height: int = 0  # висота стрічки; 0 — під вміст
     voice_reply: str = "voice"  # озвучувати відповіді: off | voice (лише на голосові запити) | always
