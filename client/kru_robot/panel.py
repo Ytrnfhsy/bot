@@ -107,8 +107,47 @@ QListWidget#history::item:selected { background: #DCEFFD; color: #0E1426; }
 """
 
 
+# хакерська тема: ті самі правила STYLE, але світлі кольори → темні й зелені (як термінал)
+HACKER_COLORS = {
+    "rgba(250, 252, 255, 245)": "rgba(4, 8, 6, 245)",
+    "#1D2740": "#B8FFC9", "#C9D6E8": "#1E5A32", "#5B6B82": "#5FBF7A", "#FAFCFF": "#050A07",
+    "#FFFFFF": "#07120B", "#4FD1FF": "#00FF66", "#7BDDFF": "#66FF99", "#0E1426": "#001A0A",
+    "#E7EEF8": "#0F2A18", "#D5E2F2": "#16402A", "#9FB3CF": "#2E8B57", "#F4F1FF": "#08170E",
+    "#DDD3FF": "#1E5A32", "#2B2F3A": "#A8F0B8", "#7A5AF8": "#39FF14", "#EEF3FA": "#0F2A18",
+    "#DCEFFD": "#12381F", "#EEF6FF": "#071A10", "#B9DBF5": "#1E5A32", "#1D3A57": "#9CFFB4",
+    "#FFF6E9": "#171204", "#FFC98A": "#8A6A1E", "#B35C00": "#FFB347", "#3A2A10": "#FFE2A8",
+    "#FFFBF4": "#0E0B04", "#FFE0B8": "#5A4515", "#FFE1E1": "#2A0A0A", "#C92A2A": "#FF5C5C",
+    "#FDE7F0": "#1A0A12", "#FBD3E3": "#2A1020", "#FFF1D6": "#1F1605", "#FFE4B0": "#2E220A",
+    "#A35F00": "#FFB347", "#DDF7E8": "#0F2A18",
+}
+HACKER_EXTRA = """
+QTextBrowser, QPlainTextEdit, QLineEdit, QListWidget#history { font-family: "JetBrains Mono", "Fira Code",
+    "Cascadia Mono", "DejaVu Sans Mono", "Consolas", monospace; }
+QPushButton#allowTask { color: #5BE49B; }
+QPushButton#allow { color: #001A0A; }
+QScrollBar:horizontal { background: transparent; height: 8px; margin: 0 2px; }
+QScrollBar::handle:horizontal { background: #1E5A32; border-radius: 4px; min-width: 24px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+#terminal { background: #000000; border: 1px solid #1E5A32; border-radius: 10px; }
+QLabel#terminalTitle { color: #00FF66; font-family: monospace; font-size: 11px; }
+QPlainTextEdit#terminalView { background: #000000; color: #33FF77; border: none; padding: 2px;
+    selection-background-color: #1E5A32; }
+"""
+
+
+def themed(style: str, theme: str) -> str:
+    if theme != "hacker":
+        return style
+    for light, dark in HACKER_COLORS.items():
+        style = style.replace(light, dark)
+    return style + HACKER_EXTRA
+
+
 CARD_FILL = QColor(250, 252, 255, 245)
 CARD_BORDER = QColor("#C9D6E8")
+HACKER_FILL = QColor(4, 8, 6, 245)
+HACKER_BORDER = QColor("#1E5A32")
 ICON_COLOR = QColor("#5B6B82")
 
 
@@ -488,6 +527,10 @@ class ChatPanel(QWidget):
         btns.addWidget(self.btn_mic)
         btns.addWidget(self.btn_mute)
         row.addLayout(btns)
+        from .terminal import CodeTerminal
+
+        self.terminal = CodeTerminal()  # код, який агент пише, — наживо (хакерська тема)
+        lay.addWidget(self.terminal)
         lay.addWidget(self.input_row)
 
         # транскрипт: список (роль, текст)
@@ -617,8 +660,9 @@ class ChatPanel(QWidget):
         tip = self.width() - 2 if self._tail_side == "right" else 2
         inner = edge - 14 if self._tail_side == "right" else edge + 14
         poly = QPolygonF([QPointF(inner, y - 11), QPointF(tip, y + 2), QPointF(inner, y + 11)])
-        p.setPen(QPen(CARD_BORDER, 1))
-        p.setBrush(CARD_FILL)
+        hacker = self.theme == "hacker"
+        p.setPen(QPen(HACKER_BORDER if hacker else CARD_BORDER, 1))
+        p.setBrush(HACKER_FILL if hacker else CARD_FILL)
         p.drawPolygon(poly)
 
     def set_status(self, text: str, ok: bool, details: str = "") -> None:
@@ -1132,6 +1176,31 @@ class ChatPanel(QWidget):
     FEED_MIN = 120
     EDGE = 7  # px від краю картки, за які можна тягнути
 
+    theme = "light"  # light | hacker
+
+    def set_theme(self, theme: str) -> None:
+        """Світла або хакерська (темна, зелений моноширинний текст, термінал коду наживо)."""
+        self.theme = "hacker" if theme == "hacker" else "light"
+        self.terminal.enabled = self.theme == "hacker"
+        if not self.terminal.enabled:
+            self.terminal.hide()
+        from PySide6.QtGui import QPalette
+
+        pal = self.view.palette()  # посилання в стрічці («Повторити», джерела): на чорному синій не видно
+        if not hasattr(self, "_link_color"):
+            self._link_color = pal.color(QPalette.ColorRole.Link)
+        pal.setColor(QPalette.ColorRole.Link, QColor("#66FF99") if self.terminal.enabled else self._link_color)
+        self.view.setPalette(pal)
+        self._restyle()
+        self._md_cache = {}
+        self._render()
+        self.update()
+
+    def _restyle(self) -> None:
+        px = self.font_px
+        self.setStyleSheet(themed(STYLE.replace("color: #1D2740; font-size: 13px; }",
+                                                f"color: #1D2740; font-size: {px}px; }}"), self.theme))
+
     def set_font_size(self, px: int, user: bool = False) -> None:
         """Розмір шрифту стрічки й поля вводу; іконки стрічки — під нього."""
         px = max(self.FONT_MIN, min(self.FONT_MAX, int(px)))
@@ -1139,7 +1208,7 @@ class ChatPanel(QWidget):
             return
         changed = px != self.font_px
         self.font_px = px
-        self.setStyleSheet(STYLE.replace("color: #1D2740; font-size: 13px; }", f"color: #1D2740; font-size: {px}px; }}"))
+        self._restyle()
         self.view.icon_px = px + 2
         self._render()
         if user and changed:
@@ -1221,7 +1290,9 @@ class ChatPanel(QWidget):
         self.show_tools = show
         self._render()
 
-    USER_BUBBLE = "#DCEBFF"  # фон твоїх повідомлень — їх видно й у довгому чаті
+    @property
+    def USER_BUBBLE(self) -> str:  # noqa: N802 — фон твоїх повідомлень: їх видно й у довгому чаті
+        return "#0D2B17" if self.theme == "hacker" else "#DCEBFF"
 
     def _icon_html(self, kind: str) -> str:
         px = getattr(self.view, "icon_px", 15)

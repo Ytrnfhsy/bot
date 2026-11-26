@@ -41,6 +41,16 @@ BASE_W, BASE_H = 200.0, 220.0
 HEAD_RECT = QRectF(30, 30, 140, 100)  # де «гладити» (у базових координатах)
 PETTABLE = {"idle", "happy", "sleeping"}  # під час роботи гладити не відволікаємо
 PURR_COLOR = QColor("#FF7EB6")
+# хакерська тема: чорний корпус, зелене «світло»; символи, що падають, як у cmatrix
+MATRIX_GREEN = QColor("#00FF66")
+MATRIX_CHARS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎ0123456789ABCDEF<>{}[]=+*#$%"
+MATRIX_STEP = 9.0  # px між символами в колонці
+HACKER_METAL = {  # світлий метал → чорний (верх, низ градієнта)
+    ("#FFFFFF", "#C9D6E8"): ("#20262A", "#07090A"),
+    ("#FDFEFF", "#C3D2E6"): ("#1A1F22", "#050607"),
+    ("#E8F0FA", "#AFC0D6"): ("#181D20", "#060808"),
+    ("#FFFFFF", "#CCD9EA"): ("#22282C", "#07090A"),
+}
 
 
 def _pen(color: QColor | str, width: float) -> QPen:
@@ -110,6 +120,9 @@ class RobotWidget(QWidget):
         self.voice_level = 0.0
         self._level = 0.0
         self.wake_mode = False  # «завжди слухаю»: на грудях замість серця — мікрофон
+        self.hacker = False  # хакерська тема: чорний корпус і «дощ» символів
+        self.coding = False  # агент саме пише код — «дощ» густий і швидкий
+        self._rain: list[list] = []  # колонки: [x, y голови, швидкість, символи]
         # одиночний клік чекає, чи не буде другого (тоді це подвійний — не відкривати панель)
         self._click_timer = QTimer(self, singleShot=True, interval=280)
         self._click_timer.timeout.connect(self.clicked)
@@ -171,11 +184,16 @@ class RobotWidget(QWidget):
         lv = max(0.0, min(1.0, self.voice_level))
         self._level = lv if lv > self._level else _lerp(self._level, lv, min(1.0, dt * 10))
 
+        if self.hacker:
+            self._tick_rain(dt)
+
         # плавна зміна кольору
         if self._drop_hover:
             target = STATE_COLORS["happy"]
         else:
             target = PURR_COLOR if self.purring else STATE_COLORS[self.state]
+            if self.hacker and self.state in {"idle", "talking", "working"}:
+                target = MATRIX_GREEN  # «живе» світло — зелене, як термінал
         k = min(1.0, dt * 6)
         self._color = QColor.fromRgbF(
             _lerp(self._color.redF(), target.redF(), k),
@@ -309,14 +327,55 @@ class RobotWidget(QWidget):
             p.setPen(col)
             p.drawText(QPointF(150, 70 + bob + 3 * math.sin(t * 3)), self.PURR_TEXT)
 
+    def _tick_rain(self, dt: float) -> None:
+        """Колонки символів, що падають згори вниз по голові й тулубу (x 36–164, y 38–196)."""
+        if not self._rain:
+            for i in range(15):
+                self._rain.append([40 + i * 8.6, random.uniform(-150, 200), 0.0, []])
+        fast = 2.6 if self.coding else 1.0
+        for col in self._rain:
+            if not col[2]:
+                col[2] = random.uniform(35, 80)
+                col[3] = [random.choice(MATRIX_CHARS) for _ in range(random.randint(5, 14))]
+            col[1] += col[2] * fast * dt
+            if random.random() < dt * 6:  # символи «мерехтять», як у cmatrix
+                col[3][random.randrange(len(col[3]))] = random.choice(MATRIX_CHARS)
+            if col[1] - len(col[3]) * MATRIX_STEP > 200:  # колонка пройшла — нова згори
+                col[1], col[2] = random.uniform(-60, 20), 0.0
+
+    def _draw_rain(self, p: QPainter, clip: QPainterPath) -> None:
+        if not self.hacker or not self._rain:
+            return
+        p.save()
+        p.setClipPath(clip, Qt.ClipOperation.IntersectClip)
+        f = QFont("Monospace", 7)
+        f.setStyleHint(QFont.StyleHint.Monospace)
+        p.setFont(f)
+        bright = 1.0 if self.coding else 0.55
+        for x, y, _, chars in self._rain:
+            for n, ch in enumerate(chars):  # перший — «голова» (найяскравіша), далі хвіст гасне
+                cy = y - n * MATRIX_STEP
+                if cy < 30 or cy > 205:
+                    continue
+                col = QColor("#D8FFE6") if n == 0 else QColor(MATRIX_GREEN)
+                col.setAlphaF(bright * (1.0 if n == 0 else max(0.08, 1.0 - n / len(chars))))
+                p.setPen(col)
+                p.drawText(QPointF(x, cy), ch)
+        p.restore()
+
     def _metal(self, rect: QRectF, light: str = "#FFFFFF", dark: str = "#C9D6E8") -> QLinearGradient:
+        if self.hacker:
+            light, dark = HACKER_METAL.get((light, dark), ("#1C2124", "#060808"))
         g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
         g.setColorAt(0, QColor(light))
         g.setColorAt(1, QColor(dark))
         return g
 
+    def _outline(self) -> QPen:
+        return QPen(QColor("#1F7A3F" if self.hacker else "#5B6B82"), 2.5)
+
     def _draw_body(self, p: QPainter, c: QColor, t: float, st: str) -> None:
-        outline = QPen(QColor("#5B6B82"), 2.5)
+        outline = self._outline()
         # руки
         for side in (-1, 1):
             p.save()
@@ -337,7 +396,7 @@ class RobotWidget(QWidget):
             p.setPen(outline)
             p.setBrush(self._metal(arm))
             p.drawRoundedRect(arm, 7, 7)
-            p.setBrush(QColor("#E3ECF7"))
+            p.setBrush(QColor("#0E1411" if self.hacker else "#E3ECF7"))
             p.drawEllipse(QPointF(0, 34), 8, 8)
             p.restore()
 
@@ -346,6 +405,9 @@ class RobotWidget(QWidget):
         p.setPen(outline)
         p.setBrush(self._metal(body, "#FDFEFF", "#C3D2E6"))
         p.drawRoundedRect(body, 26, 26)
+        body_path = QPainterPath()
+        body_path.addRoundedRect(body.adjusted(2, 2, -2, -2), 24, 24)
+        self._draw_rain(p, body_path)
 
         # «серце»-індикатор на грудях
         beat = 1.0 + 0.15 * max(0.0, math.sin(t * (6 if st == "working" else 3)))
@@ -365,7 +427,7 @@ class RobotWidget(QWidget):
 
         # ніжки
         p.setPen(outline)
-        p.setBrush(QColor("#AFC0D6"))
+        p.setBrush(QColor("#0C1210" if self.hacker else "#AFC0D6"))
         for x in (80, 120):
             p.drawRoundedRect(QRectF(x - 9, 184, 18, 12), 6, 6)
 
@@ -396,10 +458,10 @@ class RobotWidget(QWidget):
         p.drawPath(path)
 
     def _draw_head(self, p: QPainter, c: QColor, t: float, st: str) -> None:
-        outline = QPen(QColor("#5B6B82"), 2.5)
+        outline = self._outline()
 
         # антена
-        p.setPen(_pen("#5B6B82", 3))
+        p.setPen(_pen("#1F7A3F" if self.hacker else "#5B6B82", 3))
         sway = math.sin(t * 2.5) * 4
         p.drawLine(QPointF(100, 40), QPointF(100 + sway, 18))
         pulse = 0.5 + 0.5 * math.sin(t * (8 if st in {"thinking", "working", "waiting"} else 2))
@@ -428,13 +490,16 @@ class RobotWidget(QWidget):
         p.setPen(outline)
         p.setBrush(self._metal(head, "#FFFFFF", "#CCD9EA"))
         p.drawRoundedRect(head, 34, 34)
+        head_path = QPainterPath()
+        head_path.addRoundedRect(head.adjusted(2, 2, -2, -2), 32, 32)
+        self._draw_rain(p, head_path)
 
         # екран-обличчя
         screen = QRectF(50, 52, 100, 62)
         sg = QLinearGradient(screen.topLeft(), screen.bottomLeft())
-        sg.setColorAt(0, QColor("#1D2740"))
-        sg.setColorAt(1, QColor("#0E1426"))
-        p.setPen(QPen(QColor("#3A4A66"), 2))
+        sg.setColorAt(0, QColor("#020403" if self.hacker else "#1D2740"))
+        sg.setColorAt(1, QColor("#000000" if self.hacker else "#0E1426"))
+        p.setPen(QPen(QColor("#00FF66" if self.hacker else "#3A4A66"), 2))
         p.setBrush(sg)
         p.drawRoundedRect(screen, 22, 22)
         # відблиск

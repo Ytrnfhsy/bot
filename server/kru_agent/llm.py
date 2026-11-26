@@ -317,10 +317,14 @@ class OpenAICompatClient:
                             if on_token:
                                 await on_token("content", delta["content"])
                         for tc in delta.get("tool_calls") or []:
-                            slot = partial.setdefault(tc.get("index", len(partial)), {"name": "", "arguments": ""})
+                            index = tc.get("index", len(partial))
+                            slot = partial.setdefault(index, {"name": "", "arguments": ""})
                             fn = tc.get("function") or {}
                             slot["name"] += fn.get("name") or ""
                             slot["arguments"] += fn.get("arguments") or ""
+                            if on_token and fn.get("arguments"):  # код, який модель саме пише (робот показує наживо)
+                                await on_token("tool", json.dumps(
+                                    {"index": index, "name": slot["name"], "delta": fn["arguments"]}, ensure_ascii=False))
                     if chunk.get("usage"):
                         result.stats = {**result.stats, **chunk["usage"]}
                     if chunk.get("timings"):  # llama-server: швидкість читання й генерації

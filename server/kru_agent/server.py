@@ -38,7 +38,9 @@
   {"type": "thinking", "text": "..."}         — потік міркувань моделі
   {"type": "token", "text": "..."}            — потік тексту відповіді (чернетка)
   {"type": "tool_call", "id", "name", "args", "summary"}
-  {"type": "tool_result", "id", "name", "ok", "preview"}
+  {"type": "tool_stream", "index", "name", "delta"}  — шматок аргументів інструмента з кодом (write_file, edit_file,
+      run_python, run_shell, ssh_run), поки модель його пише: робот показує код наживо (JSON аргументів частинами)
+  {"type": "tool_result", "id", "name", "ok", "preview", "output"?}  — output (до 4000 символів) — для інструментів з кодом
   {"type": "confirm_request", "id", "tool", "summary"}
   {"type": "plan", "steps": [{title, status: pending|in_progress|done|skipped}]}  — чек-лист великої задачі
   {"type": "progress", "tool", "text"}       — проміжний стан довгого інструмента / субагента

@@ -93,6 +93,12 @@ class SettingsDialog(QDialog):
         self.stats = QCheckBox("Після відповіді показувати, скільки вона тривала")
         self.stats.setChecked(s.show_stats)
         self.font_px = QSpinBox(minimum=10, maximum=24, value=s.font_size, suffix=" px")
+        self.theme = QComboBox()
+        for key, title in THEMES.items():
+            self.theme.addItem(title, key)
+        self.theme.setCurrentIndex(max(0, self.theme.findData(s.theme)))
+        self.theme.setToolTip("Хакерська: темний чат моноширинним шрифтом, код, який пише агент, — наживо в "
+                              "«терміналі», а сам Кру чорний із символами, що падають, як у cmatrix")
         self.font_px.setToolTip("Шрифт стрічки чату й поля вводу. Швидко: Ctrl + колесо миші над чатом, Ctrl+= / Ctrl+− / Ctrl+0")
         self.tools = QCheckBox("Показувати дії агента (read_file, web_search…)")
         self.tools.setChecked(s.show_tools)
@@ -158,6 +164,7 @@ class SettingsDialog(QDialog):
         form.addRow("Токен:", self.token)
         form.addRow("Розмір:", self.scale)
         form.addRow("Шрифт чату:", self.font_px)
+        form.addRow("Тема:", self.theme)
         form.addRow("Відповідати голосом:", self.voice_reply)
         form.addRow("Гучність голосу:", self.voice_volume)
         form.addRow("Голос і звучання:", voice_row)
@@ -234,6 +241,7 @@ TOOL_ACTIVITY = {
 THINK_VALUE = {"on": True, "off": False}  # auto → "auto" (сервер вирішує сам)
 THINK_MODES = {"auto": "авто — лише складні задачі (швидко)", "on": "завжди (розумніше, повільніше)",
                "off": "ніколи (найшвидше)"}
+THEMES = {"light": "світла", "hacker": "хакерська — темна, код наживо, Кру-матриця"}
 WAKE_SENSITIVITY = {"low": "низька — рідше помиляється", "medium": "середня", "high": "висока — чує здалеку"}
 FOLLOWUP_SEC = 6  # стільки слухаємо уточнення без імені після відповіді
 CAPTURE_LIMIT_MS = 25_000  # > WAKE_WAIT + MAX_COMMAND (wake.py) з запасом
@@ -285,6 +293,7 @@ class RobotWindow(QWidget):
         self.panel.show_tools = settings.show_tools
         self.panel.show_thinking = settings.show_thinking
         self.panel.set_font_size(settings.font_size)
+        self.apply_theme()
         self.panel.set_panel_size(settings.panel_width, settings.panel_feed_height)
         self.conn = AgentConnection(settings.server_url, settings.token, self)
         self.busy = False
@@ -495,6 +504,8 @@ class RobotWindow(QWidget):
         s.show_tools = dlg.tools.isChecked()
         s.auto_files = dlg.auto_files.isChecked()
         s.font_size = dlg.font_px.value()
+        s.theme = dlg.theme.currentData()
+        self.apply_theme()
         s.voice_reply = dlg.voice_reply.currentData()
         s.voice_volume = dlg.voice_volume.value()
         restart_wake = dlg.wake_sensitivity.currentData() != s.wake_sensitivity and \
@@ -521,6 +532,11 @@ class RobotWindow(QWidget):
             self.conn.configure(s.server_url, s.token)
 
     # ---------------- дії користувача ----------------
+    def apply_theme(self) -> None:
+        self.panel.set_theme(self.settings.theme)
+        self.robot.hacker = self.settings.theme == "hacker"
+        self.robot.update()
+
     def touch(self) -> None:
         self.last_activity = time.monotonic()
 
@@ -1441,7 +1457,9 @@ class RobotWindow(QWidget):
                 self.tray.setToolTip(name)
         elif t == "status":
             state = ev.get("state")
-            if state == "thinking":
+            if state == "thinking":  # новий крок моделі: її виклики інструментів знову рахуються з 0
+                self.panel.terminal.reset()
+                self._step_calls = 0
                 self.robot.set_state("thinking")
                 self.panel.set_activity(f"💭 Думаю… (крок {ev.get('step', 1)})")
             elif state == "working":
@@ -1459,6 +1477,7 @@ class RobotWindow(QWidget):
                 self.panel.set_activity("⏳ Чекаю на твій дозвіл")
                 self.show_panel()
             elif state == "idle":
+                self.robot.coding = False
                 self.busy = False
                 self.panel.set_busy(False)
                 if self._last_stats:
@@ -1475,8 +1494,13 @@ class RobotWindow(QWidget):
         elif t == "token":
             self.robot.set_state("talking")
             self.panel.append_draft(ev.get("text", ""))
+        elif t == "tool_stream":  # код, який модель саме пише
+            self.robot.coding = True
+            self.panel.terminal.stream(int(ev.get("index") or 0), str(ev.get("name", "")), str(ev.get("delta", "")))
         elif t == "tool_call":
             self.panel.clear_draft()
+            calls = self._step_calls = getattr(self, "_step_calls", 0) + 1  # n-й виклик кроку ≈ його index
+            self.panel.terminal.whole(calls - 1, str(ev.get("name", "")), ev.get("args"))
             if ev.get("name") in {"update_plan", "mark_step"}:
                 pass  # план показує окремий чек-лист
             elif ev.get("name") == "delegate":
@@ -1493,6 +1517,8 @@ class RobotWindow(QWidget):
                 summary = " ".join(str(ev.get("summary", "")).split())[:140]
                 self.panel.add_entry("tool", f"🔧 {ev.get('name')}: {summary}")
         elif t == "tool_result":
+            self.panel.terminal.output(str(ev.get("name", "")), bool(ev.get("ok")),
+                                       str(ev.get("output") or ev.get("preview") or ""))
             if not ev.get("ok"):
                 self.panel.add_entry("tool", f"✗ {ev.get('name')}: {str(ev.get('preview', ''))[:140]}")
         elif t == "notify":
