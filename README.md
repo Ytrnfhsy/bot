@@ -712,6 +712,21 @@ confirm_request | final | error | file | file_data | uploaded | voice_text | tts
 `Authorization: Bearer ТОКЕН` виконує задачу неінтерактивно. Небезпечні дії при цьому відхиляються,
 якщо не встановлено `KRU_AUTO_APPROVE=true`. Перевірка стану: `GET /health`.
 
+## Готові пакети (релізи)
+
+На сторінці [Releases](../../releases) для кожної версії є готові збірки робота — Python ставити не треба:
+
+| Система | Файл |
+|---|---|
+| Windows 10/11 | `Kru-<версія>-windows-x64.zip` → розпакувати, `Kru.exe` (або `…-windows-installer.zip` — встановлення через Python) |
+| Linux (Fedora, Ubuntu, …) | `Kru-<версія>-x86_64.AppImage` → `chmod +x` і запустити; або `…-linux-x86_64.tar.gz` |
+| macOS (Apple Silicon) | `Kru-<версія>-macos-arm64.zip` — експериментально |
+| Сервер агента | `kru_agent-<версія>-py3-none-any.whl` |
+
+Новий реліз: `git tag v0.2.0 && git push origin v0.2.0` — GitHub Actions (`.github/workflows/release.yml`) зберуть
+пакети для всіх систем, перевірять кожен самоперевіркою й опублікують реліз. Пробна збірка без релізу —
+Actions → Release → Run workflow.
+
 ## Оновлення
 
 Сервер і робот встановлені у власні віртуальні середовища, тому самого `git pull` недостатньо.

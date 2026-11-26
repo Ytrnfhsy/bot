@@ -1,0 +1,186 @@
+name: Release
+
+# Тег v0.2.0 → збірка пакетів для всіх систем і реліз на GitHub із ними:
+#   git tag v0.2.0 && git push origin v0.2.0
+# Вручну (Actions → Release → Run workflow) — лише збірка пакетів-артефактів, без релізу.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:  # зміни самої збірки — перевірити пакети ще до релізу (реліз при цьому не створюється)
+    paths: [".github/workflows/release.yml", ".github/set_version.py", "client/packaging/**"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версія для пробної збірки (без релізу)"
+        default: "0.0.0-dev"
+
+permissions:
+  contents: write  # створити реліз і додати до нього файли
+
+env:
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || '0.0.0-dev' }}
+
+jobs:
+  version:
+    name: Версія
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+  python:
+    name: Python-пакети (сервер і робот)
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Версія з тегу
+        run: python .github/set_version.py "${{ needs.version.outputs.version }}"
+      - run: pip install build
+      - run: python -m build server --outdir dist && python -m build client --outdir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python
+          path: dist/*
+
+  windows:
+    name: Windows — Kru.exe
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Версія з тегу
+        run: python .github/set_version.py "${{ needs.version.outputs.version }}"
+      - run: pip install ./client pyinstaller
+      - name: Іконка
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m kru_robot.icon --ico build/robot.ico
+      - name: PyInstaller
+        run: >
+          pyinstaller --noconfirm --windowed --name Kru --icon build/robot.ico
+          --collect-submodules kru_robot --collect-data kru_robot --collect-all onnxruntime client/windows/launcher.py
+      - name: Самоперевірка exe
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\Kru\Kru.exe" -ArgumentList "--selftest", "$PWD\selftest\report.json" -Wait -PassThru
+          exit $p.ExitCode
+      - name: Архіви
+        shell: pwsh
+        run: |
+          $v = "${{ needs.version.outputs.version }}"
+          Compress-Archive -Path dist\Kru -DestinationPath "Kru-$v-windows-x64.zip"
+          # варіант через Python (install_windows.cmd): невеликий, оновлюється разом із кодом
+          New-Item -ItemType Directory -Force pkg\Kru-installer | Out-Null
+          Copy-Item -Recurse client pkg\Kru-installer\client
+          Compress-Archive -Path pkg\Kru-installer -DestinationPath "Kru-$v-windows-installer.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: Kru-*.zip
+
+  linux:
+    name: Linux — AppImage
+    needs: version
+    runs-on: ubuntu-22.04  # старіша glibc — AppImage запуститься і на старших дистрибутивах
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Версія з тегу
+        run: python .github/set_version.py "${{ needs.version.outputs.version }}"
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 fonts-dejavu-core
+      - run: pip install ./client pyinstaller
+      - name: PyInstaller
+        run: >
+          pyinstaller --noconfirm --windowed --name Kru
+          --collect-submodules kru_robot --collect-data kru_robot --collect-all onnxruntime client/windows/launcher.py
+      - name: Самоперевірка збірки
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./dist/Kru/Kru --selftest selftest/report.json
+      - name: AppImage
+        run: |
+          curl -sSLo appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          APPIMAGETOOL=./appimagetool client/packaging/build_appimage.sh "${{ needs.version.outputs.version }}" dist/Kru out
+          tar -C dist -czf "out/Kru-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz" Kru
+      - name: Самоперевірка AppImage
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./out/Kru-*.AppImage --appimage-extract-and-run --selftest selftest/appimage.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/*
+
+  macos:
+    name: macOS — Kru.app (експериментально)
+    needs: version
+    runs-on: macos-14
+    continue-on-error: true  # на Mac робот ще не перевірявся вживу — реліз не чекає на цю збірку
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Версія з тегу
+        run: python .github/set_version.py "${{ needs.version.outputs.version }}"
+      - run: pip install ./client pyinstaller
+      - name: PyInstaller
+        run: >
+          pyinstaller --noconfirm --windowed --name Kru
+          --collect-submodules kru_robot --collect-data kru_robot --collect-all onnxruntime client/windows/launcher.py
+      - name: Самоперевірка
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./dist/Kru.app/Contents/MacOS/Kru --selftest selftest/report.json
+      - name: Архів
+        run: ditto -c -k --keepParent dist/Kru.app "Kru-${{ needs.version.outputs.version }}-macos-arm64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: Kru-*.zip
+
+  release:
+    name: Реліз
+    if: github.ref_type == 'tag'
+    needs: [version, python, windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - run: ls -la assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## Що завантажити
+
+            | Система | Файл | Як запустити |
+            |---|---|---|
+            | Windows 10/11 | `Kru-${{ needs.version.outputs.version }}-windows-x64.zip` | розпакувати, запустити `Kru.exe` |
+            | Windows (через Python, оновлюється з кодом) | `Kru-…-windows-installer.zip` | розпакувати, запустити `client\windows\install_windows.cmd` |
+            | Linux (Fedora, Ubuntu, …) | `Kru-${{ needs.version.outputs.version }}-x86_64.AppImage` | `chmod +x Kru-*.AppImage && ./Kru-*.AppImage` |
+            | Linux (архів) | `Kru-…-linux-x86_64.tar.gz` | розпакувати, запустити `Kru/Kru` |
+            | macOS (Apple Silicon, експериментально) | `Kru-…-macos-arm64.zip` | розпакувати; перший запуск — правою кнопкою → «Відкрити» |
+            | Сервер агента | `kru_agent-….whl` | `pip install kru_agent-*.whl` (або `./update.sh` з репозиторію) |
+
+            Робот підключається до сервера Kru: при першому запуску вкажи адресу (`ws://…:8765/ws`) і токен.
