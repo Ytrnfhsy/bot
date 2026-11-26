@@ -856,6 +856,47 @@ def run_selftest(app: QApplication, report_path: str) -> int:
 
     check("wake_logic", wake_logic_check)
 
+    def hacker_theme_check():
+        """Хакерська тема: темна панель, код наживо в «терміналі» (шматками JSON, як від сервера), вивід
+        команди під ним; Кру чорний і «програмує»; назад до світлої — термінал зникає."""
+        import json as _json
+
+        theme = win.settings.theme
+        term = win.panel.terminal
+        try:
+            win.settings.theme = "hacker"
+            win.apply_theme()
+            need("#00FF66" in win.panel.styleSheet() and win.robot.hacker, "тема не застосувалась")
+            args = _json.dumps({"path": "app.py", "content": 'print("привіт")\nx = 1\n'}, ensure_ascii=False)
+            for i in range(0, len(args), 7):  # шматками по 7 символів — посеред слів і екранувань
+                win.on_event({"type": "tool_stream", "index": 0, "name": "write_file", "delta": args[i:i + 7]})
+            need(term.isVisibleTo(win.panel) and win.robot.coding, "термінал не показався")
+            need(term.plain() == '✎ app.py\nprint("привіт")\nx = 1\n', f"код у терміналі: {term.plain()!r}")
+            win.on_event({"type": "tool_result", "id": "1", "name": "write_file", "ok": True, "preview": "Записано",
+                          "output": "Записано 22 символів у app.py"})
+            win.on_event({"type": "status", "state": "thinking", "step": 2})  # наступний крок моделі
+            shell = _json.dumps({"command": "python app.py"})
+            win.on_event({"type": "tool_stream", "index": 0, "name": "run_shell", "delta": shell})
+            win.on_event({"type": "tool_call", "id": "2", "name": "run_shell", "args": {"command": "python app.py"},
+                          "summary": "python app.py"})  # уже показано шматками — вдруге не дописує
+            win.on_event({"type": "tool_result", "id": "2", "name": "run_shell", "ok": True, "preview": "привіт",
+                          "output": "привіт\n"})
+            need(term.plain().endswith("$ python app.py\n── вивід ──\nпривіт\n"), f"вивід: {term.plain()[-80:]!r}")
+            # без потоку шматками (Ollama, JSON-режим) — код показується цілим із самого виклику
+            win.on_event({"type": "status", "state": "thinking", "step": 3})
+            win.on_event({"type": "tool_call", "id": "3", "name": "run_python", "args": {"code": "print(2 + 2)"},
+                          "summary": "print(2 + 2)"})
+            need(term.plain().endswith("▶ python\nprint(2 + 2)\n"), f"цілий виклик: {term.plain()[-60:]!r}")
+            win.on_event({"type": "status", "state": "idle"})
+            need(not win.robot.coding, "Кру «програмує» й після кінця задачі")
+        finally:
+            win.settings.theme = theme
+            win.apply_theme()
+        need(not term.isVisibleTo(win.panel) and not win.robot.hacker, "світла тема лишила термінал/матрицю")
+        return "ok"
+
+    check("hacker_theme", hacker_theme_check)
+
     def vad_check():
         """Детектор голосу: модель із пакета вантажиться; гул, шум і клацання — не мова; запис закінчується,
         щойно стих голос, хоч фон і гучний."""

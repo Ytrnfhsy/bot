@@ -27,7 +27,10 @@ from .voice import Voice
 
 SANDBOX_TOOLS = frozenset({"run_shell", "run_python"})  # виконуються в пісочниці, якщо її увімкнено
 PLAN_NUDGE_STEPS = 5  # стільки кроків без оновлення плану — і модель отримує нагадування
-AUTO_FILE_TOOLS = frozenset({"write_file", "edit_file"})  # що можна дозволити без запиту (лише в робочій теці)
+AUTO_FILE_TOOLS = frozenset({"write_file", "edit_file"})
+# інструменти з кодом: їхні аргументи робот показує в «терміналі», поки модель їх пише, а вивід — після
+CODE_TOOLS = frozenset({"write_file", "edit_file", "run_python", "run_shell", "ssh_run"})
+CODE_OUTPUT_CHARS = 4000  # що можна дозволити без запиту (лише в робочій теці)
 from .skills import prompt_section as skills_prompt
 from .users import ADMIN_ONLY_TOOLS, OWNER, User, workspace_for
 
@@ -442,7 +445,7 @@ class Agent:
             ctx, denied_tools=ctx.denied_tools | SUBAGENT_DENIED, pending_images=[],
             plan_hook=None, plan_get=None, delegate_hook=None, progress=None,
         )
-        passthrough = {"tool_call", "tool_result", "confirm_request", "progress", "vision", "file"}
+        passthrough = {"tool_call", "tool_result", "tool_stream", "confirm_request", "progress", "vision", "file"}
 
         async def sub_emit(ev: dict[str, Any]) -> None:
             kind = ev.get("type")
@@ -826,6 +829,10 @@ class Agent:
                 first[0] = time.monotonic() - started
             if kind == "thinking":
                 await emit({"type": "thinking", "text": text})
+            elif kind == "tool":
+                piece = json.loads(text)
+                if piece.get("name") in CODE_TOOLS:
+                    await emit({"type": "tool_stream", **piece})
             elif self.native_tools:
                 await emit({"type": "token", "text": text})
 
@@ -913,7 +920,10 @@ class Agent:
             log.exception("Інструмент %s впав", name)
             output, ok = f"ПОМИЛКА ({type(e).__name__}): {e}", False
         output = truncate(output, self.config.max_tool_output_chars)
-        await emit({"type": "tool_result", "id": call_id, "name": name, "ok": ok, "preview": output[:500]})
+        result_ev = {"type": "tool_result", "id": call_id, "name": name, "ok": ok, "preview": output[:500]}
+        if name in CODE_TOOLS:
+            result_ev["output"] = output[:CODE_OUTPUT_CHARS]  # «термінал» робота показує вивід повніше
+        await emit(result_ev)
         return output
 
     def _apply_tz(self, ctx: ToolContext, tz: str | None) -> None:

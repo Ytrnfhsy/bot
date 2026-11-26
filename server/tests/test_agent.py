@@ -330,3 +330,28 @@ async def test_auto_think_after_tool_error(cfg):
     rec = Recorder()
     await agent.run("s", "запам'ятай x", rec.emit, rec.confirm)
     assert [c["think"] for c in llm.calls] == [False, True, False]
+
+
+async def test_code_tool_args_stream_live():
+    """Код, який модель пише в аргументах write_file, іде клієнту шматками (tool_stream) — робот показує його наживо."""
+    chunks = [
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "write_file", "arguments": '{"path": "a.py", '}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"content": "print(1)\\n"}'}}]}}]},
+    ]
+
+    def handler(request):
+        sse = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=sse)
+
+    c = OpenAICompatClient("http://x:8080", "qwen")
+    c._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    got = []
+
+    async def on_token(kind, text):
+        got.append((kind, json.loads(text) if kind == "tool" else text))
+
+    r = await c.chat([{"role": "user", "content": "q"}], tools=[{"type": "function"}], on_token=on_token)
+    assert r.tool_calls[0]["function"]["arguments"] == {"path": "a.py", "content": "print(1)\n"}
+    deltas = [g[1] for g in got if g[0] == "tool"]
+    assert [d["name"] for d in deltas] == ["write_file", "write_file"]
+    assert "".join(d["delta"] for d in deltas) == '{"path": "a.py", "content": "print(1)\\n"}'
