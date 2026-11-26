@@ -889,10 +889,26 @@ def run_selftest(app: QApplication, report_path: str) -> int:
             need(term.plain().endswith("▶ python\nprint(2 + 2)\n"), f"цілий виклик: {term.plain()[-60:]!r}")
             win.on_event({"type": "status", "state": "idle"})
             need(not win.robot.coding, "Кру «програмує» й після кінця задачі")
+            # «авто»: світлий, доки агент не почне програмувати; тоді — хакерський, після задачі — назад
+            win.settings.theme = "auto"
+            win._end_coding_look()
+            need(win.panel.theme == "light" and not win.robot.hacker, "авто без коду — не світла")
+            win.on_event({"type": "status", "state": "thinking", "step": 1})
+            win.on_event({"type": "tool_stream", "index": 0, "name": "run_python", "delta": '{"code": "print(1)'})
+            need(win.panel.theme == "hacker" and win.robot.hacker and win.robot.coding, "авто не потемніло на коді")
+            need(term.plain().endswith("▶ python\nprint(1)"), f"авто: код у терміналі: {term.plain()[-40:]!r}")
+            win.on_event({"type": "status", "state": "idle"})
+            need(win.panel.theme == "hacker" and win._coding_off.isActive(), "авто сховалось, не давши дочитати")
+            win._coding_off.stop()
+            win._end_coding_look()
+            need(win.panel.theme == "light" and not win.robot.hacker and not term.isVisibleTo(win.panel),
+                 "авто не повернулось до світлої")
         finally:
             win.settings.theme = theme
+            win._coding_off.stop()
+            win._coding_look = False
             win.apply_theme()
-        need(not term.isVisibleTo(win.panel) and not win.robot.hacker, "світла тема лишила термінал/матрицю")
+        need(not term.isVisibleTo(win.panel) and win.robot.hacker == (theme == "hacker"), "тему не відновлено")
         return "ok"
 
     check("hacker_theme", hacker_theme_check)
